@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Base theme for PhairPlay.
+        Extends the Leanback theme to ensure proper TV navigation behavior
+        (D-pad focus, TV launcher integration, etc.).
+    -->
+    <style name="Theme.PhairPlay" parent="@style/Theme.AppCompat.Leanback">
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="android:colorPrimary">@color/accent_blue</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+    </style>
+
+    <!--
+        Fullscreen theme used by MainActivity.
+        Hides the system status bar for an immersive full-screen experience.
+        Used when displaying the StreamingScreen.
+    -->
+    <style name="Theme.PhairPlay.Fullscreen" parent="Theme.PhairPlay">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

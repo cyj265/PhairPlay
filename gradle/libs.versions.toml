@@ -1,0 +1,55 @@
+# Version Catalog for PhairPlay
+# Centralizes all dependency versions so they are easy to update in one place.
+# Reference: https://docs.gradle.org/current/userguide/platforms.html
+
+[versions]
+# Build tools
+agp = "8.3.2"                          # Android Gradle Plugin
+kotlin = "1.9.23"                      # Kotlin compiler
+
+# AndroidX
+appcompat = "1.7.0"
+constraintlayout = "2.1.4"
+core-ktx = "1.13.1"
+
+# Kotlin Coroutines — for all async I/O (network, media)
+coroutines = "1.8.1"
+
+# Logging — Timber provides tagged, filterable logs
+timber = "5.0.1"
+
+# Cryptography — Bouncy Castle provides AES-128-CTR and SRP-6a
+# (Android's built-in javax.crypto lacks full SRP support)
+bouncycastle = "1.78.1"
+
+# Testing
+junit = "4.13.2"
+mockk = "1.13.10"
+androidx-test-ext = "1.1.5"
+espresso = "3.5.1"
+
+[libraries]
+# AndroidX
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
+
+# Kotlin Coroutines
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# Logging
+timber = { group = "com.jakewharton.timber", name = "timber", version.ref = "timber" }
+
+# Cryptography
+bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
+
+# Testing
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidx-test-ext" }
+espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

@@ -1,0 +1,69 @@
+# Android / Gradle build output
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+
+# Android Studio
+*.iws
+*.ipr
+out/
+
+# Gradle wrapper (keep gradlew, ignore downloaded files)
+gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# Signing configs and keystores — NEVER commit these
+*.jks
+*.keystore
+keystore.properties
+release.properties
+
+# Local configuration files
+local.defaults.properties
+
+# Generated files
+app/src/main/assets/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Test results
+test-results/
+lint-results/
+
+# Profiling
+*.hprof

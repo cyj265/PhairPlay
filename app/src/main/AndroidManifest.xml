@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AndroidManifest.xml for PhairPlay.
+
+    Permission philosophy: request ONLY what is strictly necessary.
+    See docs/spec/REQUIREMENTS.md §2.3 for the full permission rationale.
+
+    INTERNET           — required for local TCP/UDP socket operations (AirPlay is LAN-only)
+    CHANGE_WIFI_MULTICAST_STATE — required to join mDNS multicast groups
+    ACCESS_WIFI_STATE  — required to read the device's IP address and MAC address
+    ACCESS_NETWORK_STATE — required to detect network changes (reconnect logic)
+
+    Explicitly NOT requested:
+    - RECORD_AUDIO      (we receive audio, we do not record it)
+    - READ/WRITE storage (we don't persist anything)
+    - CAMERA            (not needed)
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network permissions — local LAN only, no internet required -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+        Declare this app as a TV app (leanback).
+        Required for the app to appear in the TV launcher.
+        uses-feature android.hardware.touchscreen is set to NOT required
+        because TV remotes are used, not touch screens.
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="true" />
+
+    <application
+        android:name=".PhairPlayApp"
+        android:allowBackup="false"
+        android:banner="@drawable/app_banner"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.PhairPlay"
+        android:supportsRtl="true">
+
+        <!--
+            MainActivity is the single entry point for the app.
+            It hosts both the WaitingScreen and StreamingScreen,
+            and starts/stops the AirPlayReceiver.
+
+            - launchMode="singleTop": prevents duplicate instances when
+              the user launches the app again while it's running
+            - screenOrientation="landscape": TV apps are always landscape
+            - configChanges: handle orientation/screen size changes ourselves
+              to avoid destroying the RTSP session on a config change
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.PhairPlay.Fullscreen">
+
+            <!-- Makes the app launchable from the TV home screen -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

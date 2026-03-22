@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Google TV flavor string overrides.
+    Only strings that differ from the main flavor need to be listed here.
+-->
+<resources>
+    <!-- Google TV users see this device label in the AirPlay picker -->
+    <string name="app_name">PhairPlay</string>
+</resources>

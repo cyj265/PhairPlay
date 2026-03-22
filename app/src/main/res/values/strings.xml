@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App name shown in the TV launcher and AirPlay picker -->
+    <string name="app_name">PhairPlay</string>
+
+    <!-- Waiting screen text -->
+    <string name="waiting_title">Ready for AirPlay</string>
+    <string name="waiting_subtitle">Open AirPlay on your Mac and select this device</string>
+    <string name="waiting_device_label">This device:</string>
+
+    <!-- Streaming screen text (minimal — the stream is full-screen) -->
+    <string name="streaming_hint">Press Back to stop AirPlay</string>
+
+    <!-- Error messages -->
+    <string name="error_network_unavailable">No Wi-Fi connection detected. Please connect to Wi-Fi.</string>
+    <string name="error_mdns_failed">Failed to advertise on the network. Check your Wi-Fi connection.</string>
+
+    <!-- Accessibility -->
+    <string name="content_desc_waiting_icon">PhairPlay logo, waiting for connection</string>
+</resources>

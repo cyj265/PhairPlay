@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    activity_main.xml — root layout for MainActivity.
+
+    Uses a FrameLayout as a container that hosts two child fragments/views:
+    - WaitingScreen  (shown when no AirPlay sender is connected)
+    - StreamingScreen (shown when video is being received)
+
+    Only one child is visible at a time. The switch is controlled by
+    MainActivity based on the AirPlayReceiver state.
+-->
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background_dark">
+
+    <!--
+        WaitingScreen container.
+        Visible when no AirPlay connection is active.
+        Hidden (GONE) when streaming starts.
+    -->
+    <FrameLayout
+        android:id="@+id/waiting_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="visible" />
+
+    <!--
+        StreamingScreen container.
+        Hidden (GONE) when idle.
+        Made visible and brought to front when AirPlay streaming starts.
+    -->
+    <FrameLayout
+        android:id="@+id/streaming_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+</FrameLayout>
