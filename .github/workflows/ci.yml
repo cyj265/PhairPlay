@@ -35,7 +35,7 @@ jobs:
       # Step 4: Build the Google TV debug APK
       # This verifies that the googletv flavor compiles without errors
       - name: Build Google TV (debug)
-        run: ./gradlew assembleGoogletvDebug
+        run: ./gradlew assembleGoogletvDebug --stacktrace 2>&1 | tee /tmp/build-googletv.txt; exit ${PIPESTATUS[0]}
 
       # Step 5: Build the Fire TV debug APK
       # This verifies that the firetv flavor compiles without errors
@@ -57,7 +57,16 @@ jobs:
           path: app/build/reports/tests/
           retention-days: 30
 
-      # Step 8: Upload APKs as artifacts (for manual testing on real devices)
+      # Step 8: Upload build output on failure (for debugging)
+      - name: Upload build output (on failure)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-output
+          path: /tmp/build-googletv.txt
+          retention-days: 7
+
+      # Step 9: Upload APKs as artifacts (for manual testing on real devices)
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         if: success()
