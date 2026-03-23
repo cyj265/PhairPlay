@@ -5,14 +5,19 @@
     Permission philosophy: request ONLY what is strictly necessary.
     See docs/spec/REQUIREMENTS.md §2.3 for the full permission rationale.
 
-    INTERNET           — required for local TCP/UDP socket operations (AirPlay is LAN-only)
+    INTERNET                    — required for local TCP/UDP socket operations (AirPlay is LAN-only)
     CHANGE_WIFI_MULTICAST_STATE — required to join mDNS multicast groups
-    ACCESS_WIFI_STATE  — required to read the device's IP address and MAC address
-    ACCESS_NETWORK_STATE — required to detect network changes (reconnect logic)
+    ACCESS_WIFI_STATE           — required to read the device's IP address and MAC address
+    ACCESS_NETWORK_STATE        — required to detect network changes (reconnect logic)
+    FOREGROUND_SERVICE          — required for persistent background receiver service (Android 9+)
+    FOREGROUND_SERVICE_CONNECTED_DEVICE — required for connectedDevice foreground service type (Android 14+)
+    CHANGE_WIFI_STATE           — required by WifiP2pManager for Miracast Wi-Fi Direct
+    ACCESS_FINE_LOCATION        — required by Wi-Fi P2P / Miracast discovery on Android 10+
+    RECEIVE_BOOT_COMPLETED      — required for "start on boot" feature
 
     Explicitly NOT requested:
     - RECORD_AUDIO      (we receive audio, we do not record it)
-    - READ/WRITE storage (we don't persist anything)
+    - READ/WRITE storage (we don't persist stream data)
     - CAMERA            (not needed)
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -22,6 +27,17 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground service — keeps receiver alive when app is in background -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Miracast (Wi-Fi Direct / Wi-Fi P2P) -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- Start on boot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!--
         Declare this app as a TV app (leanback).
@@ -70,6 +86,33 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            PhairPlayService — persistent foreground service that manages
+            AirPlay, Miracast, and Cast receivers.
+
+            - foregroundServiceType="connectedDevice": required for Android 14+
+              when a foreground service manages a connected device (BT/Wi-Fi/P2P)
+            - exported="false": only started from within this app via ServiceController
+            - START_STICKY: service restarts automatically if killed by the system
+        -->
+        <service
+            android:name=".service.PhairPlayService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+
+        <!--
+            BootReceiver — listens for BOOT_COMPLETED and starts PhairPlayService
+            if the "Start on boot" setting is enabled.
+            exported="false" because it is only triggered by the system broadcast.
+        -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

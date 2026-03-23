@@ -11,9 +11,13 @@ kotlin = "1.9.23"                      # Kotlin compiler
 appcompat = "1.7.0"
 constraintlayout = "2.1.4"
 core-ktx = "1.13.1"
+leanback = "1.2.0"                     # TV navigation, focus management, on-screen keyboard
 
 # Kotlin Coroutines — for all async I/O (network, media)
 coroutines = "1.8.1"
+
+# DataStore — typed key-value persistence replacing SharedPreferences
+datastore = "1.1.1"
 
 # Logging — Timber provides tagged, filterable logs
 timber = "5.0.1"
@@ -33,6 +37,10 @@ espresso = "3.5.1"
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
+androidx-leanback = { group = "androidx.leanback", name = "leanback", version.ref = "leanback" }
+
+# DataStore — async, type-safe settings persistence
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 
 # Kotlin Coroutines
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }

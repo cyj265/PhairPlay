@@ -116,6 +116,12 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
 
+    // Leanback — TV focus management, on-screen keyboard, TV-specific widgets
+    implementation(libs.androidx.leanback)
+
+    // DataStore — async, type-safe replacement for SharedPreferences
+    implementation(libs.androidx.datastore.preferences)
+
     // Async I/O — all network and media operations use coroutines
     implementation(libs.kotlinx.coroutines.android)
 

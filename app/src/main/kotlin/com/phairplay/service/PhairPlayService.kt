@@ -1,0 +1,302 @@
+package com.phairplay.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import com.phairplay.MainActivity
+import com.phairplay.R
+import com.phairplay.airplay.AirPlayReceiver
+import com.phairplay.airplay.AirPlayState
+import com.phairplay.cast.CastReceiver
+import com.phairplay.miracast.MiracastReceiver
+import com.phairplay.settings.AppSettings
+import com.phairplay.settings.SettingsRepository
+import com.phairplay.util.Logger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+/**
+ * PhairPlayService — Android ForegroundService that hosts all receiver protocols.
+ *
+ * WHY: The AirPlay/Miracast/Cast receivers need to run continuously in the background.
+ * Android may kill background processes. A ForegroundService with a persistent
+ * notification keeps the app alive and shows the user that PhairPlay is active.
+ *
+ * HOW: Bind to this service from [MainActivity] to receive state updates.
+ * Use [ServiceController] to send start/stop/restart commands.
+ *
+ * Service lifecycle:
+ *   startForegroundService() → onCreate() → onStartCommand() → [running in background]
+ *   stopSelf() / stopService() → onDestroy() → all receivers stopped
+ *
+ * Commands via Intent actions (sent by [ServiceController]):
+ *   ACTION_START   — starts all enabled receivers
+ *   ACTION_STOP    — stops all receivers and stops the service
+ *   ACTION_RESTART — stops then starts all receivers (service keeps running)
+ */
+class PhairPlayService : Service() {
+
+    // Binder for Activity binding (returns this service directly)
+    private val binder = LocalBinder()
+
+    // Coroutine scope — cancelled in onDestroy() to clean up all coroutines
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+
+    // Observable state — Activities and Fragments observe this via the binder
+    private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
+    val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()
+
+    private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
+    val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
+
+    private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
+    val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
+
+    private val _castState = MutableStateFlow(ProtocolState.DISABLED)
+    val castState: StateFlow<ProtocolState> = _castState.asStateFlow()
+
+    private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
+    val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
+
+    // Receiver instances — null when not running
+    private var airPlayReceiver: AirPlayReceiver? = null
+    private var miracastReceiver: MiracastReceiver? = null
+    private var castReceiver: CastReceiver? = null
+
+    // Settings — read once when starting, re-read on restart
+    private lateinit var settingsRepository: SettingsRepository
+
+    // ─── Service Lifecycle ───────────────────────────────────────────────────
+
+    override fun onCreate() {
+        super.onCreate()
+        Logger.i("PhairPlayService created")
+        settingsRepository = SettingsRepository(applicationContext)
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Promote to foreground immediately with a persistent notification
+        startForeground(NOTIFICATION_ID, buildNotification(isRunning = false))
+
+        when (intent?.action) {
+            ACTION_START   -> serviceScope.launch { startReceivers() }
+            ACTION_STOP    -> serviceScope.launch { stopReceivers(); stopSelf() }
+            ACTION_RESTART -> serviceScope.launch { restartReceivers() }
+            else           -> serviceScope.launch { startReceivers() } // default: start
+        }
+
+        // START_STICKY: if the system kills the service, restart it with a null intent
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onDestroy() {
+        Logger.i("PhairPlayService destroying")
+        stopAllReceiversInternal()
+        serviceJob.cancel()
+        super.onDestroy()
+    }
+
+    // ─── Service Control ─────────────────────────────────────────────────────
+
+    /**
+     * Starts all receivers that are enabled in Settings.
+     *
+     * Reads current settings, then starts AirPlay, Miracast, and/or Cast
+     * receivers according to the enabled flags.
+     */
+    private suspend fun startReceivers() {
+        val settings = settingsRepository.settingsFlow.first()
+        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}")
+
+        _serviceState.value = ServiceState.Running
+        updateNotification(isRunning = true)
+
+        if (settings.airPlayEnabled)   startAirPlay()
+        if (settings.miracastEnabled)  startMiracast()
+        if (settings.castEnabled)      startCast()
+    }
+
+    /**
+     * Stops all active receivers and updates the service state to Stopped.
+     * Does NOT call stopSelf() — use [ACTION_STOP] for that.
+     */
+    private fun stopReceivers() {
+        Logger.i("Stopping all receivers")
+        stopAllReceiversInternal()
+        _serviceState.value = ServiceState.Stopped
+        _activeConnection.value = null
+        updateNotification(isRunning = false)
+    }
+
+    /**
+     * Restarts all receivers: stops them, waits briefly, then starts them again.
+     * Used for applying settings changes or recovering from errors.
+     */
+    private suspend fun restartReceivers() {
+        Logger.i("Restarting all receivers")
+        _serviceState.value = ServiceState.Restarting
+        updateNotification(isRunning = false)
+        stopAllReceiversInternal()
+        kotlinx.coroutines.delay(500) // brief pause to ensure ports are released
+        startReceivers()
+    }
+
+    // ─── Individual Protocol Starters ────────────────────────────────────────
+
+    private fun startAirPlay() {
+        _airPlayState.value = ProtocolState.ADVERTISING
+        airPlayReceiver = AirPlayReceiver(
+            context = applicationContext,
+            videoSurfaceProvider = { null }, // surface is only available when streaming
+            onStateChanged = { state ->
+                when (state) {
+                    AirPlayState.WAITING   -> {
+                        _airPlayState.value = ProtocolState.ADVERTISING
+                        _activeConnection.value = null
+                    }
+                    AirPlayState.STREAMING -> {
+                        _airPlayState.value = ProtocolState.CONNECTED
+                        _activeConnection.value = ActiveConnection("AirPlay Sender", Protocol.AIRPLAY)
+                    }
+                }
+            }
+        ).also { it.start() }
+        Logger.d("AirPlay receiver started")
+    }
+
+    private fun startMiracast() {
+        _miracastState.value = ProtocolState.ADVERTISING
+        miracastReceiver = MiracastReceiver(
+            context = applicationContext,
+            onStateChanged = { state -> _miracastState.value = state }
+        ).also { it.start() }
+        Logger.d("Miracast receiver started")
+    }
+
+    private fun startCast() {
+        _castState.value = ProtocolState.ADVERTISING
+        castReceiver = CastReceiver(
+            context = applicationContext,
+            onStateChanged = { state -> _castState.value = state }
+        ).also { it.start() }
+        Logger.d("Cast receiver started")
+    }
+
+    private fun stopAllReceiversInternal() {
+        try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
+        try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }
+        try { castReceiver?.stop() } catch (e: Exception) { Logger.e("Cast stop error", e) }
+        airPlayReceiver = null
+        miracastReceiver = null
+        castReceiver = null
+        _airPlayState.value = ProtocolState.DISABLED
+        _miracastState.value = ProtocolState.DISABLED
+        _castState.value = ProtocolState.DISABLED
+    }
+
+    // ─── Notification ────────────────────────────────────────────────────────
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_LOW  // LOW: no sound, minimal visual interruption
+            ).apply {
+                description = getString(R.string.notification_channel_description)
+            }
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    /**
+     * Builds the persistent notification for the ForegroundService.
+     *
+     * The notification shows the service status and provides quick actions
+     * so users can Stop or Restart without opening the app.
+     *
+     * @param isRunning True if receivers are active; false if stopped/restarting.
+     */
+    private fun buildNotification(isRunning: Boolean): Notification {
+        // Tapping the notification opens the app
+        val openAppIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // "Stop" action — sends ACTION_STOP to this service
+        val stopIntent = PendingIntent.getService(
+            this, 1,
+            Intent(this, PhairPlayService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // "Restart" action — sends ACTION_RESTART to this service
+        val restartIntent = PendingIntent.getService(
+            this, 2,
+            Intent(this, PhairPlayService::class.java).apply { action = ACTION_RESTART },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val statusText = if (isRunning) R.string.notification_status_running
+                         else           R.string.notification_status_stopped
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(getString(statusText))
+            .setContentIntent(openAppIntent)
+            .setOngoing(true)                   // Prevents user from swiping away
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(R.drawable.ic_stop,    getString(R.string.action_stop),    stopIntent)
+            .addAction(R.drawable.ic_restart, getString(R.string.action_restart), restartIntent)
+            .build()
+    }
+
+    private fun updateNotification(isRunning: Boolean) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification(isRunning))
+    }
+
+    // ─── Binder ─────────────────────────────────────────────────────────────
+
+    /**
+     * LocalBinder — Provides direct access to [PhairPlayService] for bound Activities.
+     *
+     * WHY: Binding (rather than just starting) the service gives the Activity a
+     * direct reference, so it can observe the service's StateFlows without
+     * using broadcasts or a shared ViewModel.
+     */
+    inner class LocalBinder : Binder() {
+        fun getService(): PhairPlayService = this@PhairPlayService
+    }
+
+    companion object {
+        const val CHANNEL_ID      = "phairplay_service_channel"
+        const val NOTIFICATION_ID = 1001
+        const val ACTION_START    = "com.phairplay.action.START"
+        const val ACTION_STOP     = "com.phairplay.action.STOP"
+        const val ACTION_RESTART  = "com.phairplay.action.RESTART"
+    }
+}

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    strings.xml — Français (fr)
+
+    Traduction partielle — contributions bienvenues !
+    Seules les chaînes les plus importantes sont traduites pour l'instant.
+    Les chaînes manquantes utilisent automatiquement la version anglaise.
+-->
+<resources>
+
+    <!-- ── Navigation ──────────────────────────────────────────── -->
+    <string name="nav_home">Accueil</string>
+    <string name="nav_settings">Paramètres</string>
+
+    <!-- ── HomeFragment ────────────────────────────────────────── -->
+    <string name="home_title">Prêt pour les connexions</string>
+    <string name="home_device_visible_as">Visible sous le nom : %1$s</string>
+
+    <!-- ── Protocol states ─────────────────────────────────────── -->
+    <string name="protocol_state_disabled">Désactivé</string>
+    <string name="protocol_state_advertising">En attente…</string>
+    <string name="protocol_state_connected">Connecté</string>
+    <string name="protocol_state_error">Erreur</string>
+
+    <!-- ── Control buttons ─────────────────────────────────────── -->
+    <string name="action_start">Démarrer</string>
+    <string name="action_stop">Arrêter</string>
+    <string name="action_restart">Redémarrer</string>
+
+    <!-- ── Settings section headers ────────────────────────────── -->
+    <string name="settings_section_display">Affichage</string>
+    <string name="settings_section_protocols">Protocoles</string>
+    <string name="settings_section_service">Service</string>
+    <string name="settings_section_about">À propos</string>
+
+    <!-- ── Settings row labels ─────────────────────────────────── -->
+    <string name="setting_display_name">Nom de l\'appareil</string>
+    <string name="setting_airplay_enabled">Récepteur AirPlay</string>
+    <string name="setting_miracast_enabled">Récepteur Miracast</string>
+    <string name="setting_cast_enabled">Récepteur Google Cast</string>
+    <string name="setting_reset_defaults">Réinitialiser les paramètres</string>
+
+</resources>

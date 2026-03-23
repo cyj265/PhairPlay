@@ -3,149 +3,162 @@ package com.phairplay
 import android.os.Bundle
 import android.view.View
 import android.widget.FrameLayout
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.phairplay.airplay.AirPlayReceiver
-import com.phairplay.airplay.AirPlayState
+import androidx.fragment.app.Fragment
+import com.phairplay.service.ServiceController
+import com.phairplay.ui.HomeFragment
+import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
-import com.phairplay.ui.WaitingScreen
 import timber.log.Timber
 
 /**
- * MainActivity — The single Activity that hosts the entire PhairPlay UI.
+ * MainActivity — The single Activity hosting PhairPlay's navigation and fragments.
  *
- * WHY: PhairPlay has exactly two visual states (waiting / streaming), so a
- * single Activity with two swappable screens is the simplest architecture.
- * Using multiple Activities would require passing the MediaCodec Surface across
- * Activity transitions, which is complex and error-prone.
+ * WHY: PhairPlay uses a single-Activity architecture with Fragment-based navigation.
+ * This is the recommended pattern for Android TV apps: one Activity with swappable
+ * Fragments avoids the overhead of Activity transitions and keeps the Leanback
+ * launcher integration simple.
  *
- * HOW: Create an instance of [AirPlayReceiver] and observe its state.
- * Show [WaitingScreen] when idle, show [StreamingScreen] when streaming.
+ * Layout structure:
+ *   ┌─ Nav Panel ──┬─ Content (FrameLayout) ─────────────────┐
+ *   │  Home        │  HomeFragment  OR  SettingsFragment      │
+ *   │  Settings    │                                          │
+ *   └──────────────┴──────────────────────────────────────────┘
+ *   [streaming_container] — full-screen overlay (GONE when idle)
  *
- * Example lifecycle:
- *   App starts → onCreate() → AirPlayReceiver starts → WaitingScreen shown
- *   macOS connects → AirPlayReceiver.state = STREAMING → StreamingScreen shown
- *   macOS disconnects → AirPlayReceiver.state = WAITING → WaitingScreen shown
- *   User presses Back → onDestroy() → AirPlayReceiver stops
+ * HOW: D-pad left/right navigation between nav panel and content area.
+ * The nav panel items switch fragments. PhairPlayService is started on app launch.
  */
 class MainActivity : AppCompatActivity() {
 
-    // The top-level orchestrator that manages mDNS, RTSP, video, and audio
-    private lateinit var airPlayReceiver: AirPlayReceiver
-
-    // UI containers from activity_main.xml
-    private lateinit var waitingContainer: FrameLayout
+    // UI references
+    private lateinit var navItemHome: TextView
+    private lateinit var navItemSettings: TextView
+    private lateinit var contentContainer: FrameLayout
     private lateinit var streamingContainer: FrameLayout
 
-    // Screen fragments/views — created once, swapped in/out of containers
-    private lateinit var waitingScreen: WaitingScreen
+    // The SurfaceView for full-screen video output
     private lateinit var streamingScreen: StreamingScreen
+
+    // Currently selected nav item index (0 = Home, 1 = Settings)
+    private var selectedNavIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         Timber.d("MainActivity created")
-
         bindViews()
-        createScreens()
-        createAirPlayReceiver()
-        startReceiver()
+        setupStreamingScreen()
+        setupNavigation()
+
+        // Show HomeFragment on first launch
+        if (savedInstanceState == null) {
+            navigateTo(HomeFragment(), navItemHome)
+        }
+
+        // Start the service immediately so it's running before any sender discovers us
+        ServiceController.start(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // RULE 5: All resources must be released in onDestroy() to prevent memory leaks.
-        // Stopping the receiver closes all sockets, releases MediaCodec, releases AudioTrack.
-        Timber.d("MainActivity destroyed — stopping AirPlayReceiver")
-        airPlayReceiver.stop()
+        // Note: we do NOT stop the service here. The service runs independently of the
+        // Activity lifecycle. Users stop it via the notification or the Stop button.
+        Timber.d("MainActivity destroyed")
     }
 
-    /**
-     * Finds and stores references to the View containers defined in activity_main.xml.
-     * Called once from onCreate().
-     */
+    // ─── View Setup ──────────────────────────────────────────────────────────
+
     private fun bindViews() {
-        waitingContainer = findViewById(R.id.waiting_container)
+        navItemHome       = findViewById(R.id.nav_item_home)
+        navItemSettings   = findViewById(R.id.nav_item_settings)
+        contentContainer  = findViewById(R.id.content_container)
         streamingContainer = findViewById(R.id.streaming_container)
     }
 
     /**
-     * Creates the WaitingScreen and StreamingScreen instances and adds them
-     * to their respective containers. Both are created eagerly so that the
-     * StreamingScreen's SurfaceView can begin its lifecycle before streaming starts.
-     *
-     * WHY eager creation: MediaCodec needs an active Surface *before* the first
-     * video frame arrives. Pre-creating the StreamingScreen ensures the Surface is
-     * ready when the RTSP RECORD command is received.
+     * Creates the StreamingScreen (SurfaceView for video) and adds it to the
+     * streaming_container. Created eagerly so the Surface is ready before streaming starts.
      */
-    private fun createScreens() {
-        waitingScreen = WaitingScreen(this)
-        waitingContainer.addView(waitingScreen)
-
+    private fun setupStreamingScreen() {
         streamingScreen = StreamingScreen(this)
         streamingContainer.addView(streamingScreen)
     }
 
     /**
-     * Initializes the AirPlayReceiver and sets up the state change callback.
-     *
-     * The Surface from StreamingScreen may not be ready immediately (it is created
-     * asynchronously by SurfaceView). We pass a lazy Surface provider lambda so
-     * AirPlayReceiver can retrieve it when the RTSP RECORD is received (by which
-     * time the Surface is guaranteed to be ready after the initial layout pass).
-     *
-     * The callback runs on the Main thread (guaranteed by AirPlayReceiver's
-     * internal coroutine dispatcher switch) so it is safe to update the UI directly.
+     * Sets up click listeners for the navigation panel items.
+     * Also updates the visual selected state (text color) of the active item.
      */
-    private fun createAirPlayReceiver() {
-        airPlayReceiver = AirPlayReceiver(
-            context = this,
-            videoSurfaceProvider = { streamingScreen.getSurface() },
-            onStateChanged = { state -> handleStateChange(state) }
+    private fun setupNavigation() {
+        navItemHome.setOnClickListener {
+            if (selectedNavIndex != 0) {
+                navigateTo(HomeFragment(), navItemHome)
+            }
+        }
+        navItemSettings.setOnClickListener {
+            if (selectedNavIndex != 1) {
+                navigateTo(SettingsFragment(), navItemSettings)
+            }
+        }
+
+        // Set initial selected state
+        setNavSelected(navItemHome, true)
+        setNavSelected(navItemSettings, false)
+    }
+
+    /**
+     * Replaces the content_container fragment with [fragment] and updates
+     * the nav panel selection highlight.
+     *
+     * @param fragment  The Fragment to show in the content area.
+     * @param navItem   The nav panel TextView that was clicked (for highlight update).
+     */
+    private fun navigateTo(fragment: Fragment, navItem: TextView) {
+        // Update nav highlight
+        setNavSelected(navItemHome, navItem == navItemHome)
+        setNavSelected(navItemSettings, navItem == navItemSettings)
+        selectedNavIndex = if (navItem == navItemHome) 0 else 1
+
+        // Replace fragment
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.content_container, fragment)
+            .commit()
+    }
+
+    /**
+     * Updates the nav panel item's visual state.
+     *
+     * @param item     The nav item TextView.
+     * @param selected True if this item is currently active.
+     */
+    private fun setNavSelected(item: TextView, selected: Boolean) {
+        item.isSelected = selected
+        item.setTextColor(
+            getColor(if (selected) R.color.text_primary else R.color.nav_item_normal)
         )
     }
 
     /**
-     * Starts the AirPlayReceiver — begins mDNS advertising and opens the RTSP port.
-     * Called from onCreate(). The receiver continues running until onDestroy().
+     * Shows the full-screen streaming overlay (called by PhairPlayService
+     * via a state update or broadcast when a stream becomes active).
+     *
+     * Hides the nav panel and content area to give the stream the full screen.
      */
-    private fun startReceiver() {
-        airPlayReceiver.start()
+    fun showStreamingScreen() {
+        streamingContainer.visibility = View.VISIBLE
+        streamingContainer.bringToFront()
     }
 
     /**
-     * Handles state transitions from the AirPlayReceiver.
-     *
-     * [AirPlayState.WAITING] → Show the WaitingScreen, hide StreamingScreen.
-     * [AirPlayState.STREAMING] → Show the StreamingScreen, hide WaitingScreen.
-     *
-     * This method is always called on the Main thread (safe to update UI).
-     *
-     * @param state The new state from AirPlayReceiver.
+     * Hides the streaming overlay and returns to the normal app UI.
+     * Called when a stream ends.
      */
-    private fun handleStateChange(state: AirPlayState) {
-        Timber.d("State changed to: $state")
-        when (state) {
-            AirPlayState.WAITING -> showWaitingScreen()
-            AirPlayState.STREAMING -> showStreamingScreen()
-        }
-    }
-
-    /**
-     * Makes the WaitingScreen visible and hides the StreamingScreen.
-     * Uses GONE (not INVISIBLE) so the hidden view takes no layout space.
-     */
-    private fun showWaitingScreen() {
-        waitingContainer.visibility = View.VISIBLE
+    fun hideStreamingScreen() {
         streamingContainer.visibility = View.GONE
     }
 
-    /**
-     * Makes the StreamingScreen visible and hides the WaitingScreen.
-     * Uses GONE (not INVISIBLE) so the hidden view takes no layout space.
-     */
-    private fun showStreamingScreen() {
-        streamingContainer.visibility = View.VISIBLE
-        waitingContainer.visibility = View.GONE
-    }
+    /** Returns the SurfaceView Surface for the VideoDecoder. */
+    fun getVideoSurface() = streamingScreen.getSurface()
 }

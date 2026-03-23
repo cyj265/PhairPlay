@@ -1,0 +1,227 @@
+package com.phairplay.ui
+
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.Switch
+import android.widget.TextView
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import com.phairplay.BuildConfig
+import com.phairplay.R
+import com.phairplay.settings.AppSettings
+import com.phairplay.settings.SettingsRepository
+import com.phairplay.util.Logger
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+/**
+ * SettingsFragment — Settings screen for PhairPlay.
+ *
+ * WHY: Centralizes all user-configurable options in one screen. By separating
+ * settings into their own Fragment, we keep MainActivity lean and make it easy
+ * to navigate to/from settings via the nav panel.
+ *
+ * HOW: Reads current settings from [SettingsRepository] and populates the UI.
+ * Each toggle/row saves immediately when changed (no "Save" button needed).
+ * Settings changes take effect on the next service restart.
+ *
+ * Navigation: accessed via the "Settings" item in MainActivity's nav panel.
+ */
+class SettingsFragment : Fragment() {
+
+    private lateinit var settingsRepository: SettingsRepository
+
+    // Section header TextViews — set via include layout tag IDs
+    private lateinit var headerDisplay: TextView
+    private lateinit var headerProtocols: TextView
+    private lateinit var headerAirPlay: TextView
+    private lateinit var headerService: TextView
+    private lateinit var headerDeveloper: TextView
+    private lateinit var headerAbout: TextView
+
+    // Settings rows
+    private lateinit var rowDisplayName: LinearLayout
+    private lateinit var textDisplayNameValue: TextView
+    private lateinit var rowAirPlay: View
+    private lateinit var rowMiracast: View
+    private lateinit var rowCast: View
+    private lateinit var rowAirPlayPin: View
+    private lateinit var rowStartOnBoot: View
+    private lateinit var rowDebugOverlay: View
+    private lateinit var textVersionValue: TextView
+    private lateinit var rowReset: LinearLayout
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
+        inflater.inflate(R.layout.fragment_settings, container, false)
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        settingsRepository = SettingsRepository(requireContext())
+        bindViews(view)
+        setSectionTitles()
+        setRowLabels()
+        loadAndPopulate()
+    }
+
+    // ─── View Binding ────────────────────────────────────────────────────────
+
+    private fun bindViews(view: View) {
+        headerDisplay   = view.findViewById<View>(R.id.header_display).findViewById(R.id.text_section_title)
+        headerProtocols = view.findViewById<View>(R.id.header_protocols).findViewById(R.id.text_section_title)
+        headerAirPlay   = view.findViewById<View>(R.id.header_airplay).findViewById(R.id.text_section_title)
+        headerService   = view.findViewById<View>(R.id.header_service).findViewById(R.id.text_section_title)
+        headerDeveloper = view.findViewById<View>(R.id.header_developer).findViewById(R.id.text_section_title)
+        headerAbout     = view.findViewById<View>(R.id.header_about).findViewById(R.id.text_section_title)
+
+        rowDisplayName      = view.findViewById(R.id.row_display_name)
+        textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
+        rowAirPlay          = view.findViewById(R.id.row_airplay)
+        rowMiracast         = view.findViewById(R.id.row_miracast)
+        rowCast             = view.findViewById(R.id.row_cast)
+        rowAirPlayPin       = view.findViewById(R.id.row_airplay_pin)
+        rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
+        rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
+        textVersionValue    = view.findViewById(R.id.text_version_value)
+        rowReset            = view.findViewById(R.id.row_reset)
+    }
+
+    /** Sets all section header titles from string resources. */
+    private fun setSectionTitles() {
+        headerDisplay.setText(R.string.settings_section_display)
+        headerProtocols.setText(R.string.settings_section_protocols)
+        headerAirPlay.setText(R.string.settings_section_airplay)
+        headerService.setText(R.string.settings_section_service)
+        headerDeveloper.setText(R.string.settings_section_developer)
+        headerAbout.setText(R.string.settings_section_about)
+    }
+
+    /** Sets all row labels and subtitles from string resources. */
+    private fun setRowLabels() {
+        configureToggleRow(rowAirPlay,      R.string.setting_airplay_enabled,    R.string.setting_airplay_subtitle)
+        configureToggleRow(rowMiracast,     R.string.setting_miracast_enabled,   R.string.setting_miracast_subtitle)
+        configureToggleRow(rowCast,         R.string.setting_cast_enabled,       R.string.setting_cast_subtitle)
+        configureToggleRow(rowAirPlayPin,   R.string.setting_airplay_pin,        R.string.setting_airplay_pin_subtitle)
+        configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
+        configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
+
+        textVersionValue.text = BuildConfig.VERSION_NAME
+    }
+
+    /**
+     * Sets the label and optional subtitle on a toggle row view.
+     *
+     * @param row       The row view (from settings_toggle_row.xml)
+     * @param labelRes  String resource for the main label
+     * @param subtitleRes String resource for the subtitle, or 0 to hide it
+     */
+    private fun configureToggleRow(row: View, labelRes: Int, subtitleRes: Int) {
+        row.findViewById<TextView>(R.id.text_setting_label)?.setText(labelRes)
+        val subtitle = row.findViewById<TextView>(R.id.text_setting_subtitle)
+        if (subtitleRes != 0) {
+            subtitle?.setText(subtitleRes)
+            subtitle?.visibility = View.VISIBLE
+        } else {
+            subtitle?.visibility = View.GONE
+        }
+    }
+
+    // ─── Settings Load & Save ────────────────────────────────────────────────
+
+    /**
+     * Loads the current settings and populates the UI.
+     * Then sets up click/toggle listeners for each row.
+     */
+    private fun loadAndPopulate() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val settings = settingsRepository.settingsFlow.first()
+            populateUI(settings)
+            setupListeners(settings)
+        }
+    }
+
+    /** Populates all UI elements with values from [settings]. */
+    private fun populateUI(settings: AppSettings) {
+        textDisplayNameValue.text = settings.effectiveDisplayName.ifEmpty {
+            getString(R.string.setting_display_name_placeholder)
+        }
+        setToggle(rowAirPlay,      settings.airPlayEnabled)
+        setToggle(rowMiracast,     settings.miracastEnabled)
+        setToggle(rowCast,         settings.castEnabled)
+        setToggle(rowAirPlayPin,   settings.airPlayPinAuthEnabled)
+        setToggle(rowStartOnBoot,  settings.startOnBoot)
+        setToggle(rowDebugOverlay, settings.showDebugOverlay)
+    }
+
+    private fun setToggle(row: View, value: Boolean) {
+        row.findViewById<Switch>(R.id.switch_setting)?.isChecked = value
+    }
+
+    /**
+     * Sets up click and toggle listeners for all settings rows.
+     * Each listener immediately persists the change via [SettingsRepository.update].
+     *
+     * No "Save" button is needed — settings are saved on every interaction.
+     * A restart prompt is shown after protocol-affecting changes.
+     */
+    private fun setupListeners(initialSettings: AppSettings) {
+        rowDisplayName.setOnClickListener { showDisplayNameDialog() }
+
+        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
+        setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
+        setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
+        setToggleListener(rowAirPlayPin)   { enabled -> save { it.copy(airPlayPinAuthEnabled = enabled) } }
+        setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
+        setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
+
+        rowReset.setOnClickListener { resetSettings() }
+    }
+
+    private fun setToggleListener(row: View, onChanged: (Boolean) -> Unit) {
+        // The whole row is clickable (better TV UX than just the Switch widget)
+        row.setOnClickListener {
+            val switch = row.findViewById<Switch>(R.id.switch_setting) ?: return@setOnClickListener
+            val newValue = !switch.isChecked
+            switch.isChecked = newValue
+            onChanged(newValue)
+        }
+    }
+
+    /**
+     * Saves an updated [AppSettings] via the repository.
+     * Runs in a coroutine so it doesn't block the UI thread.
+     *
+     * @param transform A function that takes the current settings and returns updated settings.
+     */
+    private fun save(transform: (AppSettings) -> AppSettings) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            settingsRepository.update(transform)
+            Logger.d("Settings saved")
+        }
+    }
+
+    /**
+     * Shows a dialog allowing the user to edit the display name.
+     * TODO Phase 1: implement an AlertDialog with an EditText on TV.
+     */
+    private fun showDisplayNameDialog() {
+        // TODO: Show an AlertDialog with an EditText
+        // TV-friendly pattern: use a dialog fragment with large text input
+        Logger.d("Display name edit — TODO")
+    }
+
+    /**
+     * Resets all settings to defaults and repopulates the UI.
+     * TODO: Add a confirmation dialog before resetting.
+     */
+    private fun resetSettings() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            settingsRepository.resetToDefaults()
+            val defaults = AppSettings.DEFAULT
+            populateUI(defaults)
+            Logger.i("Settings reset to defaults")
+        }
+    }
+}

@@ -1,272 +1,226 @@
 # PhairPlay – Project Plan
 
-Version: 1.0
+Version: 2.0
 Status: Draft
-Date: 2026-03-22
+Date: 2026-03-23
 
 ---
 
-## Development Philosophy
-
-1. **Spec before code.** No production code is written before Phase 0 is complete and reviewed.
-2. **Milestones are gates.** The next phase only starts when the current phase's Definition of Done is fully met.
-3. **Tests are not optional.** Every phase includes writing tests, not just at the end.
-4. **Each commit should leave the codebase in a working state.** No "WIP" commits on the main branch.
-5. **Small, focused changes.** Each pull request addresses one milestone or sub-task.
-
----
-
-## Phase Overview
+## Phase Order
 
 ```
-Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6 ──► Phase 7 ──► Phase 8
- Spec       Skeleton    Discovery   Handshake    Video       Audio      Stability   Fire TV     Release
-  M0          M1          M2          M3          M4          M5          M6          M7          M8
+Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7 → Phase 8 → Phase 9 → Phase 10
+ Spec     Skeleton  AirPlay   AirPlay   AirPlay   Miracast    Cast     Stability  Fire TV   i18n    Release
+          + UI       mDNS     Handshk    Video+    Receiver  Receiver             Port      Polish
+                    +Service  +RTSP     Audio
+  M0        M1       M2        M3        M4+M5      M6         M7        M8         M9       M10     M11
 ```
 
 ---
 
-## Phase 0 – Specification
+## Phase 0 – Specification ✅
 
 **Milestone:** M0
+**Status:** Complete
 
-**Goal:** Establish a clear, shared understanding of what PhairPlay is and how it will be built. All technical decisions are made at this stage, not during coding.
-
-**Tasks:**
-- [x] Write `docs/spec/REQUIREMENTS.md`
-- [x] Write `docs/spec/TECHNICAL_SPEC.md`
-- [x] Write `docs/spec/ACCEPTANCE_CRITERIA.md`
-- [x] Write `docs/spec/PROJECT_PLAN.md`
-- [ ] Review and approve all 4 documents
-- [ ] Set up repository structure (README, LICENSE, .gitignore, Gradle files)
-- [ ] Set up GitHub Actions CI/CD pipeline
-
-**Definition of Done:**
-- All 4 spec documents are committed to the repository.
-- Repository structure is in place.
-- CI pipeline runs and is green (even if there's nothing to build yet).
-
-**Acceptance Criteria:** AC-0.1 through AC-0.5 (see ACCEPTANCE_CRITERIA.md)
+**Definition of Done:** All spec documents committed, reviewed, and updated for v2.0 scope.
 
 ---
 
-## Phase 1 – App Skeleton
+## Phase 1 – Skeleton + Service Architecture + UI
 
 **Milestone:** M1
 
-**Goal:** A buildable Android app that starts without crashing on both target platforms and shows a basic Waiting Screen.
+**Goal:** App starts on both platforms. Google TV-style HomeScreen. ForegroundService running. Settings screen accessible. All three service status cards visible.
 
 **Tasks:**
-- [ ] `MainActivity.kt` — lifecycle management, connect to `AirPlayReceiver`
-- [ ] `AirPlayReceiver.kt` — stub with start/stop lifecycle methods
-- [ ] `WaitingScreen.kt` — UI showing device name and instructions
-- [ ] `StreamingScreen.kt` — placeholder for future video surface
-- [ ] `AndroidManifest.xml` — permissions, activity declarations
-- [ ] `strings.xml` — device name reading, UI strings
-- [ ] `activity_main.xml` — layout switching between screens
-- [ ] Flavor overrides: `googletv/` and `firetv/` res directories
-- [ ] Unit tests for each new public method
+- [ ] `HomeFragment.kt` — Google TV Streamer-style home screen with 3 service cards
+- [ ] `SettingsFragment.kt` — settings screen with toggles and text inputs
+- [ ] `ServiceStatusCard.kt` — reusable card component showing protocol status
+- [ ] `PhairPlayService.kt` — ForegroundService with start/stop/restart
+- [ ] `ServiceController.kt` — start/stop/restart API
+- [ ] `AppSettings.kt` — settings data model
+- [ ] `SettingsRepository.kt` — DataStore persistence
+- [ ] Persistent notification with Stop/Restart actions
+- [ ] `res/values/strings.xml` (EN), `res/values-de/strings.xml` (DE)
+- [ ] Unit tests for all new public methods
 
 **Definition of Done:**
-- `./gradlew assembleDebug` exits with code 0 for both flavors.
-- App launches on Google TV and Fire TV without crashing.
-- WaitingScreen shows the correct device name.
-- All unit tests pass.
+- App starts on both platforms without crash
+- HomeScreen shows 3 service cards (AirPlay / Miracast / Cast) with status
+- Settings screen opens and saves settings
+- ForegroundService persists in background
+- Notification visible with Stop/Restart buttons
+- DE strings visible when device language is German
 
-**Acceptance Criteria:** AC-1.1 through AC-1.8
+**Acceptance Criteria:** AC-1.x
 
 ---
 
-## Phase 2 – Network Visibility (mDNS)
+## Phase 2 – mDNS + Network Visibility
 
 **Milestone:** M2
 
-**Goal:** macOS AirPlay picker discovers PhairPlay within 3 seconds.
+**Goal:** All enabled services advertise on the network. macOS sees AirPlay. Windows sees Miracast. Chrome sees Cast.
 
 **Tasks:**
-- [ ] `MdnsService.kt` — NsdManager-based mDNS service registration
-  - Register `_airplay._tcp` with correct TXT records
-  - Register `_raop._tcp` with correct TXT records
-  - Handle registration failures and retry
-  - Unregister on stop
-- [ ] `NetworkUtils.kt` — read device MAC address and IP address
-- [ ] Connect `MdnsService` to `AirPlayReceiver` lifecycle
-- [ ] `MdnsServiceTest.kt` — unit tests for TXT record content, service types
-- [ ] `NetworkUtilsTest.kt` — unit tests for IP/MAC reading
+- [ ] `MdnsService.kt` — AirPlay mDNS advertisement (complete implementation)
+- [ ] `WifiDirectManager.kt` — Wi-Fi P2P manager for Miracast discovery
+- [ ] `CastAdvertiser.kt` — Cast receiver advertisement stub
+- [ ] `NetworkUtils.kt` — complete implementation (IP, MAC, UUID)
+- [ ] Settings: device name applied to all advertisers
 
 **Definition of Done:**
-- macOS AirPlay picker shows the device name within 3 seconds.
-- Device disappears from picker within 10 seconds of app close.
-- All unit tests pass.
-
-**Acceptance Criteria:** AC-2.1 through AC-2.7
+- macOS sees PhairPlay within 3s (AC-2.1)
+- Device name from Settings is shown in picker
+- WifiP2p service registered (Miracast P2P)
+- Service cards update when advertising starts/stops
 
 ---
 
-## Phase 3 – RTSP Handshake
+## Phase 3 – AirPlay Handshake (RTSP)
 
 **Milestone:** M3
 
-**Goal:** Full RTSP session establishment (OPTIONS → SETUP → ANNOUNCE → RECORD → TEARDOWN).
+**Goal:** Full AirPlay RTSP session establishment end-to-end.
 
 **Tasks:**
-- [ ] `RtspHandler.kt` — RTSP server on TCP port 7000
-  - Accept incoming connections
-  - Parse RTSP request lines, headers, and body
-  - Route to method handlers: OPTIONS, SETUP, ANNOUNCE, RECORD, TEARDOWN, GET_PARAMETER, SET_PARAMETER
-  - Parse SDP body from ANNOUNCE
-  - Extract video/audio codec info and encryption keys from SDP
-  - Build and send correct RTSP responses
-  - Handle connection close and cleanup
-- [ ] Input validation for all RTSP fields (max size, format checks)
-- [ ] `RtspHandlerTest.kt` — unit tests for all RTSP methods, SDP parsing, malformed input
-- [ ] Integration: `AirPlayReceiver` starts `RtspHandler` alongside `MdnsService`
+- [ ] `RtspHandler.kt` — full RTSP implementation (all methods, SDP parsing)
+- [ ] SDP parser — extract H.264 params, AAC keys, port numbers
+- [ ] Input validation — all fields, max sizes, format checks
+- [ ] Unit tests: all RTSP methods, SDP edge cases, malformed input
 
-**Definition of Done:**
-- Full RTSP handshake completes from macOS without errors.
-- All RTSP unit tests pass including security/edge-case tests.
-- SDP parsing correctly extracts codec and key information.
-
-**Acceptance Criteria:** AC-3.1 through AC-3.8
+**Definition of Done:** AC-3.x — full handshake from macOS without RTSP errors.
 
 ---
 
-## Phase 4 – Video Decoding & Display
+## Phase 4 – AirPlay Video
 
 **Milestone:** M4
 
-**Goal:** macOS Screen Mirroring video decoded and displayed at ≥25fps, ≤100ms latency.
-
 **Tasks:**
-- [ ] `VideoDecoder.kt` — MediaCodec-based H.264 decoder
-  - Configure MediaCodec with SPS/PPS from SDP
-  - Create decoder surface (linked to `StreamingScreen`)
-  - Accept NAL units, queue to MediaCodec input buffers
-  - Handle codec lifecycle (start, stop, release)
-- [ ] `StreamingScreen.kt` — SurfaceView for video output
-  - Create Surface and pass to VideoDecoder
-  - Handle aspect ratio (letterbox)
-- [ ] RTP video packet parsing in `RtspHandler` (de-interleave from RTSP TCP stream)
-- [ ] `MainActivity` — switch to `StreamingScreen` when stream starts, back to `WaitingScreen` when it ends
-- [ ] `VideoDecoderTest.kt` — unit tests for MediaCodec init, NAL unit extraction
+- [ ] `VideoDecoder.kt` — full MediaCodec H.264 implementation
+- [ ] RTP video packet demuxing from RTSP TCP stream
+- [ ] `StreamingScreen.kt` — full SurfaceView integration
+- [ ] Aspect ratio / letterbox
 
-**Definition of Done:**
-- Video displays full-screen on Google TV.
-- Frame rate ≥ 25fps, latency ≤ 100ms measured.
-- Hardware decoder confirmed via `dumpsys`.
-- All unit tests pass.
-
-**Acceptance Criteria:** AC-4.1 through AC-4.9
+**Definition of Done:** AC-4.x — ≥25fps, ≤100ms latency on Google TV.
 
 ---
 
-## Phase 5 – Audio Decoding & Playback
+## Phase 5 – AirPlay Audio
 
 **Milestone:** M5
 
-**Goal:** Audio plays in sync with video (≤40ms drift). No dropouts or crackling.
-
 **Tasks:**
-- [ ] `AudioPlayer.kt` — audio decryption and playback
-  - AES-128-CTR decryption using Bouncy Castle
-  - Parse RTP audio packets (UDP socket)
-  - Feed raw AAC-ELD or ALAC frames to AudioTrack
-  - NTP-based presentation timestamp handling for A/V sync
-- [ ] RTP audio packet receiving (UDP) in `RtspHandler`
-- [ ] Timing channel (UDP) for NTP sync
-- [ ] `AudioPlayerTest.kt` — unit tests for decryption, frame extraction, sync logic
+- [ ] `AudioPlayer.kt` — full AES-128-CTR decrypt + AudioTrack
+- [ ] RTP audio UDP socket
+- [ ] NTP timing sync
 
-**Definition of Done:**
-- Audio plays in sync with video (≤40ms drift).
-- No dropouts or crackling during 5-minute test.
-- All audio unit tests pass.
-
-**Acceptance Criteria:** AC-5.1 through AC-5.7
+**Definition of Done:** AC-5.x — A/V sync ≤40ms.
 
 ---
 
-## Phase 6 – Stability & Reconnect
+## Phase 6 – Miracast Receiver
 
 **Milestone:** M6
 
-**Goal:** 30-minute stable streaming. Automatic reconnect after disruption.
+**Goal:** Miracast screen mirroring from Windows 10+ and Android.
 
 **Tasks:**
-- [ ] Reconnect logic in `AirPlayReceiver`
-  - Detect disconnection (TEARDOWN or socket close)
-  - Restart mDNS advertising within 5 seconds
-  - Clean up all resources (MediaCodec, AudioTrack, sockets)
-- [ ] Memory leak audit: verify all resources released in `onDestroy`
-- [ ] 30-minute automated stability test (manual + logcat monitoring)
-- [ ] `AirPlayReceiverTest.kt` — unit tests for reconnect state machine
+- [ ] `WifiDirectManager.kt` — full Wi-Fi P2P (peer discovery, connection accept)
+- [ ] `MiracastSession.kt` — WFD RTSP negotiation
+- [ ] `MiracastDecoder.kt` — H.264 video decode (reuses VideoDecoder)
+- [ ] `MiracastAudio.kt` — audio decode for WFD audio
+- [ ] Miracast status card updates in HomeScreen
 
-**Definition of Done:**
-- 30-minute continuous stream passes without crash or disconnect.
-- RAM stays ≤ 150 MB, CPU stays ≤ 30% throughout.
-- Reconnect works after Wi-Fi toggle and after sender disconnect.
-
-**Acceptance Criteria:** AC-6.1 through AC-6.7
+**Definition of Done:** AC-6.x — Windows 10 screen mirroring works end-to-end.
 
 ---
 
-## Phase 7 – Fire TV Validation
+## Phase 7 – Google Cast Receiver
 
 **Milestone:** M7
 
-**Goal:** All milestones M1–M6 also pass on Fire TV.
+**Goal:** Google Cast screen mirroring from Chrome and Android.
 
 **Tasks:**
-- [ ] Test all features on Fire TV hardware (Fire TV Stick 4K + Fire TV Stick 3rd gen)
-- [ ] Fix any Fire TV-specific issues (API level 25 compatibility, Fire OS quirks)
-- [ ] Verify `firetv` flavor uses no API > level 25 without runtime checks
-- [ ] Performance profiling on Fire TV (may have weaker SoC than Google TV)
+- [ ] Register Cast application on Google Cast Developer Console
+- [ ] `CastReceiverManager.kt` — Cast SDK integration
+- [ ] Handle Cast media playback
+- [ ] Graceful fallback on Fire TV (no Google Play Services)
 
-**Definition of Done:**
-- All AC-7.x criteria pass on Fire TV hardware.
-
-**Acceptance Criteria:** AC-7.1 through AC-7.7
+**Definition of Done:** AC-7.x — Cast from Chrome works on Google TV.
 
 ---
 
-## Phase 8 – Release
+## Phase 8 – Stability
 
 **Milestone:** M8
 
-**Goal:** Public v1.0 release with clean code, full docs, green CI, and APKs for both platforms.
-
 **Tasks:**
-- [ ] Complete `docs/ARCHITECTURE.md`
-- [ ] Complete `docs/CONTRIBUTING.md`
-- [ ] Complete `docs/TESTING.md`
-- [ ] Finalize `README.md` with sideloading instructions
-- [ ] Write `CHANGELOG.md` v1.0.0 entry
-- [ ] Run full test suite and fix any remaining failures
-- [ ] Build signed release APKs for both flavors
-- [ ] Create GitHub Release with both APKs attached
-- [ ] Tag `v1.0.0` in git
+- [ ] 30-minute continuous stream tests for all 3 protocols
+- [ ] Auto-reconnect for all protocols
+- [ ] Memory leak audit
+- [ ] `start on boot` BroadcastReceiver
 
-**Definition of Done:**
-- All AC-8.x criteria pass.
-- GitHub Release exists with both signed APKs.
-- All CI workflows are green on the release tag.
-
-**Acceptance Criteria:** AC-8.1 through AC-8.10
+**Definition of Done:** AC-8.x — 30min stable, reconnect working.
 
 ---
 
-## Milestone Summary Table
+## Phase 9 – Fire TV Port
 
-| Milestone | Phase | Key Deliverable | Key Acceptance Criterion |
+**Milestone:** M9
+
+**Tasks:**
+- [ ] Test all phases on Fire TV hardware
+- [ ] Fix API level 25 issues
+- [ ] Cast graceful fallback (no GMS)
+- [ ] Fire TV flavor specific adjustments
+
+---
+
+## Phase 10 – i18n Polish
+
+**Milestone:** M10
+
+**Tasks:**
+- [ ] Complete all string resources in EN and DE
+- [ ] Add FR strings (community contribution ready)
+- [ ] RTL support baseline (for future AR/HE)
+- [ ] Locale-aware date/time/number formatting
+
+---
+
+## Phase 11 – Release
+
+**Milestone:** M11
+
+**Tasks:**
+- [ ] All tests green, CI green
+- [ ] Signed release APKs for both flavors
+- [ ] GitHub Release with both APKs
+- [ ] Full documentation review
+- [ ] CHANGELOG v1.0.0
+
+---
+
+## Milestone Summary
+
+| # | Phase | Key Deliverable | Primary AC |
 |---|---|---|---|
-| M0 | 0 – Spec | 4 spec documents | All docs present and committed |
-| M1 | 1 – Skeleton | Buildable app | Starts without crash on both platforms |
-| M2 | 2 – Discovery | mDNS working | macOS sees device within 3s |
-| M3 | 3 – Handshake | RTSP session | Handshake completes without errors |
-| M4 | 4 – Video | H.264 streaming | ≥25fps, ≤100ms latency on Google TV |
-| M5 | 5 – Audio | Audio streaming | A/V sync ≤40ms on Google TV |
-| M6 | 6 – Stability | Reconnect + 30min test | 30min stable, reconnect working |
-| M7 | 7 – Fire TV | Fire TV tested | All M1–M6 also pass on Fire TV |
-| M8 | 8 – Release | v1.0 release | APKs built, CI green, docs complete |
+| M0 | Spec | 4 spec docs | AC-0.x |
+| M1 | Skeleton | Service + UI scaffold | AC-1.x |
+| M2 | Discovery | All 3 protocols advertising | AC-2.x |
+| M3 | AirPlay Handshake | RTSP session | AC-3.x |
+| M4 | AirPlay Video | H.264 ≥25fps | AC-4.x |
+| M5 | AirPlay Audio | A/V sync ≤40ms | AC-5.x |
+| M6 | Miracast | Windows screen mirror | AC-6.x |
+| M7 | Cast | Chrome screen mirror | AC-7.x |
+| M8 | Stability | 30min tests all protocols | AC-8.x |
+| M9 | Fire TV | Fire TV all protocols | AC-9.x |
+| M10 | i18n | EN+DE complete | AC-10.x |
+| M11 | Release | Signed APKs, CI green | AC-11.x |
 
 ---
 
@@ -274,9 +228,9 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| AirPlay 2 protocol has undocumented behaviors | High | High | Reference UxPlay and RPiPlay open-source implementations |
-| Hardware H.264 decoder not available on some Fire TV devices | Medium | High | Test on actual hardware early; implement graceful fallback message |
-| mDNS multicast blocked by router (AP isolation) | Medium | Medium | Document this in README; user must enable multicast on router |
-| Audio/video sync more complex than expected | Medium | Medium | Implement NTP sync from day one; don't retrofit |
-| API level 25 (Fire TV) lacks features needed | Low | Medium | Check Android API docs before using any API > 24; runtime checks |
-| Open-source AirPlay implementations have legal uncertainty | Low | High | Use only for reference (protocol understanding); write all code from scratch |
+| AirPlay undocumented behavior | High | High | Reference UxPlay/RPiPlay |
+| Miracast requires hidden Android APIs on some devices | High | High | Use WifiP2pManager + custom WFD; test early on real hardware |
+| Cast not available on Fire TV (no GMS) | Certain | Medium | Graceful fallback; disable Cast toggle on Fire TV flavor |
+| Wi-Fi P2P conflicts with existing AP connection | Medium | High | Test multi-connected scenarios early |
+| Google Cast SDK license terms | Low | High | Review carefully before distribution |
+| Open-source AirPlay implementations: legal risk | Low | High | Reference only for protocol understanding; write code from scratch |
