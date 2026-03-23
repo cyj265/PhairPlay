@@ -34,6 +34,10 @@ jobs:
         with:
           packages: 'platforms;android-34 build-tools;34.0.0'
 
+      # Write local.properties (AGP requires sdk.dir to locate the Android SDK)
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
       # Run Android Lint — checks for correctness, security, and performance issues.
       # The lint configuration in app/build.gradle.kts controls what is reported.
       # See: https://developer.android.com/studio/write/lint

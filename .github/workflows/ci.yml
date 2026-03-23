@@ -38,7 +38,11 @@ jobs:
         with:
           packages: 'platforms;android-34 build-tools;34.0.0'
 
-      # Step 5: Build the Google TV debug APK
+      # Step 5: Write local.properties (AGP requires sdk.dir to locate the Android SDK)
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      # Step 6: Build the Google TV debug APK
       # This verifies that the googletv flavor compiles without errors
       - name: Build Google TV (debug)
         run: |
@@ -51,17 +55,17 @@ jobs:
           fi
           exit $BUILD_EXIT
 
-      # Step 6: Build the Fire TV debug APK
+      # Step 7: Build the Fire TV debug APK
       # This verifies that the firetv flavor compiles without errors
       - name: Build Fire TV (debug)
         run: ./gradlew assembleFiretvDebug
 
-      # Step 7: Run unit tests for both flavors
+      # Step 8: Run unit tests for both flavors
       # Unit tests run on the build machine (no Android device needed)
       - name: Run unit tests
         run: ./gradlew test
 
-      # Step 8: Upload build reports as artifacts (includes error output and test results)
+      # Step 9: Upload build reports as artifacts (includes error output and test results)
       - name: Upload build reports
         uses: actions/upload-artifact@v4
         if: always()
@@ -71,7 +75,7 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      # Step 9: Upload APKs as artifacts (for manual testing on real devices)
+      # Step 10: Upload APKs as artifacts (for manual testing on real devices)
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         if: success()
