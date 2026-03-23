@@ -309,7 +309,15 @@ data class SessionDescription(
     val channels: Int = 2,
     val aesKey: ByteArray? = null,
     val aesIv: ByteArray? = null,
-    val alacFramesPerPacket: Int = 352
+    val alacFramesPerPacket: Int = 352,
+    /**
+     * The sender's identifier extracted from the RTSP ANNOUNCE `User-Agent` header.
+     *
+     * Example: `User-Agent: AirPlay/376.1.1` → senderName = `"AirPlay"`
+     * Populated by [com.phairplay.airplay.RtspHandler] after ANNOUNCE is received.
+     * Empty string if the header was absent or could not be parsed.
+     */
+    val senderName: String = ""
 ) {
     /** True if encryption keys are present and both key+IV have the correct AES-128 length. */
     val isAudioEncrypted: Boolean

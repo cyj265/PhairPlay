@@ -34,7 +34,22 @@ import com.phairplay.util.NetworkUtils
  */
 class MdnsService(
     private val context: Context,
-    private val onStateChange: (ProtocolState) -> Unit = {}
+    private val onStateChange: (ProtocolState) -> Unit = {},
+    /**
+     * Called with the actual mDNS service name after registration completes.
+     *
+     * Android's NsdManager resolves name collisions automatically: if another device
+     * on the network is already registered as "PhairPlay", Android will register us as
+     * "PhairPlay (2)" instead. The [onActualNameRegistered] callback delivers the name
+     * that was actually registered (which may differ from the requested name).
+     *
+     * The caller can use this to update the UI (e.g., show "Registered as: PhairPlay (2)")
+     * or log the divergence for debugging.
+     *
+     * Only the `_airplay._tcp` service name is reported (not the `_raop._tcp` name,
+     * which has a MAC address prefix and is not shown to users).
+     */
+    private val onActualNameRegistered: (String) -> Unit = {}
 ) {
 
     // Android's built-in mDNS manager — handles multicast registration
@@ -53,6 +68,11 @@ class MdnsService(
     // Guard against double-start
     @Volatile
     private var isStarted = false
+
+    // The name we requested to register — compared against the actual registered name
+    // in onServiceRegistered to detect mDNS collision auto-renaming.
+    @Volatile
+    private var requestedName: String = ""
 
     /**
      * Starts mDNS advertising.
@@ -75,6 +95,7 @@ class MdnsService(
 
         val effectiveName = resolveDisplayName(displayNameOverride)
         Logger.i("Starting mDNS advertising as '$effectiveName'")
+        requestedName = effectiveName
 
         registerAirPlayService(effectiveName)
         registerRaopService(effectiveName)
@@ -156,6 +177,14 @@ class MdnsService(
 
         airPlayListener = createRegistrationListener(
             serviceLabel = "_airplay._tcp",
+            onRegisteredName = { actualName ->
+                // Detect collision auto-renaming: NsdManager appended " (2)", " (3)", etc.
+                if (actualName != requestedName) {
+                    Logger.w("mDNS name collision detected: requested='$requestedName' " +
+                             "actual='$actualName' — NsdManager resolved automatically")
+                }
+                onActualNameRegistered(actualName)
+            },
             onSuccess = { incrementAndCheckBothRegistered() },
             onFailure = { onStateChange(ProtocolState.ERROR) }
         )
@@ -195,6 +224,7 @@ class MdnsService(
 
         raopListener = createRegistrationListener(
             serviceLabel = "_raop._tcp",
+            onRegisteredName = null,  // RAOP name has MAC prefix — not shown to users
             onSuccess = { incrementAndCheckBothRegistered() },
             onFailure = { onStateChange(ProtocolState.ERROR) }
         )
@@ -217,12 +247,15 @@ class MdnsService(
     /**
      * Creates an [NsdManager.RegistrationListener] with logging and callbacks.
      *
-     * @param serviceLabel  Human-readable service type for log messages.
-     * @param onSuccess     Called on [onServiceRegistered].
-     * @param onFailure     Called on [onRegistrationFailed].
+     * @param serviceLabel     Human-readable service type for log messages.
+     * @param onRegisteredName Called with the actual registered service name (may differ from
+     *   requested due to collision resolution). Pass null if the name is not user-visible.
+     * @param onSuccess        Called on [onServiceRegistered].
+     * @param onFailure        Called on [onRegistrationFailed].
      */
     private fun createRegistrationListener(
         serviceLabel: String,
+        onRegisteredName: ((String) -> Unit)?,
         onSuccess: () -> Unit,
         onFailure: () -> Unit
     ): NsdManager.RegistrationListener {
@@ -232,6 +265,7 @@ class MdnsService(
                 // NsdManager may append " (2)" to resolve name conflicts.
                 // Log the actual name so we can debug picker-visibility issues.
                 Logger.i("mDNS registered: $serviceLabel as '${serviceInfo.serviceName}'")
+                onRegisteredName?.invoke(serviceInfo.serviceName)
                 onSuccess()
             }
 

@@ -48,7 +48,25 @@ class AirPlayReceiver(
     private val displayName: String = "",
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
-    private val onStateChanged: (ProtocolState) -> Unit
+    private val onStateChanged: (ProtocolState) -> Unit,
+    /**
+     * Called with the sender name when a streaming session starts (RECORD received).
+     *
+     * The name is extracted from the RTSP `User-Agent` header. The caller
+     * ([PhairPlayService]) uses this to update the [ActiveConnection] and notification
+     * text with the real sender identifier instead of the generic "AirPlay Sender".
+     *
+     * Guaranteed to be called BEFORE [onStateChanged] is called with [ProtocolState.CONNECTED].
+     */
+    private val onSenderNameChanged: (String) -> Unit = {},
+    /**
+     * Called with the actual mDNS-registered name after [start].
+     *
+     * The name may differ from [displayName] if another device on the network already uses
+     * the same name — NsdManager resolves the collision by appending " (2)", " (3)", etc.
+     * The UI can use this callback to show the user the real registered name.
+     */
+    private val onActualNameRegistered: (String) -> Unit = {}
 ) {
 
     // SupervisorJob: child coroutine failures don't propagate to siblings.
@@ -118,9 +136,11 @@ class AirPlayReceiver(
     }
 
     private fun startMdnsService() {
-        mdnsService = MdnsService(context, onStateChange = { state ->
-            emitState(state)
-        }).also { it.start(displayName.ifBlank { null }) }
+        mdnsService = MdnsService(
+            context = context,
+            onStateChange = { state -> emitState(state) },
+            onActualNameRegistered = { actualName -> onActualNameRegistered(actualName) }
+        ).also { it.start(displayName.ifBlank { null }) }
         Logger.d("mDNS service started")
     }
 
@@ -151,6 +171,9 @@ class AirPlayReceiver(
             try {
                 if (session.hasVideo) startVideoDecoder(session)
                 if (session.hasAudio) startAudioPlayer(session)
+                // Notify PhairPlayService of the sender name BEFORE emitting CONNECTED,
+                // so the name is ready when the ActiveConnection is created.
+                onSenderNameChanged(session.senderName)
                 emitState(ProtocolState.CONNECTED)
             } catch (e: Exception) {
                 Logger.e("Failed to start media pipeline", e)
@@ -217,15 +240,18 @@ class AirPlayReceiver(
     /**
      * Initializes [AudioPlayer] with codec and encryption params from [SessionDescription].
      *
-     * If no AES key/IV is present (unencrypted stream), zero arrays are used —
-     * [AudioPlayer] treats a zero key as pass-through (no effective decryption).
+     * When the SDP contains no AES key/IV (unencrypted or missing keys), null is passed —
+     * [AudioPlayer.initialize] skips cipher setup entirely and writes audio payload directly.
+     * This prevents a zero-key cipher from producing garbage audio (S6-4 fix).
      */
     private fun startAudioPlayer(session: SessionDescription) {
-        val key = session.aesKey ?: ByteArray(16)
-        val iv  = session.aesIv  ?: ByteArray(16)
-
         audioPlayer = AudioPlayer().also { player ->
-            player.initialize(key, iv, session.sampleRate, session.channels)
+            player.initialize(
+                aesKey     = session.aesKey.takeIf { session.isAudioEncrypted },
+                aesIv      = session.aesIv.takeIf  { session.isAudioEncrypted },
+                sampleRate = session.sampleRate,
+                channels   = session.channels
+            )
         }
         Logger.i("AudioPlayer started (${session.sampleRate}Hz × ${session.channels}ch, " +
                  "codec=${session.audioCodec}, encrypted=${session.isAudioEncrypted})")

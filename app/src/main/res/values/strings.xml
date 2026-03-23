@@ -58,6 +58,8 @@
     <string name="notification_channel_description">Persistent notification for the AirPlay/Miracast/Cast receiver service</string>
     <string name="notification_status_running">Receiver active — advertising on network</string>
     <string name="notification_status_stopped">Receiver stopped</string>
+    <!-- %1$s = sender device name -->
+    <string name="notification_status_streaming">Streaming from %1$s</string>
 
     <!-- ── Settings section headers ────────────────────────────── -->
     <string name="settings_section_display">Display</string>
@@ -70,6 +72,10 @@
     <!-- ── Settings row labels ─────────────────────────────────── -->
     <string name="setting_display_name">Device Name</string>
     <string name="setting_display_name_placeholder">Using system device name</string>
+    <string name="setting_display_name_dialog_hint">Leave blank to use system device name</string>
+    <string name="setting_display_name_reset">Reset to default</string>
+    <!-- %1$s = the actual mDNS-registered name (may differ from entered name on collision) -->
+    <string name="setting_display_name_collision_note">Registered as: %1$s</string>
     <string name="setting_airplay_enabled">AirPlay Receiver</string>
     <string name="setting_airplay_subtitle">Accept connections from macOS</string>
     <string name="setting_miracast_enabled">Miracast Receiver</string>

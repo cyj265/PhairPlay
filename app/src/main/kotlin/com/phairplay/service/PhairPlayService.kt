@@ -196,20 +196,34 @@ class PhairPlayService : Service() {
      * @param settings Current app settings; read once per start/restart cycle.
      */
     private fun startAirPlay(settings: AppSettings) {
+        // Captures the sender name reported by AirPlayReceiver before CONNECTED fires.
+        // Volatile because onSenderNameChanged runs on IO dispatcher, onStateChanged on Main.
+        @Volatile var pendingSenderName = "AirPlay Sender"
+
         airPlayReceiver = AirPlayReceiver(
             context = applicationContext,
             displayName = settings.effectiveDisplayName,
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            onSenderNameChanged = { name ->
+                pendingSenderName = name.ifEmpty { "AirPlay Sender" }
+            },
             onStateChanged = { state ->
                 _airPlayState.value = state
                 when (state) {
-                    ProtocolState.CONNECTED   -> _activeConnection.value =
-                        ActiveConnection("AirPlay Sender", Protocol.AIRPLAY)
+                    ProtocolState.CONNECTED   -> {
+                        _activeConnection.value =
+                            ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
+                        updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
+                    }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
-                    ProtocolState.ERROR       -> _activeConnection.value = null
+                    ProtocolState.ERROR       -> {
+                        _activeConnection.value = null
+                        updateNotification(isRunning = state != ProtocolState.DISABLED &&
+                                                       state != ProtocolState.ERROR)
+                    }
                 }
             }
         ).also { it.start() }
@@ -268,9 +282,15 @@ class PhairPlayService : Service() {
      * The notification shows the service status and provides quick actions
      * so users can Stop or Restart without opening the app.
      *
-     * @param isRunning True if receivers are active; false if stopped/restarting.
+     * @param isRunning            True if receivers are active; false if stopped/restarting.
+     * @param notificationContentText Override for the notification body text.
+     *   When null, the default running/stopped status string is used.
+     *   Pass the sender name here (e.g. "Streaming from MacBook Pro") when connected.
      */
-    private fun buildNotification(isRunning: Boolean): Notification {
+    private fun buildNotification(
+        isRunning: Boolean,
+        notificationContentText: String? = null
+    ): Notification {
         // Tapping the notification opens the app
         val openAppIntent = PendingIntent.getActivity(
             this, 0,
@@ -298,7 +318,7 @@ class PhairPlayService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(statusText))
+            .setContentText(notificationContentText ?: getString(statusText))
             .setContentIntent(openAppIntent)
             .setOngoing(true)                   // Prevents user from swiping away
             .setCategory(Notification.CATEGORY_SERVICE)
@@ -307,9 +327,12 @@ class PhairPlayService : Service() {
             .build()
     }
 
-    private fun updateNotification(isRunning: Boolean) {
+    private fun updateNotification(isRunning: Boolean, streamingSenderName: String? = null) {
+        val contentText = streamingSenderName?.let {
+            getString(R.string.notification_status_streaming, it)
+        }
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification(isRunning))
+        manager.notify(NOTIFICATION_ID, buildNotification(isRunning, contentText))
     }
 
     // ─── Binder ─────────────────────────────────────────────────────────────

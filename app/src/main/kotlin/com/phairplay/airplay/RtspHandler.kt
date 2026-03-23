@@ -343,19 +343,30 @@ class RtspHandler(
      */
     internal open fun handleAnnounceInternal(request: RtspRequest): RtspResponse {
         Logger.d("ANNOUNCE body (${request.body.length} bytes)")
-        currentSession = SdpParser.parse(request.body)
+        val parsed = SdpParser.parse(request.body)
 
-        if (currentSession == null) {
+        if (parsed == null) {
             Logger.e("ANNOUNCE: SDP parsing returned no usable session — rejecting")
             return RtspResponse(statusCode = 400, statusMessage = "Bad Request")
         }
 
+        currentSession = parsed.copy(senderName = extractSenderName(request.headers["User-Agent"]))
         val s = currentSession!!
         Logger.i("Session: hasVideo=${s.hasVideo} hasAudio=${s.hasAudio} " +
-                 "audioCodec=${s.audioCodec} encrypted=${s.isAudioEncrypted}")
+                 "codec=${s.audioCodec} encrypted=${s.isAudioEncrypted} sender='${s.senderName}'")
 
         setupCount = 0
         return RtspResponse(statusCode = 200, statusMessage = "OK")
+    }
+
+    /**
+     * Extracts a readable sender name from the RTSP `User-Agent` header (S6-1).
+     * "AirPlay/376.1.1" → "AirPlay", "iTunes/12.12" → "iTunes", absent → fallback.
+     */
+    private fun extractSenderName(userAgent: String?): String {
+        if (userAgent.isNullOrBlank()) return DEFAULT_SENDER_NAME
+        val name = userAgent.substringBefore("/").trim()
+        return name.ifEmpty { DEFAULT_SENDER_NAME }
     }
 
     /**
@@ -527,6 +538,9 @@ class RtspHandler(
          * We keep a separate const here to avoid a circular compile-time dependency.
          */
         private const val AUDIO_RTP_PORT = 6001
+
+        /** Fallback sender name when User-Agent header is absent or unparseable. */
+        private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
     }
 }
 

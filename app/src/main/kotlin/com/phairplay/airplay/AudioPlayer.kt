@@ -44,33 +44,37 @@ class AudioPlayer {
      * Initializes the AudioPlayer with the stream parameters from the SDP.
      *
      * AES key and IV come from the SDP body in the RTSP ANNOUNCE message.
-     * Sample rate and channels also come from the SDP.
+     * When the SDP does not include encryption keys (unencrypted stream), pass null for
+     * both — the cipher is skipped entirely and audio payload is written directly to AudioTrack.
      *
-     * SECURITY: The key and IV MUST be exactly 16 bytes each (AES-128).
-     * We validate this before use (RULE 4).
+     * SECURITY: When provided, both key and IV MUST be exactly 16 bytes each (AES-128).
+     * We validate this before use (RULE 4). Passing null skips validation and cipher setup.
      *
-     * @param aesKey     16-byte AES-128 key for audio decryption
-     * @param aesIv      16-byte initialization vector for AES-CTR mode
+     * @param aesKey     16-byte AES-128 key, or null for unencrypted streams
+     * @param aesIv      16-byte initialization vector, or null for unencrypted streams
      * @param sampleRate Audio sample rate in Hz (typically 44100 or 48000)
      * @param channels   Number of audio channels (1 = mono, 2 = stereo)
      */
-    fun initialize(aesKey: ByteArray, aesIv: ByteArray, sampleRate: Int, channels: Int) {
+    fun initialize(aesKey: ByteArray?, aesIv: ByteArray?, sampleRate: Int, channels: Int) {
         if (isInitialized) {
             Logger.w("AudioPlayer.initialize() called twice — ignoring")
             return
         }
 
-        // SECURITY: Validate key length before using for cryptography (RULE 4)
-        require(aesKey.size == AES_KEY_LENGTH_BYTES) {
-            "AES key must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesKey.size}"
-        }
-        require(aesIv.size == AES_KEY_LENGTH_BYTES) {
-            "AES IV must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesIv.size}"
+        if (aesKey != null || aesIv != null) {
+            // SECURITY: Validate key length before using for cryptography (RULE 4)
+            require(aesKey != null && aesKey.size == AES_KEY_LENGTH_BYTES) {
+                "AES key must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesKey?.size}"
+            }
+            require(aesIv != null && aesIv.size == AES_KEY_LENGTH_BYTES) {
+                "AES IV must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesIv?.size}"
+            }
+            initializeCipher(aesKey, aesIv)
+            Logger.i("Initializing AudioPlayer (encrypted): ${sampleRate}Hz, $channels channels")
+        } else {
+            Logger.i("Initializing AudioPlayer (unencrypted): ${sampleRate}Hz, $channels channels")
         }
 
-        Logger.i("Initializing AudioPlayer: ${sampleRate}Hz, $channels channels")
-
-        initializeCipher(aesKey, aesIv)
         initializeAudioTrack(sampleRate, channels)
 
         isInitialized = true
@@ -108,7 +112,7 @@ class AudioPlayer {
             }
             val encryptedPayload = rtpPacket.copyOfRange(RTP_HEADER_MIN_BYTES, rtpPacket.size)
 
-            // Step 2: Decrypt the payload using AES-128-CTR
+            // Step 2: Decrypt if encrypted (cipher is null for unencrypted streams → pass-through)
             val decryptedPayload = decrypt(encryptedPayload)
 
             // Step 3: Write to AudioTrack for playback

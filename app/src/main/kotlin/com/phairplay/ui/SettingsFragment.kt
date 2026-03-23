@@ -1,9 +1,13 @@
 package com.phairplay.ui
 
+import android.app.AlertDialog
 import android.os.Bundle
+import android.text.InputFilter
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
@@ -203,13 +207,56 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Shows a dialog allowing the user to edit the display name.
-     * TODO Phase 1: implement an AlertDialog with an EditText on TV.
+     * Shows a dialog allowing the user to edit the AirPlay display name.
+     *
+     * WHY: The display name is what appears in the macOS/iOS AirPlay picker.
+     * Changing it is infrequent but important for multi-TV households.
+     *
+     * TV UX notes:
+     * - The EditText is pre-filled with the current name (empty = system default)
+     * - Max length is enforced to [AppSettings.DISPLAY_NAME_MAX_LENGTH] (63 chars, mDNS limit)
+     * - "OK" saves the new name; "Reset to default" clears to "" (system name); "Cancel" = no-op
+     * - Name trimming is applied on save — pure-whitespace names are treated as blank
+     *
+     * Collision detection: Android's NsdManager automatically appends " (2)", " (3)" etc. if
+     * another device on the network already uses the same mDNS name. This is transparent to
+     * the user at save-time; the actual registered name is logged at registration.
      */
     private fun showDisplayNameDialog() {
-        // TODO: Show an AlertDialog with an EditText
-        // TV-friendly pattern: use a dialog fragment with large text input
-        Logger.d("Display name edit — TODO")
+        val currentName = viewLifecycleOwner.lifecycleScope.run {
+            // Read directly from the displayed value (already loaded)
+            val displayed = textDisplayNameValue.text?.toString() ?: ""
+            if (displayed == getString(R.string.setting_display_name_placeholder)) "" else displayed
+        }
+
+        val editText = EditText(requireContext()).apply {
+            setText(currentName)
+            hint = getString(R.string.setting_display_name_dialog_hint)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            filters = arrayOf(InputFilter.LengthFilter(AppSettings.DISPLAY_NAME_MAX_LENGTH))
+            setSingleLine(true)
+            // Move cursor to end so user can append rather than overwrite
+            setSelection(currentName.length)
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_display_name)
+            .setView(editText)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val newName = editText.text?.toString()?.trim() ?: ""
+                save { it.copy(displayName = newName) }
+                textDisplayNameValue.text = newName.ifEmpty {
+                    getString(R.string.setting_display_name_placeholder)
+                }
+                Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
+            }
+            .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
+                save { it.copy(displayName = "") }
+                textDisplayNameValue.text = getString(R.string.setting_display_name_placeholder)
+                Logger.i("Display name reset to system default")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**

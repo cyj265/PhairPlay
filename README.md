@@ -1,11 +1,11 @@
 # PhairPlay
 
-PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and Fire TV. It lets your macOS device mirror its screen and audio directly to your TV — no Apple TV required.
+PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and Fire TV. It lets your macOS or iOS/iPadOS device mirror its screen and audio directly to your TV — no Apple TV required.
 
 ```
  macOS (Monterey+)            Android TV / Fire TV
- ┌────────────────┐           ┌──────────────────────┐
- │                │  AirPlay  │                      │
+ iOS / iPadOS (16+)           ┌──────────────────────┐
+ ┌────────────────┐  AirPlay  │                      │
  │  [Your Screen] │ ────────► │  [Your TV Screen]    │
  │                │           │                      │
  └────────────────┘           └──────────────────────┘
@@ -19,6 +19,9 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 ## Features
 
 - Full-screen screen mirroring from macOS 12 (Monterey) and later
+- Full-screen screen mirroring from iOS/iPadOS 16+ (iPhone, iPad)
+- Miracast receiver for Windows and Android screen mirroring
+- Google Cast receiver for Chrome and Android casting
 - Hardware-accelerated H.264 video decoding (low latency, low CPU)
 - AAC/ALAC audio playback, synchronized with video
 - Zero ads, zero analytics, zero internet required
@@ -27,10 +30,9 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 
 ## What PhairPlay Does NOT Do
 
-- No iOS support (macOS only in v1.0)
-- No Chromecast / Google Cast
 - No FairPlay DRM content (Netflix, Disney+, etc.)
 - No cloud/remote streaming — local network only
+- No audio-only AirPlay from Apple Music (screen mirroring only in v1.0)
 
 ---
 
@@ -135,8 +137,7 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 ## Known Limitations
 
 - **FairPlay-protected content** (Netflix, Disney+, Apple TV+, etc.) cannot be mirrored — this is an Apple DRM restriction, not a PhairPlay limitation.
-- **Audio-only AirPlay** (streaming from Apple Music app) is not supported in v1.0.
-- **iOS/iPadOS** devices cannot use PhairPlay as an AirPlay target in v1.0.
+- **Audio-only AirPlay** (streaming from Apple Music app) is not fully supported in v1.0.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100ms. Use 5 GHz or Ethernet for best results.
 
@@ -147,7 +148,7 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 Contributions are welcome! Please read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) before submitting a pull request.
 
 Key points:
-- Follow the coding rules in CONTRIBUTING.md (file size ≤400 lines, class comments, test coverage)
+- Follow the coding rules in CONTRIBUTING.md (file size ≤400 lines soft / ≤550 lines hard max, class comments, test coverage)
 - All PRs require passing CI (build + tests + lint)
 - Discuss major changes in a GitHub Issue first
 
