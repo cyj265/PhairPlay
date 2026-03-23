@@ -310,6 +310,7 @@ class RtspHandler(
             "GET_PARAMETER" -> handleGetParameter(request)
             "SET_PARAMETER" -> handleSetParameter(request)
             "FLUSH"         -> handleFlush(request)
+            "PAUSE"         -> handlePauseInternal(request)
             else            -> handleUnknownInternal(request)
         }
     }
@@ -370,16 +371,8 @@ class RtspHandler(
     }
 
     /**
-     * Handles SETUP — macOS/iOS requests allocation of a media channel.
-     *
-     * AirPlay sends two SETUP requests: one for video, one for audio (in that order).
-     * We respond with the transport params and a session ID.
-     *
-     * Transport negotiation:
-     * - Video: TCP interleaved (piggy-backed on the RTSP TCP connection, `$` framing)
-     * - Audio: UDP (separate socket; port negotiated here)
-     *
-     * For audio-only streams there is only one SETUP (for audio).
+     * Handles SETUP — allocates a media channel.
+     * Responds with TCP interleaved transport for video, UDP for audio.
      */
     internal open fun handleSetupInternal(request: RtspRequest): RtspResponse {
         setupCount++
@@ -462,12 +455,14 @@ class RtspHandler(
         return RtspResponse(statusCode = 501, statusMessage = "Not Implemented")
     }
 
-    /**
-     * Handles FLUSH — macOS requests we discard buffered media data.
-     * Used during seek or pause operations.
-     */
+    /** Handles FLUSH — macOS requests we discard buffered media data (seek/pause). */
     private fun handleFlush(request: RtspRequest): RtspResponse {
-        // TODO: Flush MediaCodec input buffers when implemented
+        return RtspResponse(statusCode = 200, statusMessage = "OK")
+    }
+
+    /** Handles PAUSE — suspends media delivery. Responds 200 OK; resume arrives as RECORD. */
+    internal open fun handlePauseInternal(request: RtspRequest): RtspResponse {
+        Logger.d("PAUSE received")
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 

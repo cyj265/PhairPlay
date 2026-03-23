@@ -4,8 +4,12 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -94,6 +98,9 @@ class MainActivity : AppCompatActivity() {
 
         // Start the service immediately so it's running before any sender discovers us
         ServiceController.start(this)
+
+        // Android 13+ requires an explicit runtime grant for POST_NOTIFICATIONS
+        requestNotificationPermission()
     }
 
     override fun onStart() {
@@ -212,6 +219,29 @@ class MainActivity : AppCompatActivity() {
 
     /** Returns the SurfaceView Surface for the VideoDecoder. */
     fun getVideoSurface() = streamingScreen.getSurface()
+
+    /**
+     * Requests POST_NOTIFICATIONS permission on Android 13+ (API 33+).
+     * On older versions the permission is granted automatically with the manifest declaration.
+     */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this, android.Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    PERMISSION_REQUEST_NOTIFICATIONS
+                )
+            }
+        }
+    }
+
+    companion object {
+        private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
+    }
 
     // ─── Streaming overlay ────────────────────────────────────────────────────
 

@@ -69,7 +69,7 @@ class AudioPlayer {
             require(aesIv != null && aesIv.size == AES_KEY_LENGTH_BYTES) {
                 "AES IV must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesIv?.size}"
             }
-            initializeCipher(aesKey, aesIv)
+            initializeCipher(aesKey!!, aesIv!!)
             Logger.i("Initializing AudioPlayer (encrypted): ${sampleRate}Hz, $channels channels")
         } else {
             Logger.i("Initializing AudioPlayer (unencrypted): ${sampleRate}Hz, $channels channels")

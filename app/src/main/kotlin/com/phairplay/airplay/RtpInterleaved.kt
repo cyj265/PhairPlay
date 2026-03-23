@@ -1,6 +1,7 @@
 package com.phairplay.airplay
 
 import com.phairplay.util.Logger
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 
 /**
@@ -57,6 +58,10 @@ object RtpInterleaved {
         onVideoNalUnit: (nalUnit: ByteArray, ptsUs: Long) -> Unit,
         onStreamEnded: () -> Unit
     ) {
+        // FU-A (Fragmentation Unit A) reassembly state — local so concurrent streams
+        // don't share state. Non-null means we are accumulating fragments for one NAL unit.
+        var fuaAccumulator: ByteArrayOutputStream? = null
+
         try {
             while (true) {
                 // Read the 4-byte interleaved frame header: $ channel(1) length(2)
@@ -99,7 +104,7 @@ object RtpInterleaved {
 
                 // Only process video RTP frames (channel 0); ignore RTCP (channel 1)
                 if (channel == CHANNEL_VIDEO_RTP) {
-                    processVideoRtpFrame(frameData, onVideoNalUnit)
+                    fuaAccumulator = processVideoRtpFrame(frameData, fuaAccumulator, onVideoNalUnit)
                 }
                 // Note: audio over interleaved TCP is rare in AirPlay; UDP is used instead.
             }
@@ -111,35 +116,27 @@ object RtpInterleaved {
     }
 
     /**
-     * Parses a video RTP frame and extracts the H.264 NAL unit payload.
+     * Parses a video RTP frame and delivers H.264 NAL unit(s) via [callback].
      *
-     * RTP header structure (RFC 3550, fixed 12 bytes):
-     * ```
-     * ┌──┬──┬──┬──┬──────────┬───┬──────────────┬─────────────────────────────┐
-     * │V │P │X │CC│    M     │PT │    Seq#(16)   │        Timestamp(32)        │
-     * │(2)│(1)│(1)│(4)│(1)   │(7)│               │                             │
-     * ├──────────────────────────────────────────┤─────────────────────────────┤
-     * │             SSRC (32 bits)                │  [CSRC list, 0–15 entries]  │
-     * └──────────────────────────────────────────┴─────────────────────────────┘
-     * ```
-     * After the 12-byte header (+ optional 4*CC CSRC bytes): the H.264 payload.
+     * Handles two H.264 RTP packetization modes (RFC 6184):
+     * - **Single NAL unit** (type ≤ 23): the payload IS the NAL unit.
+     * - **FU-A** (type = 28): a large NAL unit fragmented across multiple RTP packets.
+     *   Fragments are accumulated in [fuaAccumulator] until the E (end) bit is set,
+     *   then the reconstructed NAL unit is delivered and the accumulator is cleared.
      *
-     * RTP timestamp is in 90kHz clock units. Convert to µs: ts * 1_000_000 / 90_000.
-     *
-     * AirPlay uses Single NAL Unit mode and FU-A (Fragmentation Unit) packetization.
-     * For now we pass the entire RTP payload as a NAL unit — the VideoDecoder's
-     * MediaCodec handles FU-A reassembly internally for most chipsets.
-     *
-     * @param rtpFrame  Full RTP frame bytes (header + payload).
-     * @param callback  Called with (nalUnit, presentationTimeUs).
+     * @param rtpFrame       Full RTP frame bytes (header + payload).
+     * @param fuaAccumulator Ongoing FU-A reassembly buffer from the previous call, or null.
+     * @param callback       Called with (nalUnit, presentationTimeUs) for each complete NAL unit.
+     * @return Updated FU-A accumulator (null = no FU-A in progress after this call).
      */
     private fun processVideoRtpFrame(
         rtpFrame: ByteArray,
+        fuaAccumulator: ByteArrayOutputStream?,
         callback: (ByteArray, Long) -> Unit
-    ) {
+    ): ByteArrayOutputStream? {
         if (rtpFrame.size < RTP_FIXED_HEADER_BYTES) {
             Logger.w("RtpInterleaved: RTP frame too small (${rtpFrame.size} bytes)")
-            return
+            return null
         }
 
         // CSRC count (CC) is in the lower 4 bits of byte 0
@@ -150,7 +147,6 @@ object RtpInterleaved {
         val hasExtension = (rtpFrame[0].toInt() and 0x10) != 0
         var payloadOffset = headerSize
         if (hasExtension && rtpFrame.size >= payloadOffset + 4) {
-            // Extension header: 2-byte profile + 2-byte length (in 32-bit words)
             val extLengthWords = ((rtpFrame[payloadOffset + 2].toInt() and 0xFF) shl 8) or
                                   (rtpFrame[payloadOffset + 3].toInt() and 0xFF)
             payloadOffset += 4 + extLengthWords * 4
@@ -158,20 +154,90 @@ object RtpInterleaved {
 
         if (payloadOffset >= rtpFrame.size) {
             Logger.w("RtpInterleaved: no payload after RTP header")
-            return
+            return null
         }
 
-        // Extract the 32-bit timestamp from bytes 4–7 (big-endian)
+        // Extract the 32-bit RTP timestamp from bytes 4–7 (big-endian) and convert to µs
         val rtpTimestamp = ((rtpFrame[4].toLong() and 0xFF) shl 24) or
                            ((rtpFrame[5].toLong() and 0xFF) shl 16) or
                            ((rtpFrame[6].toLong() and 0xFF) shl 8) or
                             (rtpFrame[7].toLong() and 0xFF)
-
-        // Convert from 90kHz RTP clock to microseconds
         val ptsUs = rtpTimestamp * 1_000_000L / RTP_VIDEO_CLOCK_HZ
 
-        val nalUnit = rtpFrame.copyOfRange(payloadOffset, rtpFrame.size)
-        callback(nalUnit, ptsUs)
+        // Dispatch based on NAL unit type (low 5 bits of first payload byte)
+        val nalType = rtpFrame[payloadOffset].toInt() and 0x1F
+        return if (nalType == NAL_TYPE_FU_A) {
+            handleFuaFragment(rtpFrame, payloadOffset, ptsUs, fuaAccumulator, callback)
+        } else {
+            // Single NAL unit mode — deliver directly
+            if (fuaAccumulator != null) {
+                Logger.w("RtpInterleaved: dropping incomplete FU-A (${fuaAccumulator.size()} B)")
+            }
+            callback(rtpFrame.copyOfRange(payloadOffset, rtpFrame.size), ptsUs)
+            null
+        }
+    }
+
+    /**
+     * Accumulates one H.264 FU-A fragment and delivers the reassembled NAL unit
+     * when the end fragment arrives.
+     *
+     * FU-A packet layout (RFC 6184 §5.8):
+     * ```
+     * ┌─ FU indicator (1B) ──┐  ┌─ FU header (1B) ─────────────────┐
+     * │ F(1) NRI(2) type=28  │  │ S(1) E(1) R(1) original NAL type │
+     * └──────────────────────┘  └──────────────────────────────────┘
+     * ```
+     * The original NAL unit header is reconstructed from NRI + original NAL type.
+     *
+     * @return Updated accumulator, or null when the NAL unit is complete or on error.
+     */
+    private fun handleFuaFragment(
+        rtpFrame: ByteArray,
+        payloadOffset: Int,
+        ptsUs: Long,
+        fuaAccumulator: ByteArrayOutputStream?,
+        onVideoNalUnit: (ByteArray, Long) -> Unit
+    ): ByteArrayOutputStream? {
+        if (payloadOffset + 1 >= rtpFrame.size) {
+            Logger.w("RtpInterleaved: FU-A packet has no FU header — discarding")
+            return null
+        }
+
+        val fuIndicator = rtpFrame[payloadOffset    ].toInt() and 0xFF
+        val fuHeader    = rtpFrame[payloadOffset + 1].toInt() and 0xFF
+        val isStart = (fuHeader and 0x80) != 0
+        val isEnd   = (fuHeader and 0x40) != 0
+
+        val accumulator: ByteArrayOutputStream
+        if (isStart) {
+            if (fuaAccumulator != null) {
+                Logger.w("RtpInterleaved: new FU-A start discards incomplete previous fragment")
+            }
+            // Reconstruct the original NAL unit header: NRI from FU indicator + type from FU header
+            val reconstitutedHeader = ((fuIndicator and 0x60) or (fuHeader and 0x1F)).toByte()
+            accumulator = ByteArrayOutputStream()
+            accumulator.write(reconstitutedHeader.toInt())
+        } else {
+            if (fuaAccumulator == null) {
+                Logger.w("RtpInterleaved: FU-A fragment without start bit — discarding")
+                return null
+            }
+            accumulator = fuaAccumulator
+        }
+
+        // Append the fragment data (skip FU indicator byte + FU header byte)
+        val fragmentStart = payloadOffset + 2
+        if (fragmentStart < rtpFrame.size) {
+            accumulator.write(rtpFrame, fragmentStart, rtpFrame.size - fragmentStart)
+        }
+
+        return if (isEnd) {
+            onVideoNalUnit(accumulator.toByteArray(), ptsUs)
+            null  // reassembly complete — clear accumulator
+        } else {
+            accumulator  // still accumulating
+        }
     }
 
     companion object {
@@ -183,6 +249,12 @@ object RtpInterleaved {
 
         /** Fixed RTP header size (no CSRC, no extension). */
         private const val RTP_FIXED_HEADER_BYTES = 12
+
+        /**
+         * H.264 NAL unit type 28 = FU-A (Fragmentation Unit type A).
+         * Used to split a large NAL unit across multiple RTP packets (RFC 6184 §5.8).
+         */
+        private const val NAL_TYPE_FU_A = 28
 
         /**
          * H.264 video uses a 90 kHz RTP clock (standard for video, per RFC 6184).

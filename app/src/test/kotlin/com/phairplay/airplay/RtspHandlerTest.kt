@@ -264,4 +264,5 @@ class TestableRtspHandler(
     fun handleRecordPublic(req: RtspRequest) = handleRecordInternal(req)
     fun handleTeardownPublic(req: RtspRequest) = handleTeardownInternal(req)
     fun handleUnknownMethodPublic(req: RtspRequest) = handleUnknownInternal(req)
+    fun handlePausePublic(req: RtspRequest) = handlePauseInternal(req)
 }

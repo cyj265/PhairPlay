@@ -39,6 +39,9 @@
     <!-- Start on boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Foreground service notification (Android 13+ requires runtime grant) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!--
         Declare this app as a TV app (leanback).
         Required for the app to appear in the TV launcher.

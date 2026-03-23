@@ -197,8 +197,9 @@ class PhairPlayService : Service() {
      */
     private fun startAirPlay(settings: AppSettings) {
         // Captures the sender name reported by AirPlayReceiver before CONNECTED fires.
-        // Volatile because onSenderNameChanged runs on IO dispatcher, onStateChanged on Main.
-        @Volatile var pendingSenderName = "AirPlay Sender"
+        // onSenderNameChanged is called synchronously before emitState(CONNECTED), so
+        // this assignment happens-before the Main-thread read in onStateChanged.
+        var pendingSenderName = "AirPlay Sender"
 
         airPlayReceiver = AirPlayReceiver(
             context = applicationContext,
