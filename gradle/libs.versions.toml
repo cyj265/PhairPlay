@@ -6,6 +6,7 @@
 # Build tools
 agp = "8.3.2"                          # Android Gradle Plugin
 kotlin = "1.9.23"                      # Kotlin compiler
+desugar-jdk-libs = "2.0.4"            # Core library desugaring (backports Java 8+ APIs to API 25)
 
 # AndroidX
 appcompat = "1.7.0"
@@ -48,6 +49,9 @@ kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 
 # Logging
 timber = { group = "com.jakewharton.timber", name = "timber", version.ref = "timber" }
+
+# Core library desugaring
+desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", version.ref = "desugar-jdk-libs" }
 
 # Cryptography
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
