@@ -17,8 +17,8 @@ captures/
 *.ipr
 out/
 
-# Gradle wrapper (keep gradlew, ignore downloaded files)
-gradle/wrapper/gradle-wrapper.jar
+# Gradle wrapper — JAR must be committed so ./gradlew works after clone
+!gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
 
 # Signing configs and keystores — NEVER commit these
