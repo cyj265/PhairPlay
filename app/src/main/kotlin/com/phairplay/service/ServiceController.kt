@@ -2,7 +2,7 @@ package com.phairplay.service
 
 import android.content.Context
 import android.content.Intent
-import androidx.core.content.ContextCompat
+import android.os.Build
 import com.phairplay.util.Logger
 
 /**
@@ -35,7 +35,7 @@ object ServiceController {
     fun start(context: Context) {
         Logger.i("ServiceController: start()")
         val intent = buildIntent(context, PhairPlayService.ACTION_START)
-        ContextCompat.startForegroundService(context, intent)
+        startForegroundServiceCompat(context, intent)
     }
 
     /**
@@ -67,7 +67,22 @@ object ServiceController {
     fun restart(context: Context) {
         Logger.i("ServiceController: restart()")
         val intent = buildIntent(context, PhairPlayService.ACTION_RESTART)
-        ContextCompat.startForegroundService(context, intent)
+        startForegroundServiceCompat(context, intent)
+    }
+
+    /**
+     * Starts a foreground service using [Context.startForegroundService] on API 26+,
+     * falling back to [Context.startService] on older versions.
+     *
+     * This replaces the AndroidX [androidx.core.content.ContextCompat.startForegroundService]
+     * helper so that this class has no AndroidX dependency.
+     */
+    private fun startForegroundServiceCompat(context: Context, intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
     }
 
     /**

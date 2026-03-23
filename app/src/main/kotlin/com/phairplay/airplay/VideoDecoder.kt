@@ -301,7 +301,7 @@ class VideoDecoder(private val outputSurface: Surface) {
          * @param data        The raw SPS byte array (including NAL type header).
          * @param startOffset Byte offset to start reading from (typically 1 to skip NAL type).
          */
-        internal class SpsBitReader(private val data: ByteArray, startOffset: Int) {
+        class SpsBitReader(private val data: ByteArray, startOffset: Int) {
             private var bytePos = startOffset
             private var bitPos  = 7  // MSB first (bit 7 = most significant)
 

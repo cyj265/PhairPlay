@@ -129,7 +129,7 @@ class MdnsServiceTest {
     @Test
     fun `stop emits DISABLED protocol state`() {
         val states = mutableListOf<com.phairplay.service.ProtocolState>()
-        val service = MdnsService(mockContext) { states.add(it) }
+        val service = MdnsService(mockContext, onStateChange = { states.add(it) })
 
         service.stop()
 

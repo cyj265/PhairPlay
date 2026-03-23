@@ -32,7 +32,7 @@ class VideoDecoderSpsTest {
     @Test
     fun `SpsBitReader readBit reads MSB first`() {
         // 0x80 = 1000_0000: first bit = 1, second bit = 0
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
         assertEquals(1, reader.readBit())
         assertEquals(0, reader.readBit())
     }
@@ -40,55 +40,55 @@ class VideoDecoderSpsTest {
     @Test
     fun `SpsBitReader readBits reads 8 bits as unsigned byte`() {
         // 0x42 = 0100_0010 = 66
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x42), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x42), startOffset = 0)
         assertEquals(0x42, reader.readBits(8))
     }
 
     @Test
     fun `SpsBitReader readBits crosses byte boundary correctly`() {
         // 0xFF 0x00 — reading 12 bits: 1111_1111_0000 = 0xFF0 = 4080
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0xFF.toByte(), 0x00), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0xFF.toByte(), 0x00), startOffset = 0)
         assertEquals(0xFF0, reader.readBits(12))
     }
 
     @Test
     fun `SpsBitReader readUe returns 0 for leading-one bit pattern`() {
         // ue(v) = 0 → encoded as single "1" bit
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
         assertEquals(0, reader.readUe())
     }
 
     @Test
     fun `SpsBitReader readUe returns 1 for 010 bit pattern`() {
         // ue(v) = 1 → "010" → 0x40 = 0100_0000 (MSB)
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x40), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x40), startOffset = 0)
         assertEquals(1, reader.readUe())
     }
 
     @Test
     fun `SpsBitReader readUe returns 2 for 011 bit pattern`() {
         // ue(v) = 2 → "011" → 0x60 = 0110_0000
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x60), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x60), startOffset = 0)
         assertEquals(2, reader.readUe())
     }
 
     @Test
     fun `SpsBitReader readSe returns 0 for ue=0`() {
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x80.toByte()), startOffset = 0)
         assertEquals(0, reader.readSe())
     }
 
     @Test
     fun `SpsBitReader readSe returns positive 1 for ue=1`() {
         // se(v): k=1 (odd) → +(1+1)/2 = +1
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x40), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x40), startOffset = 0)
         assertEquals(1, reader.readSe())
     }
 
     @Test
     fun `SpsBitReader readSe returns negative 1 for ue=2`() {
         // se(v): k=2 (even) → -(2/2) = -1
-        val reader = VideoDecoder.SpsBitReader(byteArrayOf(0x60), startOffset = 0)
+        val reader = SpsBitReader(byteArrayOf(0x60), startOffset = 0)
         assertEquals(-1, reader.readSe())
     }
 

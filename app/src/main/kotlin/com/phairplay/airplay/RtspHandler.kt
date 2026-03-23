@@ -34,7 +34,7 @@ import java.net.Socket
  *   handler.start(coroutineScope)
  *   handler.stop()
  */
-class RtspHandler(
+open class RtspHandler(
     // Called lazily when RECORD is received — Surface is ready by then
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
@@ -324,7 +324,7 @@ class RtspHandler(
      * Exposed as `internal open` so unit tests can call it via [TestableRtspHandler]
      * without requiring a real network socket.
      */
-    internal open fun handleOptionsInternal(request: RtspRequest): RtspResponse {
+    open fun handleOptionsInternal(request: RtspRequest): RtspResponse {
         return RtspResponse(
             statusCode = 200,
             statusMessage = "OK",
@@ -342,7 +342,7 @@ class RtspHandler(
      *
      * Security: if SDP parsing fails completely, we return 400 Bad Request.
      */
-    internal open fun handleAnnounceInternal(request: RtspRequest): RtspResponse {
+    open fun handleAnnounceInternal(request: RtspRequest): RtspResponse {
         Logger.d("ANNOUNCE body (${request.body.length} bytes)")
         val parsed = SdpParser.parse(request.body)
 
@@ -374,7 +374,7 @@ class RtspHandler(
      * Handles SETUP — allocates a media channel.
      * Responds with TCP interleaved transport for video, UDP for audio.
      */
-    internal open fun handleSetupInternal(request: RtspRequest): RtspResponse {
+    open fun handleSetupInternal(request: RtspRequest): RtspResponse {
         setupCount++
         val session = currentSession
 
@@ -407,7 +407,7 @@ class RtspHandler(
      * can wire up [VideoDecoder] and/or [AudioPlayer] as appropriate.
      * For audio-only streams, only [AudioPlayer] is started.
      */
-    internal open fun handleRecordInternal(request: RtspRequest): RtspResponse {
+    open fun handleRecordInternal(request: RtspRequest): RtspResponse {
         val session = currentSession
         if (session == null) {
             Logger.e("RECORD received but no session from ANNOUNCE — rejecting")
@@ -423,7 +423,7 @@ class RtspHandler(
      *
      * The streaming session is over. We clean up resources and return to WAITING state.
      */
-    internal open fun handleTeardownInternal(request: RtspRequest): RtspResponse {
+    open fun handleTeardownInternal(request: RtspRequest): RtspResponse {
         Logger.i("TEARDOWN received — streaming stopping")
         onStreamingStopped()
         return RtspResponse(statusCode = 200, statusMessage = "OK")
@@ -450,7 +450,7 @@ class RtspHandler(
      * Handles any unrecognized RTSP method.
      * Returns 501 Not Implemented, which is the correct RTSP response for unknown methods.
      */
-    internal open fun handleUnknownInternal(request: RtspRequest): RtspResponse {
+    open fun handleUnknownInternal(request: RtspRequest): RtspResponse {
         Logger.w("Unknown RTSP method: ${request.method}")
         return RtspResponse(statusCode = 501, statusMessage = "Not Implemented")
     }
@@ -461,7 +461,7 @@ class RtspHandler(
     }
 
     /** Handles PAUSE — suspends media delivery. Responds 200 OK; resume arrives as RECORD. */
-    internal open fun handlePauseInternal(request: RtspRequest): RtspResponse {
+    open fun handlePauseInternal(request: RtspRequest): RtspResponse {
         Logger.d("PAUSE received")
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }

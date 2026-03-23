@@ -40,6 +40,34 @@ import java.io.InputStream
  */
 object RtpInterleaved {
 
+    /** The `$` byte that marks the start of an interleaved RTP frame. */
+    private const val INTERLEAVED_MARKER = 0x24  // '$'
+
+    /** RTP channel 0 = video RTP data. */
+    private const val CHANNEL_VIDEO_RTP = 0
+
+    /** Fixed RTP header size (no CSRC, no extension). */
+    private const val RTP_FIXED_HEADER_BYTES = 12
+
+    /**
+     * H.264 NAL unit type 28 = FU-A (Fragmentation Unit type A).
+     * Used to split a large NAL unit across multiple RTP packets (RFC 6184 §5.8).
+     */
+    private const val NAL_TYPE_FU_A = 28
+
+    /**
+     * H.264 video uses a 90 kHz RTP clock (standard for video, per RFC 6184).
+     * Used to convert RTP timestamps to microsecond presentation timestamps.
+     */
+    private const val RTP_VIDEO_CLOCK_HZ = 90_000L
+
+    /**
+     * Maximum acceptable RTP frame size.
+     * Real AirPlay video frames are typically 1–200 KB.
+     * Cap at 2 MB to reject clearly malformed/malicious frames.
+     */
+    private const val MAX_RTP_FRAME_BYTES = 2 * 1024 * 1024  // 2 MB
+
     /**
      * Reads RTP interleaved frames from [inputStream] until the connection ends.
      *
@@ -240,33 +268,4 @@ object RtpInterleaved {
         }
     }
 
-    companion object {
-        /** The `$` byte that marks the start of an interleaved RTP frame. */
-        private const val INTERLEAVED_MARKER = 0x24  // '$'
-
-        /** RTP channel 0 = video RTP data. */
-        private const val CHANNEL_VIDEO_RTP = 0
-
-        /** Fixed RTP header size (no CSRC, no extension). */
-        private const val RTP_FIXED_HEADER_BYTES = 12
-
-        /**
-         * H.264 NAL unit type 28 = FU-A (Fragmentation Unit type A).
-         * Used to split a large NAL unit across multiple RTP packets (RFC 6184 §5.8).
-         */
-        private const val NAL_TYPE_FU_A = 28
-
-        /**
-         * H.264 video uses a 90 kHz RTP clock (standard for video, per RFC 6184).
-         * Used to convert RTP timestamps to microsecond presentation timestamps.
-         */
-        private const val RTP_VIDEO_CLOCK_HZ = 90_000L
-
-        /**
-         * Maximum acceptable RTP frame size.
-         * Real AirPlay video frames are typically 1–200 KB.
-         * Cap at 2 MB to reject clearly malformed/malicious frames.
-         */
-        private const val MAX_RTP_FRAME_BYTES = 2 * 1024 * 1024  // 2 MB
-    }
 }
