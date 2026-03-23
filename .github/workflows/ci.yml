@@ -32,22 +32,30 @@ jobs:
       - name: Grant Gradle wrapper execute permission
         run: chmod +x gradlew
 
-      # Step 4: Build the Google TV debug APK
+      # Step 4: Ensure Android SDK platform 34 is available
+      - name: Set up Android SDK components
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+
+      # Step 5: Build the Google TV debug APK
       # This verifies that the googletv flavor compiles without errors
       - name: Build Google TV (debug)
-        run: ./gradlew assembleGoogletvDebug --stacktrace 2>&1 | tee /tmp/build-googletv.txt; exit ${PIPESTATUS[0]}
+        run: ./gradlew assembleGoogletvDebug
 
-      # Step 5: Build the Fire TV debug APK
+      # Step 6: Build the Fire TV debug APK
       # This verifies that the firetv flavor compiles without errors
       - name: Build Fire TV (debug)
         run: ./gradlew assembleFiretvDebug
 
-      # Step 6: Run unit tests for both flavors
+      # Step 7: Run unit tests for both flavors
       # Unit tests run on the build machine (no Android device needed)
       - name: Run unit tests
         run: ./gradlew test
 
-      # Step 7: Upload test results as artifacts (visible in GitHub Actions UI)
+      # Step 8: Upload test results as artifacts (visible in GitHub Actions UI)
       # Even if tests fail, the results are uploaded so we can see what failed
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -56,15 +64,6 @@ jobs:
           name: test-results
           path: app/build/reports/tests/
           retention-days: 30
-
-      # Step 8: Upload build output on failure (for debugging)
-      - name: Upload build output (on failure)
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: build-output
-          path: /tmp/build-googletv.txt
-          retention-days: 7
 
       # Step 9: Upload APKs as artifacts (for manual testing on real devices)
       - name: Upload APKs
