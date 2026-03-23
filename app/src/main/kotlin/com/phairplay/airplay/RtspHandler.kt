@@ -5,9 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.PrintWriter
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 
@@ -62,6 +61,14 @@ class RtspHandler(
 
     // Counter for SETUP calls: first is typically video, second is audio
     private var setupCount = 0
+
+    /**
+     * Callback for decoded H.264 NAL units from the RTP stream.
+     * Set by [AirPlayReceiver] after RECORD — wires to [VideoDecoder.decodeNalUnit].
+     * Null for audio-only streams.
+     */
+    @Volatile
+    var onVideoNalUnit: ((nalUnit: ByteArray, ptsUs: Long) -> Unit)? = null
 
     /**
      * Starts the RTSP server.
@@ -144,111 +151,139 @@ class RtspHandler(
     /**
      * Handles all RTSP communication with a single connected client.
      *
-     * Reads RTSP requests line by line, routes each request to the appropriate
-     * handler method, and sends responses. Loops until the client disconnects
-     * or the handler is stopped.
+     * Phase 1 (RTSP): reads RTSP text requests until RECORD is received.
+     * Phase 2 (RTP):  hands the raw [InputStream] to [RtpInterleaved.readLoop]
+     *                 for binary `$`-framed RTP reading.
+     *
+     * WHY raw InputStream (not BufferedReader): after RECORD the connection switches
+     * from text to binary. A BufferedReader would consume and discard binary data in
+     * its internal read-ahead buffer, causing the first RTP frames to be lost.
      *
      * @param socket The connected client socket.
      */
     private fun handleClient(socket: Socket) {
-        val reader = BufferedReader(InputStreamReader(socket.inputStream))
-        val writer = PrintWriter(socket.outputStream, true)
+        val inputStream = socket.getInputStream()
+        val outputStream = socket.getOutputStream()
 
         try {
+            // ── Phase 1: RTSP text handshake ────────────────────────────────
             while (running && !socket.isClosed) {
-                // Read and parse the next RTSP request
-                val request = readRtspRequest(reader) ?: break
+                val request = readRtspRequest(inputStream) ?: break
+                val response = routeRequest(request, outputStream)
+                sendResponse(outputStream, response)
 
-                // Route to the appropriate method handler
-                val response = routeRequest(request, writer)
+                // After RECORD is acknowledged, switch to binary RTP reading
+                if (request.method == "RECORD" && response.statusCode == 200) {
+                    Logger.d("RTSP handshake complete — switching to RTP interleaved mode")
+                    break
+                }
+            }
 
-                // Send the response back to the client
-                sendResponse(writer, response)
+            // ── Phase 2: RTP binary read loop ────────────────────────────────
+            // Only start if the session was established (ANNOUNCE was parsed)
+            val session = currentSession
+            if (session != null && running) {
+                RtpInterleaved.readLoop(
+                    inputStream = inputStream,
+                    onVideoNalUnit = { nalUnit, ptsUs ->
+                        onVideoNalUnit?.invoke(nalUnit, ptsUs)
+                    },
+                    onStreamEnded = {
+                        Logger.i("RTP stream ended")
+                    }
+                )
             }
         } catch (e: Exception) {
-            if (running) {
-                Logger.e("Error handling RTSP client", e)
-            }
+            if (running) Logger.e("Error handling RTSP client", e)
         } finally {
             Logger.i("Client disconnected")
             socket.close()
             activeClient = null
+            currentSession = null
+            setupCount = 0
             onStreamingStopped()
         }
     }
 
     /**
-     * Reads a complete RTSP request from the [reader].
+     * Reads a complete RTSP request from the raw [inputStream].
      *
-     * An RTSP request consists of:
-     * 1. Request line:  "METHOD rtsp://... RTSP/1.0"
-     * 2. Headers:       "Key: Value" pairs, one per line
-     * 3. Blank line:    signals end of headers
-     * 4. Optional body: present if Content-Length header > 0 (e.g., SDP in ANNOUNCE)
+     * Uses byte-by-byte reading to detect CRLF line endings without consuming
+     * binary data into a buffered reader's internal buffer — critical for the
+     * switch to RTP interleaved mode after RECORD.
      *
-     * SECURITY: Total message size is limited to [MAX_MESSAGE_BYTES] to prevent
-     * buffer exhaustion attacks (DoS via huge messages).
+     * SECURITY: Total message size capped at [MAX_MESSAGE_BYTES].
      *
-     * @return An [RtspRequest] object, or null if the connection was closed cleanly.
+     * @return Parsed [RtspRequest], or null on clean EOF / oversized message.
      */
-    private fun readRtspRequest(reader: BufferedReader): RtspRequest? {
-        // Read the request line (e.g., "OPTIONS rtsp://192.168.1.1/... RTSP/1.0")
-        val requestLine = reader.readLine() ?: return null  // null = connection closed
-        if (requestLine.isBlank()) return null
+    private fun readRtspRequest(inputStream: InputStream): RtspRequest? {
+        val requestLine = readLine(inputStream) ?: return null
+        if (requestLine.isBlank()) return readRtspRequest(inputStream)  // skip blank lines
 
-        // SECURITY: Validate that the request line has the expected format
         val parts = requestLine.split(" ")
         if (parts.size < 3) {
             Logger.w("Malformed RTSP request line: '$requestLine'")
             return null
         }
-
         val method = parts[0]
         val uri = parts[1]
 
-        // Read headers until a blank line
         val headers = mutableMapOf<String, String>()
         var totalBytes = requestLine.length
-        var line = reader.readLine()
 
-        while (line != null && line.isNotBlank()) {
+        while (true) {
+            val line = readLine(inputStream) ?: return null
+            if (line.isEmpty()) break  // blank line = end of headers
+
             totalBytes += line.length
-
-            // SECURITY: Reject messages that exceed the maximum allowed size
             if (totalBytes > MAX_MESSAGE_BYTES) {
-                Logger.w("RTSP message too large ($totalBytes bytes) — rejecting")
+                Logger.w("RTSP message too large — rejecting")
                 return null
             }
 
-            // Parse "Key: Value" header format
             val colonIndex = line.indexOf(':')
             if (colonIndex > 0) {
-                val key = line.substring(0, colonIndex).trim()
-                val value = line.substring(colonIndex + 1).trim()
-                headers[key] = value
+                headers[line.substring(0, colonIndex).trim()] =
+                    line.substring(colonIndex + 1).trim()
             }
-            line = reader.readLine()
         }
 
-        // Remember the CSeq for the response (RTSP requires echoing the request's CSeq)
         currentCSeq = headers["CSeq"]?.toIntOrNull() ?: 0
 
-        // Read the body if Content-Length is present
         val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
-        val body = if (contentLength > 0) {
-            // SECURITY: Validate body length before reading
-            if (contentLength > MAX_MESSAGE_BYTES) {
-                Logger.w("RTSP body too large ($contentLength bytes) — rejecting")
-                return null
+        val body = if (contentLength in 1..MAX_MESSAGE_BYTES) {
+            val buf = ByteArray(contentLength)
+            var read = 0
+            while (read < contentLength) {
+                val n = inputStream.read(buf, read, contentLength - read)
+                if (n == -1) return null
+                read += n
             }
-            val bodyChars = CharArray(contentLength)
-            reader.read(bodyChars, 0, contentLength)
-            String(bodyChars)
-        } else {
-            ""
-        }
+            String(buf, Charsets.UTF_8)
+        } else if (contentLength > MAX_MESSAGE_BYTES) {
+            Logger.w("RTSP body too large ($contentLength bytes) — rejecting")
+            return null
+        } else ""
 
         return RtspRequest(method = method, uri = uri, headers = headers, body = body)
+    }
+
+    /**
+     * Reads a single CRLF-terminated line from [inputStream], byte by byte.
+     *
+     * Returns null on EOF. Returns an empty string for a blank line (only `\r\n`).
+     * The trailing `\r\n` is stripped from the result.
+     */
+    private fun readLine(inputStream: InputStream): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val b = inputStream.read()
+            if (b == -1) return if (sb.isEmpty()) null else sb.toString()
+            if (b == '\r'.code) continue  // skip CR
+            if (b == '\n'.code) return sb.toString()
+            sb.append(b.toChar())
+            if (sb.length > MAX_MESSAGE_BYTES) return null  // safety valve
+        }
     }
 
     /**
@@ -264,7 +299,7 @@ class RtspHandler(
      *
      * @return An [RtspResponse] to send back to the client.
      */
-    private fun routeRequest(request: RtspRequest, writer: PrintWriter): RtspResponse {
+    private fun routeRequest(request: RtspRequest, outputStream: OutputStream): RtspResponse {
         Logger.d("RTSP ${request.method} ${request.uri}")
         return when (request.method) {
             "OPTIONS"       -> handleOptionsInternal(request)
@@ -436,7 +471,7 @@ class RtspHandler(
      * @param writer The output writer to the client socket.
      * @param response The [RtspResponse] to serialize and send.
      */
-    private fun sendResponse(writer: PrintWriter, response: RtspResponse) {
+    private fun sendResponse(outputStream: OutputStream, response: RtspResponse) {
         val sb = StringBuilder()
         sb.append("RTSP/1.0 ${response.statusCode} ${response.statusMessage}\r\n")
         sb.append("CSeq: $currentCSeq\r\n")
@@ -451,8 +486,8 @@ class RtspHandler(
         if (response.body.isNotEmpty()) {
             sb.append(response.body)
         }
-        writer.print(sb.toString())
-        writer.flush()
+        outputStream.write(sb.toString().toByteArray(Charsets.UTF_8))
+        outputStream.flush()
     }
 
     /**

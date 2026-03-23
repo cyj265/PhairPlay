@@ -75,6 +75,25 @@ class SdpParserTest {
         assertTrue(result!!.isAudioEncrypted)
     }
 
+    @Test
+    fun `sample rate is extracted from AAC-ELD rtpmap`() {
+        val result = SdpParser.parse(SDP_VIDEO_AUDIO)
+        assertEquals(44100, result!!.sampleRate)
+    }
+
+    @Test
+    fun `channel count is extracted from AAC-ELD rtpmap`() {
+        val result = SdpParser.parse(SDP_VIDEO_AUDIO)
+        assertEquals(2, result!!.channels)
+    }
+
+    @Test
+    fun `48000 Hz sample rate is extracted correctly`() {
+        val sdp48k = SDP_VIDEO_AUDIO.replace("mpeg4-generic/44100/2", "mpeg4-generic/48000/2")
+        val result = SdpParser.parse(sdp48k)
+        assertEquals(48000, result!!.sampleRate)
+    }
+
     // ─── Happy path: audio-only ───────────────────────────────────────────────
 
     @Test
@@ -101,6 +120,18 @@ class SdpParserTest {
     fun `ALAC frames-per-packet is extracted`() {
         val result = SdpParser.parse(SDP_AUDIO_ONLY_ALAC)
         assertEquals(352, result!!.alacFramesPerPacket)
+    }
+
+    @Test
+    fun `ALAC sample rate is extracted from fmtp`() {
+        val result = SdpParser.parse(SDP_AUDIO_ONLY_ALAC)
+        assertEquals(44100, result!!.sampleRate)
+    }
+
+    @Test
+    fun `ALAC channel count is extracted from fmtp`() {
+        val result = SdpParser.parse(SDP_AUDIO_ONLY_ALAC)
+        assertEquals(2, result!!.channels)
     }
 
     // ─── Error/boundary cases ────────────────────────────────────────────────

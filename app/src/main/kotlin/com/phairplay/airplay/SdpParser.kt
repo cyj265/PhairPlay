@@ -58,6 +58,8 @@ object SdpParser {
         var videoPayloadType = 96
         var audioPayloadType = 96
         var audioCodec = AudioCodec.UNKNOWN
+        var sampleRate = DEFAULT_SAMPLE_RATE
+        var channels = DEFAULT_CHANNELS
 
         // H.264 codec parameters
         var spsBytes: ByteArray? = null
@@ -95,8 +97,16 @@ object SdpParser {
                             h264ProfileLevelId = profile
                         }
                         "audio" -> {
-                            parseAudioCodec(attr)?.let { audioCodec = it }
-                            parseAlacFrameSize(attr)?.let { alacFramesPerPacket = it }
+                            parseAudioCodecFromRtpmap(attr)?.let { (codec, rate, ch) ->
+                                audioCodec = codec
+                                if (rate > 0) sampleRate = rate
+                                if (ch > 0) channels = ch
+                            }
+                            parseAlacFmtp(attr)?.let { (frames, rate, ch) ->
+                                alacFramesPerPacket = frames
+                                if (rate > 0) sampleRate = rate
+                                if (ch > 0) channels = ch
+                            }
                             parseAesKey(attr)?.let { aesKey = it }
                             parseAesIv(attr)?.let { aesIv = it }
                         }
@@ -126,6 +136,8 @@ object SdpParser {
             audioPort = audioPort,
             audioPayloadType = audioPayloadType,
             audioCodec = audioCodec,
+            sampleRate = sampleRate,
+            channels = channels,
             aesKey = aesKey,
             aesIv = aesIv,
             alacFramesPerPacket = alacFramesPerPacket
@@ -172,30 +184,49 @@ object SdpParser {
     }
 
     /**
-     * Parses an `rtpmap` attribute to identify the audio codec.
+     * Parses an `rtpmap` attribute to identify the audio codec, sample rate, and channels.
      *
-     * Recognized codec names:
-     * - `AppleLossless` → [AudioCodec.ALAC]
-     * - `mpeg4-generic` → [AudioCodec.AAC_ELD]
+     * Examples:
+     * - `rtpmap:96 AppleLossless`            → ALAC, rate=0 (get from fmtp), ch=0
+     * - `rtpmap:96 mpeg4-generic/44100/2`    → AAC_ELD, rate=44100, ch=2
+     * - `rtpmap:96 mpeg4-generic/48000/1`    → AAC_ELD, rate=48000, ch=1
+     *
+     * @return Triple(codec, sampleRate, channels) or null if not an audio rtpmap.
+     *   sampleRate/channels are 0 if not present in the rtpmap line.
      */
-    private fun parseAudioCodec(attr: String): AudioCodec? {
+    private fun parseAudioCodecFromRtpmap(attr: String): Triple<AudioCodec, Int, Int>? {
         if (!attr.startsWith("rtpmap:")) return null
-        return when {
-            attr.contains("AppleLossless", ignoreCase = true) -> AudioCodec.ALAC
-            attr.contains("mpeg4-generic", ignoreCase = true) -> AudioCodec.AAC_ELD
-            else -> null
+        val codecPart = attr.substringAfter(" ")  // e.g. "AppleLossless" or "mpeg4-generic/44100/2"
+        val parts = codecPart.split("/")
+        val codecName = parts[0]
+        val rate = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val ch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+
+        val codec = when {
+            codecName.contains("AppleLossless", ignoreCase = true) -> AudioCodec.ALAC
+            codecName.contains("mpeg4-generic", ignoreCase = true) -> AudioCodec.AAC_ELD
+            else -> return null
         }
+        return Triple(codec, rate, ch)
     }
 
     /**
-     * Parses an ALAC `fmtp` attribute to extract the frames-per-packet value.
+     * Parses an ALAC `fmtp` attribute to extract frames-per-packet, sample rate, and channels.
      *
-     * Expected format: `fmtp:96 <framesPerPacket> 0 16 40 10 14 2 255 0 0 44100`
+     * ALAC fmtp format (RFC 3640 / Apple spec):
+     * `fmtp:96 <frameLen> <version> <bitDepth> <ricePdBound> <riceDynamic> <riceHist>
+     *          <numChannels> <maxRun> <maxFrameBytes> <avgBitRate> <sampleRate>`
+     * Fields: index 0 = frameLen, index 6 = numChannels, index 10 = sampleRate
+     *
+     * @return Triple(alacFramesPerPacket, sampleRate, channels) or null if not an ALAC fmtp.
      */
-    private fun parseAlacFrameSize(attr: String): Int? {
+    private fun parseAlacFmtp(attr: String): Triple<Int, Int, Int>? {
         if (!attr.startsWith("fmtp:")) return null
         val tokens = attr.substringAfter(" ").split(" ")
-        return tokens.firstOrNull()?.toIntOrNull()
+        val framesPerPacket = tokens.getOrNull(0)?.toIntOrNull() ?: return null
+        val numChannels = tokens.getOrNull(6)?.toIntOrNull() ?: 0
+        val sampleRate = tokens.getOrNull(10)?.toIntOrNull() ?: 0
+        return Triple(framesPerPacket, sampleRate, numChannels)
     }
 
     /**
@@ -257,6 +288,8 @@ object SdpParser {
  * @param audioPort         RTP port for audio (UDP)
  * @param audioPayloadType  RTP payload type for audio (typically 96)
  * @param audioCodec        Detected audio codec ([AudioCodec])
+ * @param sampleRate        Audio sample rate in Hz (default 44100)
+ * @param channels          Number of audio channels (default 2 = stereo)
  * @param aesKey            16-byte AES-128 key for audio decryption (null if not encrypted)
  * @param aesIv             16-byte AES-128 IV for audio decryption (null if not encrypted)
  * @param alacFramesPerPacket ALAC frames-per-packet (only relevant for ALAC streams)
@@ -272,6 +305,8 @@ data class SessionDescription(
     val audioPort: Int = 0,
     val audioPayloadType: Int = 96,
     val audioCodec: AudioCodec = AudioCodec.UNKNOWN,
+    val sampleRate: Int = 44100,
+    val channels: Int = 2,
     val aesKey: ByteArray? = null,
     val aesIv: ByteArray? = null,
     val alacFramesPerPacket: Int = 352
@@ -317,6 +352,10 @@ data class SessionDescription(
         return this.contentEquals(other)
     }
 }
+
+// ─── Companion constants (used in SdpParser + tests) ────────────────────────
+private const val DEFAULT_SAMPLE_RATE = 44100
+private const val DEFAULT_CHANNELS = 2
 
 /** Identifies the audio codec used in the AirPlay audio stream. */
 enum class AudioCodec {

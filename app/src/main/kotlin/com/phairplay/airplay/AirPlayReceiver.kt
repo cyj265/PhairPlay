@@ -2,6 +2,7 @@ package com.phairplay.airplay
 
 import android.content.Context
 import android.view.Surface
+import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,68 +12,70 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * AirPlayReceiver — Top-level orchestrator for the AirPlay 2 receiver.
+ * AirPlayReceiver — Top-level orchestrator for the AirPlay 2 receiver pipeline.
  *
- * WHY: This class is the central coordinator that ties together all the components:
- * mDNS advertising ([MdnsService]), RTSP session handling ([RtspHandler]),
- * video decoding ([VideoDecoder]), and audio playback ([AudioPlayer]).
- * Having one orchestrator keeps the complexity out of MainActivity and makes
- * the lifecycle and state transitions easy to reason about.
+ * WHY: Coordinates all AirPlay components into a single lifecycle:
+ * - [MdnsService]: mDNS advertising (makes device visible in sender pickers)
+ * - [RtspHandler]: RTSP handshake (OPTIONS → ANNOUNCE → SETUP → RECORD)
+ * - [VideoDecoder]: H.264 hardware decode via MediaCodec → SurfaceView
+ * - [AudioPlayer]: AES-128-CTR decrypt + AAC/ALAC decode → AudioTrack
  *
- * HOW: Call [start] when the Activity is created and [stop] when it is destroyed.
- * The receiver manages its own coroutine scope and cleans up all resources on stop.
+ * HOW: [PhairPlayService] creates this receiver and calls [start]/[stop].
+ * The pipeline activates lazily — VideoDecoder and AudioPlayer are created
+ * only after RECORD is received, when [SessionDescription] is available.
+ *
+ * For audio-only streams (music, podcasts), only [AudioPlayer] is started —
+ * no [VideoDecoder] and no fullscreen streaming surface is needed.
+ *
+ * State changes are reported via [onStateChanged] to [PhairPlayService].
  *
  * Example:
  *   val receiver = AirPlayReceiver(
- *       context = this,
+ *       context = context,
+ *       displayName = settings.effectiveDisplayName,
  *       videoSurfaceProvider = { streamingScreen.getSurface() },
- *       onStateChanged = { state -> handleStateChange(state) }
+ *       onStateChanged = { state -> /* update UI */ }
  *   )
- *   receiver.start()   // in onCreate()
- *   receiver.stop()    // in onDestroy()
+ *   receiver.start()
+ *   receiver.stop()
  */
 class AirPlayReceiver(
     private val context: Context,
-    // Lambda that returns the video Surface — called lazily when streaming starts,
-    // by which time the SurfaceView has completed its layout pass and is ready.
+    /** User-configured display name from Settings (blank = use system device name). */
+    private val displayName: String = "",
+    /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
-    private val onStateChanged: (AirPlayState) -> Unit
+    private val onStateChanged: (ProtocolState) -> Unit
 ) {
 
-    // SupervisorJob: if one child coroutine fails, the others keep running.
-    // This prevents a network glitch from crashing the entire receiver.
+    // SupervisorJob: child coroutine failures don't propagate to siblings.
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
 
-    // Current state — starts in WAITING, switches to STREAMING when a client connects
-    @Volatile
-    private var currentState: AirPlayState = AirPlayState.WAITING
-
-    // Child components — initialized in start(), cleaned up in stop()
+    // Child components
     private var mdnsService: MdnsService? = null
     private var rtspHandler: RtspHandler? = null
+    private var videoDecoder: VideoDecoder? = null
+    private var audioPlayer: AudioPlayer? = null
 
     /**
      * Starts the AirPlay receiver.
      *
-     * This method:
-     * 1. Creates and starts the mDNS service (makes the device discoverable)
-     * 2. Creates and starts the RTSP handler (listens for incoming connections)
-     * 3. Emits the initial [AirPlayState.WAITING] state to the UI
+     * 1. Starts mDNS advertising with the configured display name.
+     * 2. Opens the RTSP server socket (port 7000).
+     * 3. Emits [ProtocolState.ADVERTISING] once both mDNS services are registered.
      *
-     * This method is non-blocking — all network operations run in background coroutines.
+     * Non-blocking — all network work runs in background coroutines.
      */
     fun start() {
-        Logger.i("AirPlayReceiver starting")
+        Logger.i("AirPlayReceiver starting (displayName='$displayName')")
         scope.launch {
             try {
                 startMdnsService()
                 startRtspHandler()
-                emitState(AirPlayState.WAITING)
             } catch (e: Exception) {
-                // Catch startup errors so the app doesn't crash — log and show waiting screen
                 Logger.e("Failed to start AirPlayReceiver", e)
-                emitState(AirPlayState.WAITING)
+                emitState(ProtocolState.ERROR)
             }
         }
     }
@@ -80,101 +83,164 @@ class AirPlayReceiver(
     /**
      * Stops the AirPlay receiver and releases all resources.
      *
-     * This method:
-     * 1. Stops the RTSP handler (closes sockets, releases MediaCodec and AudioTrack)
-     * 2. Stops mDNS advertising (device disappears from AirPlay picker)
-     * 3. Cancels all background coroutines
+     * Stops RTSP handler, mDNS advertising, video decoder, and audio player.
+     * Cancels all background coroutines.
      *
-     * RULE 5: This MUST be called from Activity.onDestroy() to prevent memory leaks.
-     * After stop(), this object should not be reused — create a new instance instead.
+     * MUST be called when [PhairPlayService] stops or is destroyed.
      */
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
         try {
             rtspHandler?.stop()
             mdnsService?.stop()
+            releaseMediaComponents()
         } catch (e: Exception) {
             Logger.e("Error during AirPlayReceiver stop", e)
         } finally {
-            // Cancel all coroutines — this is safe even if they've already finished
             scope.cancel()
         }
     }
 
-    /**
-     * Called by [RtspHandler] when a macOS sender connects and starts streaming.
-     * Switches the UI to the StreamingScreen.
-     *
-     * This method is called from the IO dispatcher (network thread), so it
-     * dispatches to the Main thread before notifying the UI.
-     */
-    internal fun onStreamingStarted() {
-        Logger.i("Streaming started")
-        emitState(AirPlayState.STREAMING)
+    // ─── Private: startup ────────────────────────────────────────────────────
+
+    private fun startMdnsService() {
+        mdnsService = MdnsService(context, onStateChange = { state ->
+            emitState(state)
+        }).also { it.start(displayName.ifBlank { null }) }
+        Logger.d("mDNS service started")
     }
 
+    private fun startRtspHandler() {
+        rtspHandler = RtspHandler(
+            videoSurfaceProvider = videoSurfaceProvider,
+            onStreamingStarted = { session -> onStreamingStarted(session) },
+            onStreamingStopped = { onStreamingStopped() }
+        ).also { it.start(scope) }
+        Logger.d("RTSP handler started on port 7000")
+    }
+
+    // ─── Private: streaming lifecycle ────────────────────────────────────────
+
     /**
-     * Called by [RtspHandler] when a macOS sender disconnects (TEARDOWN or socket close).
-     * Switches the UI back to the WaitingScreen and restarts mDNS advertising.
+     * Called by [RtspHandler] when RECORD is received and [SessionDescription] is ready.
      *
-     * This method is called from the IO dispatcher (network thread), so it
-     * dispatches to the Main thread before notifying the UI.
+     * Wires the media pipeline:
+     * - video stream: creates [VideoDecoder] + wires [RtspHandler.onVideoNalUnit]
+     * - audio stream: creates [AudioPlayer]
+     * - audio-only:   only [AudioPlayer], app stays on HomeScreen
      */
-    internal fun onStreamingStopped() {
-        Logger.i("Streaming stopped — returning to waiting state")
-        emitState(AirPlayState.WAITING)
-        // Re-advertise so the device is immediately visible in the macOS AirPlay picker again
+    private fun onStreamingStarted(session: SessionDescription) {
+        Logger.i("Streaming started — video=${session.hasVideo} audio=${session.hasAudio} " +
+                 "audioOnly=${session.isAudioOnly}")
+
         scope.launch {
             try {
-                mdnsService?.restart()
+                if (session.hasVideo) startVideoDecoder(session)
+                if (session.hasAudio) startAudioPlayer(session)
+                emitState(ProtocolState.CONNECTED)
             } catch (e: Exception) {
-                Logger.e("Failed to restart mDNS after streaming stopped", e)
+                Logger.e("Failed to start media pipeline", e)
+                emitState(ProtocolState.ERROR)
             }
         }
     }
 
     /**
-     * Initializes and starts the mDNS service.
-     * Must be called from a coroutine scope (runs on IO dispatcher).
+     * Called when streaming ends (TEARDOWN received or socket closed).
+     *
+     * Releases media components and re-advertises so the device reappears
+     * in sender pickers immediately.
      */
-    private fun startMdnsService() {
-        mdnsService = MdnsService(context).also { it.start() }
-        Logger.d("mDNS service started")
+    private fun onStreamingStopped() {
+        Logger.i("Streaming stopped — releasing media components")
+        releaseMediaComponents()
+        emitState(ProtocolState.ADVERTISING)
+
+        scope.launch {
+            try {
+                mdnsService?.restart(displayName.ifBlank { null })
+            } catch (e: Exception) {
+                Logger.e("Failed to restart mDNS after streaming", e)
+            }
+        }
+    }
+
+    // ─── Private: media pipeline ──────────────────────────────────────────────
+
+    /**
+     * Initializes [VideoDecoder] with SPS/PPS from the [SessionDescription].
+     *
+     * Resolution hint: AirPlay SDP does not include width/height — the actual
+     * resolution is embedded in the SPS NAL unit. We pass [DEFAULT_VIDEO_WIDTH] ×
+     * [DEFAULT_VIDEO_HEIGHT] as a hint; MediaCodec reads the real size from SPS.
+     *
+     * [RtspHandler.onVideoNalUnit] is wired here so RTP interleaved NAL units
+     * flow directly into [VideoDecoder.decodeNalUnit].
+     */
+    private fun startVideoDecoder(session: SessionDescription) {
+        val surface = videoSurfaceProvider() ?: run {
+            Logger.w("VideoDecoder: no surface available — skipping video pipeline")
+            return
+        }
+        val sps = session.spsBytes ?: run {
+            Logger.w("VideoDecoder: no SPS in SDP — skipping")
+            return
+        }
+        val pps = session.ppsBytes ?: run {
+            Logger.w("VideoDecoder: no PPS in SDP — skipping")
+            return
+        }
+
+        videoDecoder = VideoDecoder(surface).also { decoder ->
+            decoder.initialize(sps, pps, DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)
+            rtspHandler?.onVideoNalUnit = { nalUnit, ptsUs ->
+                decoder.decodeNalUnit(nalUnit, ptsUs)
+            }
+        }
+        Logger.i("VideoDecoder started (${DEFAULT_VIDEO_WIDTH}x${DEFAULT_VIDEO_HEIGHT} hint)")
     }
 
     /**
-     * Initializes and starts the RTSP handler.
-     * Must be called from a coroutine scope (runs on IO dispatcher).
+     * Initializes [AudioPlayer] with codec and encryption params from [SessionDescription].
      *
-     * The videoSurfaceProvider lambda is passed through to RtspHandler, which
-     * calls it when the RTSP RECORD command is received (at which point the
-     * Surface is guaranteed to be ready after the Activity's initial layout pass).
+     * If no AES key/IV is present (unencrypted stream), zero arrays are used —
+     * [AudioPlayer] treats a zero key as pass-through (no effective decryption).
      */
-    private fun startRtspHandler() {
-        rtspHandler = RtspHandler(
-            videoSurfaceProvider = videoSurfaceProvider,
-            onStreamingStarted = { onStreamingStarted() },
-            onStreamingStopped = { onStreamingStopped() }
-        ).also { it.start(scope) }
-        Logger.d("RTSP handler started")
+    private fun startAudioPlayer(session: SessionDescription) {
+        val key = session.aesKey ?: ByteArray(16)
+        val iv  = session.aesIv  ?: ByteArray(16)
+
+        audioPlayer = AudioPlayer().also { player ->
+            player.initialize(key, iv, session.sampleRate, session.channels)
+        }
+        Logger.i("AudioPlayer started (${session.sampleRate}Hz × ${session.channels}ch, " +
+                 "codec=${session.audioCodec}, encrypted=${session.isAudioEncrypted})")
     }
 
-    /**
-     * Emits a state change to the UI callback.
-     *
-     * The callback is always dispatched on the Main thread because UI updates
-     * must run on the Main thread (Android rule). This method handles the
-     * thread switch from IO → Main transparently.
-     *
-     * @param state The new [AirPlayState] to emit.
-     */
-    private fun emitState(state: AirPlayState) {
-        if (currentState == state) return  // Skip no-op transitions
-        currentState = state
+    /** Clears the video NAL callback and releases both media components. */
+    private fun releaseMediaComponents() {
+        rtspHandler?.onVideoNalUnit = null
+        videoDecoder?.release()
+        videoDecoder = null
+        audioPlayer?.release()
+        audioPlayer = null
+    }
+
+    // ─── Private: state emission ─────────────────────────────────────────────
+
+    /** Dispatches [state] on the Main thread (Android UI rule). */
+    private fun emitState(state: ProtocolState) {
         scope.launch {
             withContext(Dispatchers.Main) {
                 onStateChanged(state)
             }
         }
+    }
+
+    companion object {
+        // Hint dimensions for MediaCodec configuration.
+        // Real resolution is encoded in the H.264 SPS NAL unit.
+        private const val DEFAULT_VIDEO_WIDTH  = 1920
+        private const val DEFAULT_VIDEO_HEIGHT = 1080
     }
 }
