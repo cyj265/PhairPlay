@@ -1,7 +1,7 @@
 # PhairPlay – Technical Specification
 
-Version: 1.1
-Status: Draft
+Version: 1.2
+Status: Active
 Date: 2026-03-23
 
 ---
@@ -91,15 +91,25 @@ RTP bytes (TCP) → RtspHandler strips RTP header →
 VideoDecoder extracts NAL units → MediaCodec (hardware) → SurfaceView
 ```
 
-**H.264 profile:** Baseline or Main profile, level 4.0 or lower.
+**H.264 profile:** Up to High Profile Level 5.2. Typical mirroring uses Constrained High Profile (CHP) or Main Profile. The decoder must handle all profiles up to High Profile Level 5.2 (supports 1080p @ 60fps and 4K @ 30fps).
+
+**H.265 / HEVC (optional):** Used by Apple TV 4K for 4K content. Enabled only if `MediaCodecInfo` reports hardware `video/hevc` support. The SDP `a=rtpmap` line will contain `H265/90000` in this case. Falls back to H.264 if HEVC is not available.
 
 ### Step 4 – Audio Streaming
 
 Audio is sent as **RTP packets over a separate UDP socket** (port negotiated in SETUP).
 
-Audio format is either:
-- **AAC-ELD** (Enhanced Low Delay AAC) — default for screen mirroring
-- **ALAC** (Apple Lossless) — higher quality, higher bandwidth
+Audio format is one of:
+- **AAC-LC** — Low Complexity AAC, used for screen mirroring (lower bitrate)
+- **AAC-ELD** (Enhanced Low Delay AAC) — used when low-latency audio is required during mirroring
+- **ALAC** (Apple Lossless) 16-bit / 44.1 kHz — default for music/podcast audio-only streaming
+- **LPCM** — uncompressed PCM, used when the sender requests minimal processing latency
+
+**Surround audio (optional):**
+- **Dolby Atmos** (E-AC3 with JOC) — on hardware that supports `AudioFormat.ENCODING_E_AC3_JOC`
+- **AC-3** (Dolby Digital) — on hardware that supports `AudioFormat.ENCODING_AC3`
+
+Detection of surround format is done via `AudioManager.getDevices()` at startup and advertised in the mDNS `features` bitmask accordingly.
 
 Audio packets are **AES-128-CTR encrypted**. The key and IV are provided in the SDP body of the ANNOUNCE request.
 
@@ -319,18 +329,179 @@ The `firetv` flavor MUST NOT use any API gated on API level 26+ without a versio
 
 The `features` TXT record is a bitmask that tells macOS which AirPlay capabilities the receiver has. PhairPlay v1.0 will advertise the following flags (based on the open AirPlay spec):
 
-| Bit | Feature | PhairPlay v1 |
-|---|---|---|
-| 0 | Video | ✅ Supported |
-| 1 | Photo | ❌ Not supported |
-| 2 | VideoFairPlay | ❌ Not supported |
-| 5 | Screen | ✅ Supported (mirroring) |
-| 6 | Screen Rotate | ✅ Supported |
-| 7 | Audio | ✅ Supported |
-| 9 | AudioRedundant | ✅ Supported |
-| 14 | AudioSyncedVideo | ✅ Supported |
-| 23 | HasUnifiedAdvertiserInfo | ✅ Supported |
-| 26 | SupportsAirPlayVideoV2 | ✅ Supported |
-| 27 | MetaDataFeatures_0 | ✅ Supported |
+| Bit | Feature | PhairPlay v1 | Notes |
+|---|---|---|---|
+| 0 | Video | ✅ Supported | H.264 AVC mandatory |
+| 1 | Photo | ✅ Supported | JPEG/PNG via `/photo` endpoint — see §9 |
+| 2 | VideoFairPlay | ❌ Not supported | Requires Apple FPS license — see §11 |
+| 5 | Screen | ✅ Supported | Screen mirroring |
+| 6 | Screen Rotate | ✅ Supported | Landscape/portrait |
+| 7 | Audio | ✅ Supported | ALAC / AAC-LC / AAC-ELD / LPCM |
+| 9 | AudioRedundant | ✅ Supported | |
+| 14 | AudioSyncedVideo | ✅ Supported | A/V sync via NTP |
+| 23 | HasUnifiedAdvertiserInfo | ✅ Supported | |
+| 26 | SupportsAirPlayVideoV2 | ✅ Supported | |
+| 27 | MetaDataFeatures_0 | ✅ Supported | |
 
-The resulting hex value for the `features` field: `0x5A7FFFF7,0x1E` (will be refined during implementation).
+The resulting hex value for the `features` field: `0x5A7FFFF7,0x1E` (will be refined during implementation to include the Photo bit).
+
+---
+
+## 9. Photo / Image Sharing via AirPlay
+
+### Overview
+
+AirPlay supports sending individual still images (JPEG or PNG) from macOS/iOS to a receiver. This is distinct from video mirroring: no RTSP session is involved; instead, the sender makes an HTTP `PUT` or `POST` request to the receiver's `/photo` endpoint.
+
+### Protocol Flow
+
+```
+macOS/iOS                        PhairPlay (Android TV)
+    │                                    │
+    │── PUT /photo HTTP/1.1 ───────────► │
+    │   Content-Type: image/jpeg         │
+    │   X-Apple-AssetKey: <uuid>         │
+    │   Content-Length: <N>              │
+    │   [JPEG body]                      │
+    │◄─ HTTP/1.1 200 OK ────────────────│
+    │                                    │
+    │   [photo displayed on TV]          │
+    │── DELETE /photo HTTP/1.1 ─────────►│  "Clear the image"
+    │◄─ HTTP/1.1 200 OK ────────────────│
+```
+
+The HTTP server listens on the same port as the RTSP server (port 7000) or a separate HTTP port (to be decided during implementation). The `RtspHandler` is extended to detect non-RTSP requests (HTTP verbs `PUT`, `GET`, `DELETE`) and route them to a new `PhotoHandler` component.
+
+### Android Implementation
+
+```
+HTTP PUT /photo → PhotoHandler.receive(inputStream, contentType, contentLength)
+  → BitmapFactory.decodeStream(inputStream)   // JPEG or PNG
+  → PhotoScreen (full-screen ImageView)
+  → BitmapDrawable displayed via ImageView.setImageBitmap()
+```
+
+No video decoder or MediaCodec is used. Image decoding runs on the `IO Dispatcher` (never on Main Thread). Display update runs on the `Main Thread`.
+
+### Supported Image Formats
+
+| Format | MIME Type | Android API | Notes |
+|---|---|---|---|
+| JPEG | `image/jpeg` | All API levels | Most common from AirPlay |
+| PNG | `image/png` | All API levels | Transparency support |
+| HEIC | `image/heic` | API 28+ | Optional, hardware-dependent |
+
+HEIC (High Efficiency Image Container) is optional and only attempted if `BitmapFactory.isSupportedMimeType("image/heic")` returns true; otherwise the receiver returns HTTP 415 Unsupported Media Type.
+
+### New Component: `PhotoHandler`
+
+| Component | File | Responsibility |
+|---|---|---|
+| `PhotoHandler` | `airplay/PhotoHandler.kt` | Receives HTTP PUT requests; decodes JPEG/PNG via BitmapFactory; emits Bitmap to UI |
+| `PhotoScreen` | `ui/PhotoScreen.kt` | Full-screen Fragment with ImageView; displayed when a photo is received |
+
+### Memory Management
+
+- Images are loaded into `Bitmap` objects. Large images (e.g., 4K JPEG) are downsampled using `BitmapFactory.Options.inSampleSize` to fit the display resolution.
+- Bitmaps are recycled immediately when the photo session ends or a new image replaces the previous one.
+- Maximum loaded image size: display resolution (e.g., 1920×1080 pixels), never larger.
+
+---
+
+## 10. Codec Matrix – All Protocols
+
+The following table summarises the full codec support across all three protocols.
+
+### 10.1 Video Codecs
+
+| Codec | AirPlay 2 | Miracast (WFD) | Google Cast | Android API | Hardware Required |
+|---|---|---|---|---|---|
+| H.264 AVC (Baseline/Main) | ✅ Mandatory | ✅ Mandatory (CBP) | ✅ Mandatory | API 16+ | Yes (MediaCodec) |
+| H.264 AVC (High Profile, up to L5.2) | ✅ Mandatory | ✅ Mandatory (CHP) | ✅ Mandatory | API 16+ | Yes |
+| H.265 HEVC | ✅ Optional | ✅ Optional | ✅ Optional | API 21+ | Yes (capability check) |
+| VP8 | ❌ Not used | ❌ Not used | ✅ Mandatory | API 16+ | Yes |
+| VP9 | ❌ Not used | ❌ Not used | ✅ Optional | API 23+ | Yes |
+| AV1 | ❌ Not used | ❌ Not used | ✅ Optional | API 29+ (SW), 31+ (HW) | Preferred HW |
+
+**Runtime capability check** (applied for all optional codecs):
+```kotlin
+val codecList = MediaCodecList(MediaCodecList.SECURE_CODECS_ONLY)
+val format = MediaFormat.createVideoFormat(mimeType, width, height)
+val decoderName = codecList.findDecoderForFormat(format)
+val isSupported = decoderName != null
+```
+
+### 10.2 Audio Codecs
+
+| Codec | AirPlay 2 | Miracast (WFD) | Google Cast | Notes |
+|---|---|---|---|---|
+| LPCM 16-bit / 44.1–48 kHz | ✅ Mandatory (mirror) | ✅ Mandatory | ✅ Mandatory (WAV) | Via AudioTrack directly |
+| AAC-LC | ✅ Mandatory (mirror) | ✅ Optional | ✅ Mandatory | MediaCodec `audio/mp4a-latm` |
+| AAC-ELD | ✅ Mandatory (mirror) | — | — | Enhanced Low Delay variant |
+| AAC-HE | — | ✅ Optional | ✅ Mandatory | High Efficiency AAC |
+| ALAC | ✅ Mandatory (music) | — | — | Apple Lossless; Android MediaCodec `audio/alac` |
+| MP3 | — | — | ✅ Mandatory | MediaCodec `audio/mpeg` |
+| Opus | — | — | ✅ Optional | MediaCodec `audio/opus` (API 21+) |
+| FLAC | — | — | ✅ Optional | MediaCodec `audio/flac` (API 21+) |
+| AC-3 (Dolby Digital) | ✅ Optional (surround) | ✅ Optional | — | `AudioFormat.ENCODING_AC3` |
+| E-AC-3 / Dolby Atmos (JOC) | ✅ Optional (surround) | — | ✅ Optional | `AudioFormat.ENCODING_E_AC3_JOC` |
+| Dolby Digital Plus (E-AC3) | — | — | ✅ Optional | `AudioFormat.ENCODING_E_AC3` |
+
+### 10.3 Container Formats
+
+| Container | AirPlay 2 | Miracast (WFD) | Google Cast | Notes |
+|---|---|---|---|---|
+| MPEG-TS | — | ✅ Required | — | WFD stream encapsulation |
+| MP4 / ISOBMFF | ✅ Required | — | ✅ Required | Standard media container |
+| MOV | ✅ Required | — | — | Apple QuickTime container |
+| M4V | ✅ Required | — | — | iTunes video container |
+| WebM | — | — | ✅ Required | VP8/VP9/AV1 container |
+| HLS | ✅ Required | — | ✅ Required | Adaptive bitrate streaming |
+| DASH | — | — | ✅ Required | Adaptive bitrate streaming |
+| RTP/RTSP | ✅ Required (mirror) | ✅ Required | — | Live mirroring transport |
+
+### 10.4 Maximum Resolution & HDR
+
+| Protocol | Mandatory Max | Optional Max | HDR |
+|---|---|---|---|
+| AirPlay 2 | 1080p @ 60fps | 4K UHD @ 60fps | HDR10, Dolby Vision (optional, API 24+) |
+| Miracast (WFD) | 1080p @ 60fps | 4K UHD @ 60fps | — |
+| Google Cast | 1080p @ 60fps | 4K UHD @ 60fps | HDR10+ (optional) |
+
+---
+
+## 11. DRM / Copy Protection
+
+### 11.1 HDCP (Miracast)
+
+HDCP 2.x (High-bandwidth Digital Content Protection) is negotiated at the **WFD protocol level** during session setup. The WFD capability exchange includes HDCP capability bits:
+
+```
+wfd-content-protection: HDCP2.2 port=1189
+```
+
+If the receiver does not support HDCP and the sender requires it, the session setup fails gracefully (WFD RTSP `403 Forbidden`). Android TV hardware typically includes HDCP 2.x support via the SoC's secure video path. PhairPlay does not implement the HDCP key exchange itself — it is handled by the Android framework's `MediaDrm` / display pipeline.
+
+### 11.2 Widevine & PlayReady (Google Cast)
+
+Google Cast streams for DRM-protected content use **Widevine** (Google's DRM) or **PlayReady** (Microsoft's DRM). These are handled entirely by:
+1. The **Google Cast SDK** (CastReceiverContext / MediaManager)
+2. Android's **`MediaDrm` API** (used internally by the Cast SDK)
+
+PhairPlay does **not** need to implement Widevine or PlayReady key exchange logic. The Cast SDK handles license acquisition, key delivery, and secure decryption. On devices without Widevine L1 (hardware-secured), content providers may restrict playback to Widevine L3 (software).
+
+### 11.3 FairPlay (AirPlay)
+
+**Status: Not implemented. Not planned for v1.**
+
+FairPlay Streaming (FPS) is Apple's proprietary DRM for HLS content. A full evaluation is provided in `REQUIREMENTS.md §3`. Summary:
+
+| Aspect | Assessment |
+|---|---|
+| Technical feasibility on Android | Not feasible — Apple has never released an Android KSM binary |
+| Open-source compatibility | Incompatible — FPS license restricts distribution |
+| Scope of impact | Only affects premium DRM-protected content (Apple TV+, iTunes purchases) |
+| Unencrypted AirPlay | Fully supported — FairPlay only applies to licensed premium content |
+| Workaround | None within scope — users must use unprotected content for AirPlay to PhairPlay |
+
+AirPlay screen mirroring (which uses session AES-128-CTR encryption, **not** FairPlay) is fully supported. FairPlay only applies to streaming licensed premium video content directly to the receiver.

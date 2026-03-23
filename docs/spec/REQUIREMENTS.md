@@ -1,7 +1,7 @@
 # PhairPlay – Requirements
 
-Version: 2.1
-Status: Draft
+Version: 2.2
+Status: Active
 Date: 2026-03-23
 
 ---
@@ -24,16 +24,46 @@ Date: 2026-03-23
 - FR-09: Complete the RTSP handshake (OPTIONS → SETUP → ANNOUNCE → RECORD) without errors.
 - FR-10: Reject second concurrent AirPlay connection with RTSP 503.
 - FR-11: Auto-reconnect and resume advertising after connection loss.
-- FR-12 *(new)*: Accept **audio-only AirPlay** streams (music, podcasts) from macOS and iOS senders, playing audio through the TV speakers without requiring a video stream.
+- FR-12: Accept **audio-only AirPlay** streams (music, podcasts) from macOS and iOS senders, playing audio through the TV speakers without requiring a video stream.
+
+#### AirPlay 2 Codec Requirements
+
+| Category | Codec / Format | Status | Notes |
+|---|---|---|---|
+| Video (Mandatory) | H.264 AVC — up to High Profile Level 5.2 | **Required** | Hardware MediaCodec decode |
+| Video (Optional / 4K) | H.265 HEVC | Optional | From Apple TV 4K baseline; hardware check required |
+| Audio (Mandatory – Mirroring) | AAC-LC or LPCM (depending on latency requirements) | **Required** | AAC-LC for low bandwidth, LPCM for minimal latency |
+| Audio (Mandatory – Music) | ALAC (Apple Lossless) 16-bit / 44.1 kHz | **Required** | Default for music/podcast streaming |
+| Audio (Surround – Optional) | Dolby Atmos (E-AC3 with JOC), AC-3 | Optional | Only on capable hardware |
+| Container | MP4, MOV, M4V; HLS (HTTP Live Streaming) | **Required** | As used by AirPlay media sessions |
+| Image / Photo | JPEG, PNG (via `/photo` HTTP endpoint) | **Required** | See FR-42 |
+| Max Resolution | Up to 4K UHD @ 60fps (HDR10, Dolby Vision) | Optional | 1080p @ 60fps is mandatory baseline |
+| DRM | FairPlay (evaluation only — see §3) | Not in v1 | Requires Apple licensing |
+
+- FR-42: Accept **AirPlay Photo / Image** transfers sent by iOS/macOS (via the `/photo` HTTP endpoint). Display the received image full-screen. Support JPEG and PNG. Return to HomeScreen on connection close. (Requires AirPlay feature bit 1 `Photo` to be set in the `features` TXT record.)
 
 ### 1.3 Miracast Receiver
 
 - FR-13: Discover and accept incoming Miracast (Wi-Fi Display / WFD) connection requests.
 - FR-14: Negotiate the WFD session (capability exchange, RTSP-WFD handshake).
-- FR-15: Decode and display the incoming H.264 video stream from the Miracast sender.
-- FR-16: Play audio from the Miracast stream (PCM/AAC via HDMI).
+- FR-15: Decode and display the incoming video stream from the Miracast sender per the codec matrix below.
+- FR-16: Play audio from the Miracast stream per the codec matrix below.
 - FR-17: Support Windows 10+, Android, and Samsung Galaxy as Miracast senders (Phase 3+).
 - FR-18: Show the Miracast connection state on the HomeScreen status card.
+
+#### Miracast (WFD) Codec Requirements
+
+| Category | Codec / Format | Status | Notes |
+|---|---|---|---|
+| Video (Mandatory) | H.264 AVC — Constrained High Profile (CHP) and Constrained Baseline Profile (CBP), up to Level 4.2 | **Required** | WFD spec primary codec |
+| Video (Optional / 4K) | H.265 HEVC | Optional | Newer senders (Windows 11 / Android 10+) |
+| Audio (Mandatory) | LPCM 16-bit / 48 kHz (mono, stereo) | **Required** | WFD baseline audio |
+| Audio (Optional) | AAC-LC, AAC-HE | Optional | More efficient than LPCM |
+| Audio (Surround – Optional) | AC-3 (Dolby Digital) | Optional | When sender/display supports it |
+| Container | MPEG-TS (MPEG Transport Stream) | **Required** | Standard WFD stream encapsulation |
+| Max Resolution | 1080p @ 60fps | **Required** | Mandatory WFD baseline |
+| Max Resolution (Optional) | 4K UHD @ 60fps | Optional | Only on hardware that supports it |
+| DRM / Copy Protection | HDCP 2.x (hardware-based link protection) | **Required** | Negotiated during WFD setup |
 
 ### 1.4 Google Cast Receiver
 
@@ -42,6 +72,19 @@ Date: 2026-03-23
 - FR-21: Support Cast screen mirroring from Chrome and Android senders.
 - FR-22: Display Cast status on the HomeScreen status card.
 - FR-23: Gracefully degrade if the Cast SDK is unavailable (missing Google Play Services on Fire TV).
+
+#### Google Cast Codec Requirements
+
+| Category | Codec / Format | Status | Notes |
+|---|---|---|---|
+| Video (Mandatory) | H.264 AVC (Baseline, Main, High Profile); VP8 | **Required** | Cast baseline codecs |
+| Video (Optional / 4K) | H.265 HEVC, VP9, AV1 | Optional | Newer hardware (Android TV API 31+ for AV1) |
+| Audio (Mandatory) | AAC-LC, AAC-HE, MP3, WAV (LPCM) | **Required** | Cast baseline audio |
+| Audio (Surround – Optional) | Dolby Digital Plus (E-AC3), Dolby Atmos, Opus, FLAC | Optional | High-quality audio on capable devices |
+| Container | MP4, WebM | **Required** | Native Cast containers |
+| Container (Adaptive) | DASH (Dynamic Adaptive Streaming over HTTP), HLS | **Required** | For adaptive bitrate streaming |
+| Max Resolution | Up to 4K UHD @ 60fps (HDR10+) | Optional | 1080p mandatory, 4K hardware-dependent |
+| DRM | Widevine L1 / L3, PlayReady | **Required** | For DRM-protected content streams |
 
 ### 1.5 Service Control
 
@@ -70,11 +113,16 @@ Date: 2026-03-23
 
 ### 1.7 Video / Audio
 
-- FR-33: Decode H.264 video using hardware MediaCodec (H.265/HEVC to be evaluated in v2, see §3).
+- FR-33: Decode video using hardware `MediaCodec`. Supported codecs per protocol:
+  - **AirPlay**: H.264 AVC (mandatory, up to High Profile Level 5.2); H.265 HEVC (optional, hardware check required).
+  - **Miracast**: H.264 AVC CHP/CBP (mandatory); H.265 HEVC (optional).
+  - **Google Cast**: H.264 AVC + VP8 (mandatory); H.265 HEVC, VP9, AV1 (optional, API-level gated).
+  - Software fallback is NOT used; if hardware decoder is unavailable, the stream is rejected gracefully.
 - FR-34: Display decoded video full-screen maintaining aspect ratio.
 - FR-35: Play audio in sync with video (A/V drift ≤ 40ms).
 - FR-36: For **audio-only** streams (no video): play through the default audio output without launching the streaming screen.
 - FR-37: Return to HomeScreen (or remain on HomeScreen for audio-only) when stream ends.
+- FR-43: For **image / photo** transfers (AirPlay `/photo` endpoint): display received JPEG or PNG full-screen. No video decoder is involved; image is decoded via Android's `BitmapFactory`. Return to HomeScreen when sender disconnects.
 
 ### 1.8 Internationalization (i18n)
 
@@ -122,21 +170,43 @@ Date: 2026-03-23
 
 ---
 
-## 3. Explicitly Excluded Features (v1)
+## 3. Explicitly Excluded / Deferred Features
 
-| Feature | Reason | Future |
+| Feature | Reason | Status |
 |---|---|---|
-| FairPlay DRM content | Apple license required | Not planned |
-| HomeKit / HAP pairing | Complex, separate protocol | v3 roadmap |
+| FairPlay DRM (streaming content) | See evaluation note below | Not in v1; v2 research item |
+| HomeKit / HAP pairing | Complex separate protocol | v3 roadmap |
 | WiDi (Intel) | EOL technology | Not planned |
 | DLNA / UPnP | Out of scope | Not planned |
 | Cloud / remote streaming | Security risk | Not planned |
 | Screen recording to file | Privacy concern | Not planned |
-| H.265 / HEVC decode | Not in AirPlay 2 mirror v1 spec | v2 evaluation |
-| AV1 / VP9 decode | Not used by AirPlay or Miracast currently | v2 evaluation |
-| AirPlay audio grouping (multi-room) | Requires AirPlay 2 full stack | v3 roadmap |
+| H.265 / HEVC decode (AirPlay) | Optional, hardware-gated | v2 optional (API check required) |
+| H.265 / HEVC decode (Miracast) | Optional, hardware-gated | v2 optional |
+| VP9 / AV1 decode (Cast) | Optional, API level gated (API 31+ for AV1) | v2 optional |
+| Dolby Atmos / AC-3 decode | Optional surround audio | v2 optional |
+| AirPlay audio grouping (multi-room) | Requires full AirPlay 2 stack | v3 roadmap |
+| 4K UHD streams (AirPlay, Miracast) | Optional, hardware-dependent | v2 optional |
+| HDR10 / Dolby Vision (AirPlay) | Optional, API 31+ required | v2 optional |
 
-> **Note on codecs:** AirPlay screen mirroring currently uses H.264 (Baseline/Main profile). Apple has not publicly released an H.265-based mirroring spec. If Apple adds H.265 support in a future macOS/iOS version, PhairPlay v2 will add `MediaCodec` decoding for `video/hevc` behind a device capability check (hardware support is required — no software fallback).
+### FairPlay DRM – Evaluation Note
+
+**What is FairPlay?** Apple FairPlay Streaming (FPS) is Apple's DRM system for protecting HLS content. It is used by Apple TV+, iTunes, and other Apple-licensed content platforms.
+
+**Technical path to implementation:**
+1. Register as an Apple Developer (active program membership required).
+2. Apply to Apple for an **FPS deployment package** (Key Security Module — KSM). Apple approves or denies based on use case.
+3. Implement the FPS key exchange protocol: the receiver must communicate with a license server using Apple's proprietary key exchange, using the provided KSM library (binary-only, Apple-supplied).
+4. The KSM binary is platform-specific — Apple provides it for macOS/iOS/tvOS. An Android implementation would require Apple to supply an Android-compatible KSM, which Apple has never done publicly.
+
+**Conclusion for PhairPlay v1:**
+- FairPlay is **not implementable** on Android without Apple providing an Android KSM binary — which they have not done.
+- Even if Apple provided one, the license terms would likely be **incompatible with open-source distribution** under Apache 2.0.
+- **FairPlay is excluded from PhairPlay v1 and is not on the roadmap** unless Apple changes their licensing policy.
+- PhairPlay can receive unencrypted AirPlay streams and AirPlay streams encrypted with the open AES-128-CTR session key mechanism. FairPlay-protected premium content (e.g., Apple TV+) will not play.
+
+> **Note on open codecs:** H.265 HEVC, VP9, and AV1 are fully implementable on Android via `MediaCodec` with hardware support checks. These are planned as optional features in v2 behind `MediaCodecInfo.CodecCapabilities` capability queries at runtime.
+
+> **Note on HDCP and Widevine/PlayReady:** HDCP (for Miracast) is negotiated at the WFD protocol level and enforced by hardware — no software implementation is needed. Widevine and PlayReady (for Cast) are handled by the Google Cast SDK and the Android DRM framework (`MediaDrm`) — the app does not need to implement DRM logic directly.
 
 ---
 
