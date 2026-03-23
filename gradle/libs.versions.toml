@@ -54,7 +54,7 @@ timber = { group = "com.jakewharton.timber", name = "timber", version.ref = "tim
 desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", version.ref = "desugar-jdk-libs" }
 
 # Cryptography
-bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
+bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }
