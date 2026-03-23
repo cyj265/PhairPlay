@@ -119,4 +119,39 @@ class MdnsServiceTest {
     fun `AIRPLAY_PORT is 7000`() {
         assertEquals(7000, MdnsService.AIRPLAY_PORT)
     }
+
+    /**
+     * Test: stop() without start() emits DISABLED state.
+     *
+     * WHY: After stop(), the UI should show the protocol as disabled
+     * even if start() was never called.
+     */
+    @Test
+    fun `stop emits DISABLED protocol state`() {
+        val states = mutableListOf<com.phairplay.service.ProtocolState>()
+        val service = MdnsService(mockContext) { states.add(it) }
+
+        service.stop()
+
+        assertTrue(states.contains(com.phairplay.service.ProtocolState.DISABLED))
+    }
+
+    /**
+     * Test: restart() calls stop then start (2 unregistrations + 2 registrations).
+     *
+     * WHY: Restart must fully tear down and re-advertise so the device name
+     * change from Settings takes effect immediately.
+     */
+    @Test
+    fun `restart unregisters then re-registers services`() {
+        val service = MdnsService(mockContext)
+        service.start()
+        service.restart()
+
+        // After restart: stop (2 unregisters) + start (2 registers) = 4 register calls total
+        // But first start = 2, restart start = 2 more
+        verify(atLeast = 4) {
+            mockNsdManager.registerService(any(), NsdManager.PROTOCOL_DNS_SD, any())
+        }
+    }
 }

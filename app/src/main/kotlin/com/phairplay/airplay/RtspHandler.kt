@@ -37,15 +37,15 @@ import java.net.Socket
  */
 class RtspHandler(
     // Called lazily when RECORD is received — Surface is ready by then
-    @Suppress("unused") private val videoSurfaceProvider: () -> android.view.Surface?,
-    private val onStreamingStarted: () -> Unit,
+    private val videoSurfaceProvider: () -> android.view.Surface?,
+    private val onStreamingStarted: (session: SessionDescription) -> Unit,
     private val onStreamingStopped: () -> Unit
 ) {
 
     // The server socket that accepts incoming AirPlay connections on port 7000
     private var serverSocket: ServerSocket? = null
 
-    // The currently active client connection (only one at a time, per REQUIREMENTS.md FR-07)
+    // The currently active client connection (only one at a time, per REQUIREMENTS.md FR-10)
     @Volatile
     private var activeClient: Socket? = null
 
@@ -55,6 +55,13 @@ class RtspHandler(
 
     // RTSP CSeq counter — each RTSP response must echo back the request's CSeq number
     private var currentCSeq: Int = 0
+
+    // Parsed SDP from the most recent ANNOUNCE — stored for use in SETUP and RECORD
+    @Volatile
+    private var currentSession: SessionDescription? = null
+
+    // Counter for SETUP calls: first is typically video, second is audio
+    private var setupCount = 0
 
     /**
      * Starts the RTSP server.
@@ -262,7 +269,7 @@ class RtspHandler(
         return when (request.method) {
             "OPTIONS"       -> handleOptionsInternal(request)
             "ANNOUNCE"      -> handleAnnounceInternal(request)
-            "SETUP"         -> handleSetup(request)
+            "SETUP"         -> handleSetupInternal(request)
             "RECORD"        -> handleRecordInternal(request)
             "TEARDOWN"      -> handleTeardownInternal(request)
             "GET_PARAMETER" -> handleGetParameter(request)
@@ -292,43 +299,81 @@ class RtspHandler(
     }
 
     /**
-     * Handles ANNOUNCE — macOS sends the SDP (Session Description Protocol) body
-     * describing the stream: codecs, ports, and encryption keys.
+     * Handles ANNOUNCE — macOS/iOS sends the SDP body describing codecs, ports, and encryption.
      *
-     * We parse the SDP to extract the information we need to set up the decoders.
-     * TODO (Phase 3): Implement SDP parsing.
+     * We parse the SDP with [SdpParser] and store the result in [currentSession].
+     * The session is used later in SETUP and RECORD to configure the media pipeline.
+     *
+     * Security: if SDP parsing fails completely, we return 400 Bad Request.
      */
     internal open fun handleAnnounceInternal(request: RtspRequest): RtspResponse {
-        Logger.d("ANNOUNCE body:\n${request.body}")
-        // TODO: Parse SDP body to extract video codec parameters and audio encryption keys
+        Logger.d("ANNOUNCE body (${request.body.length} bytes)")
+        currentSession = SdpParser.parse(request.body)
+
+        if (currentSession == null) {
+            Logger.e("ANNOUNCE: SDP parsing returned no usable session — rejecting")
+            return RtspResponse(statusCode = 400, statusMessage = "Bad Request")
+        }
+
+        val s = currentSession!!
+        Logger.i("Session: hasVideo=${s.hasVideo} hasAudio=${s.hasAudio} " +
+                 "audioCodec=${s.audioCodec} encrypted=${s.isAudioEncrypted}")
+
+        setupCount = 0
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 
     /**
-     * Handles SETUP — macOS requests that we allocate a network channel for a stream.
+     * Handles SETUP — macOS/iOS requests allocation of a media channel.
      *
-     * There are typically two SETUP requests: one for video, one for audio.
-     * We respond with the port numbers where we'll receive the RTP packets.
-     * TODO (Phase 3): Negotiate ports properly.
+     * AirPlay sends two SETUP requests: one for video, one for audio (in that order).
+     * We respond with the transport params and a session ID.
+     *
+     * Transport negotiation:
+     * - Video: TCP interleaved (piggy-backed on the RTSP TCP connection, `$` framing)
+     * - Audio: UDP (separate socket; port negotiated here)
+     *
+     * For audio-only streams there is only one SETUP (for audio).
      */
-    private fun handleSetup(request: RtspRequest): RtspResponse {
-        // TODO: Parse Transport header, allocate RTP ports, start VideoDecoder/AudioPlayer
+    internal open fun handleSetupInternal(request: RtspRequest): RtspResponse {
+        setupCount++
+        val session = currentSession
+
+        // Determine if this SETUP is for video or audio based on order and session info
+        val isVideoSetup = setupCount == 1 && session?.hasVideo == true
+
+        val transport = if (isVideoSetup) {
+            // Video: interleaved over the existing RTSP TCP connection
+            "RTP/AVP/TCP;unicast;interleaved=0-1"
+        } else {
+            // Audio: UDP to a fixed port we allocate
+            "RTP/AVP/UDP;unicast;client_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1};" +
+            "server_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1}"
+        }
+
+        Logger.d("SETUP #$setupCount — transport: $transport")
         return RtspResponse(
             statusCode = 200,
             statusMessage = "OK",
-            headers = mapOf("Session" to SESSION_ID, "Transport" to "RTP/AVP/TCP;interleaved=0-1")
+            headers = mapOf("Session" to SESSION_ID, "Transport" to transport)
         )
     }
 
     /**
-     * Handles RECORD — macOS says "start sending media now".
+     * Handles RECORD — macOS/iOS says "start sending media now".
      *
-     * This is the signal that streaming is about to begin. We notify the UI
-     * to switch to the StreamingScreen.
+     * Invokes [onStreamingStarted] with the parsed [SessionDescription] so the caller
+     * can wire up [VideoDecoder] and/or [AudioPlayer] as appropriate.
+     * For audio-only streams, only [AudioPlayer] is started.
      */
     internal open fun handleRecordInternal(request: RtspRequest): RtspResponse {
-        Logger.i("RECORD received — streaming starting")
-        onStreamingStarted()
+        val session = currentSession
+        if (session == null) {
+            Logger.e("RECORD received but no session from ANNOUNCE — rejecting")
+            return RtspResponse(statusCode = 455, statusMessage = "Method Not Valid in This State")
+        }
+        Logger.i("RECORD — streaming starting (audioOnly=${session.isAudioOnly})")
+        onStreamingStarted(session)
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 
@@ -427,15 +472,24 @@ class RtspHandler(
     }
 
     companion object {
-        // Standard AirPlay RTSP port
+        /** Standard AirPlay RTSP port. */
         private const val RTSP_PORT = 7000
 
-        // Maximum allowed RTSP message size — prevents DoS via huge messages (RULE 4)
-        // 64 KB is well above any legitimate RTSP message size
+        /**
+         * Maximum allowed RTSP message size (security: prevents DoS via huge messages).
+         * 64 KB is well above any legitimate RTSP/SDP message size.
+         */
         private const val MAX_MESSAGE_BYTES = 65536
 
-        // Fixed session ID for simplicity (one session at a time)
+        /** Fixed session ID — one session at a time. */
         private const val SESSION_ID = "PhairPlaySession"
+
+        /**
+         * UDP port for receiving audio RTP packets.
+         * We use a fixed port for simplicity (one session at a time).
+         * Must not conflict with the RTSP port (7000).
+         */
+        private const val AUDIO_RTP_PORT = 6001
     }
 }
 

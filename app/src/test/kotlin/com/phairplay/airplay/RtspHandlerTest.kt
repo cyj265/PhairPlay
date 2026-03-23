@@ -1,10 +1,8 @@
 package com.phairplay.airplay
 
-import io.mockk.mockk
-import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -18,23 +16,25 @@ import org.junit.Test
  * WHAT WE TEST:
  * - Correct responses for each RTSP method (OPTIONS, ANNOUNCE, SETUP, RECORD, TEARDOWN)
  * - SDP body parsing (codec parameters and encryption keys)
- * - Security: malformed input handling (should not crash)
+ * - Security: malformed/empty input handling (must not crash)
  * - Security: oversized messages (should be rejected)
- *
- * HOW: We access RtspHandler's internal parsing logic by testing the response
- * objects directly. The network socket is mocked.
+ * - Correct state machine: RECORD without prior ANNOUNCE returns 455
  */
 class RtspHandlerTest {
 
-    // Callbacks to capture whether streaming started/stopped
+    // Captures whether the callbacks were invoked
     private var streamingStarted = false
+    private var lastSession: SessionDescription? = null
     private var streamingStopped = false
 
     @Before
     fun setup() {
         streamingStarted = false
+        lastSession = null
         streamingStopped = false
     }
+
+    // ─── OPTIONS ─────────────────────────────────────────────────────────────
 
     /**
      * Test: OPTIONS response includes all required RTSP methods.
@@ -54,147 +54,214 @@ class RtspHandlerTest {
         )
 
         assertEquals(200, response.statusCode)
-
         val publicMethods = response.headers["Public"] ?: ""
-        // Verify all methods that macOS requires are listed
-        assertTrue("OPTIONS missing from Public", "OPTIONS" in publicMethods)
-        assertTrue("ANNOUNCE missing from Public", "ANNOUNCE" in publicMethods)
-        assertTrue("SETUP missing from Public", "SETUP" in publicMethods)
-        assertTrue("RECORD missing from Public", "RECORD" in publicMethods)
-        assertTrue("TEARDOWN missing from Public", "TEARDOWN" in publicMethods)
+        assertTrue("OPTIONS missing", "OPTIONS" in publicMethods)
+        assertTrue("ANNOUNCE missing", "ANNOUNCE" in publicMethods)
+        assertTrue("SETUP missing", "SETUP" in publicMethods)
+        assertTrue("RECORD missing", "RECORD" in publicMethods)
+        assertTrue("TEARDOWN missing", "TEARDOWN" in publicMethods)
     }
 
-    /**
-     * Test: RECORD triggers the onStreamingStarted callback.
-     *
-     * WHY: The UI switch from WaitingScreen to StreamingScreen depends on this
-     * callback being called when RECORD is received. If it's not called, the user
-     * would see a black screen while streaming.
-     */
+    // ─── ANNOUNCE ────────────────────────────────────────────────────────────
+
     @Test
-    fun `RECORD triggers onStreamingStarted callback`() {
+    fun `ANNOUNCE with valid video+audio SDP returns 200`() {
+        val response = createTestHandler().handleAnnouncePublic(
+            RtspRequest(
+                method = "ANNOUNCE", uri = "", headers = emptyMap(),
+                body = VALID_SDP_VIDEO_AUDIO
+            )
+        )
+        assertEquals(200, response.statusCode)
+    }
+
+    @Test
+    fun `ANNOUNCE with valid audio-only SDP returns 200`() {
+        val response = createTestHandler().handleAnnouncePublic(
+            RtspRequest(
+                method = "ANNOUNCE", uri = "", headers = emptyMap(),
+                body = VALID_SDP_AUDIO_ONLY
+            )
+        )
+        assertEquals(200, response.statusCode)
+    }
+
+    @Test
+    fun `ANNOUNCE with empty body returns 400`() {
+        val response = createTestHandler().handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = "")
+        )
+        assertEquals(400, response.statusCode)
+    }
+
+    @Test
+    fun `ANNOUNCE with blank body returns 400`() {
+        val response = createTestHandler().handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = "   \n  ")
+        )
+        assertEquals(400, response.statusCode)
+    }
+
+    // ─── SETUP ───────────────────────────────────────────────────────────────
+
+    @Test
+    fun `SETUP response includes Session and Transport headers`() {
         val handler = createTestHandler()
+        // ANNOUNCE first so session is established
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_VIDEO_AUDIO)
+        )
+
+        val response = handler.handleSetupPublic(
+            RtspRequest(method = "SETUP", uri = "", headers = emptyMap(), body = "")
+        )
+
+        assertEquals(200, response.statusCode)
+        assertNotNull("Session header required", response.headers["Session"])
+        assertNotNull("Transport header required", response.headers["Transport"])
+    }
+
+    @Test
+    fun `first SETUP uses TCP interleaved transport (video)`() {
+        val handler = createTestHandler()
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_VIDEO_AUDIO)
+        )
+
+        val response = handler.handleSetupPublic(
+            RtspRequest(method = "SETUP", uri = "", headers = emptyMap(), body = "")
+        )
+
+        val transport = response.headers["Transport"] ?: ""
+        assertTrue("First SETUP should be TCP interleaved", "TCP" in transport || "interleaved" in transport)
+    }
+
+    // ─── RECORD ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun `RECORD after ANNOUNCE triggers onStreamingStarted`() {
+        val handler = createTestHandler()
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_VIDEO_AUDIO)
+        )
         handler.handleRecordPublic(
             RtspRequest(method = "RECORD", uri = "", headers = emptyMap(), body = "")
         )
 
-        assertTrue("onStreamingStarted should have been called", streamingStarted)
+        assertTrue("onStreamingStarted should be called", streamingStarted)
+        assertNotNull("SessionDescription should be passed to callback", lastSession)
     }
 
-    /**
-     * Test: TEARDOWN triggers the onStreamingStopped callback.
-     *
-     * WHY: The UI must switch back to WaitingScreen when macOS disconnects.
-     * If TEARDOWN is not handled, the user would be stuck on the streaming screen.
-     */
+    @Test
+    fun `RECORD without prior ANNOUNCE returns 455`() {
+        // No ANNOUNCE → currentSession is null → must return 455 Method Not Valid in This State
+        val response = createTestHandler().handleRecordPublic(
+            RtspRequest(method = "RECORD", uri = "", headers = emptyMap(), body = "")
+        )
+        assertEquals(455, response.statusCode)
+    }
+
+    @Test
+    fun `RECORD with audio-only SDP sets isAudioOnly on session`() {
+        val handler = createTestHandler()
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_AUDIO_ONLY)
+        )
+        handler.handleRecordPublic(
+            RtspRequest(method = "RECORD", uri = "", headers = emptyMap(), body = "")
+        )
+
+        assertTrue("audio-only session flag should be set", lastSession?.isAudioOnly == true)
+    }
+
+    // ─── TEARDOWN ────────────────────────────────────────────────────────────
+
     @Test
     fun `TEARDOWN triggers onStreamingStopped callback`() {
         val handler = createTestHandler()
         handler.handleTeardownPublic(
             RtspRequest(method = "TEARDOWN", uri = "", headers = emptyMap(), body = "")
         )
-
         assertTrue("onStreamingStopped should have been called", streamingStopped)
     }
 
-    /**
-     * Test: Unknown RTSP method returns 501 Not Implemented.
-     *
-     * WHY: macOS may send methods we don't support. We must respond with 501
-     * (not crash or return an incorrect status code).
-     */
+    @Test
+    fun `TEARDOWN returns 200`() {
+        val response = createTestHandler().handleTeardownPublic(
+            RtspRequest(method = "TEARDOWN", uri = "", headers = emptyMap(), body = "")
+        )
+        assertEquals(200, response.statusCode)
+    }
+
+    // ─── Unknown method ───────────────────────────────────────────────────────
+
     @Test
     fun `unknown RTSP method returns 501`() {
         val response = createTestHandler().handleUnknownMethodPublic(
             RtspRequest(method = "FOOBAR", uri = "", headers = emptyMap(), body = "")
         )
-
         assertEquals(501, response.statusCode)
         assertEquals("Not Implemented", response.statusMessage)
     }
 
-    /**
-     * Test: A valid SDP body can be parsed without throwing an exception.
-     *
-     * WHY: The SDP body in ANNOUNCE contains codec parameters and encryption keys.
-     * If parsing fails, we'd either crash or fail to set up video/audio decoding.
-     */
-    @Test
-    fun `valid SDP body parses without exception`() {
-        val validSdp = """
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private fun createTestHandler(): TestableRtspHandler = TestableRtspHandler(
+        onStreamingStarted = { session ->
+            streamingStarted = true
+            lastSession = session
+        },
+        onStreamingStopped = { streamingStopped = true }
+    )
+
+    companion object {
+        // Minimal valid SDP with H.264 video + AAC-ELD audio (base64 SPS/PPS included)
+        val VALID_SDP_VIDEO_AUDIO = """
             v=0
-            o=- 0 0 IN IP4 192.168.1.2
-            s=PhairPlay
+            o=AirTunes AABBCCDDEEFF 1 IN IP4 192.168.1.10
+            s=AirTunes
             t=0 0
             m=video 0 RTP/AVP 96
             a=rtpmap:96 H264/90000
-            a=fmtp:96 profile-level-id=42C01E;sprop-parameter-sets=Z0LAHtkDxWhAAAAMAAADACAAAAwDxYuS,aM48gA==
-            m=audio 0 RTP/AVP 97
-            a=rtpmap:97 mpeg4-generic/44100/2
+            a=fmtp:96 packetization-mode=1;profile-level-id=640020;sprop-parameter-sets=Z2QAKKwbGAoAofjA,aO48gA==
+            m=audio 0 RTP/AVP 96
+            a=rtpmap:96 mpeg4-generic/44100/2
+            a=fmtp:96 streamtype=5;profile-level-id=15;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=F8E85000
+            a=rsaaeskey:MTIzNDU2Nzg5MDEyMzQ1Ng==
+            a=aesiv:MTYtYnl0ZS1pdmluaXR2
         """.trimIndent()
 
-        // Should not throw any exception
-        val request = RtspRequest(method = "ANNOUNCE", uri = "", headers = mapOf("Content-Length" to validSdp.length.toString()), body = validSdp)
-        val response = createTestHandler().handleAnnouncePublic(request)
-
-        assertEquals(200, response.statusCode)
-    }
-
-    /**
-     * Test: An empty/blank RTSP request line does not crash the handler.
-     *
-     * WHY: RULE 4 — malformed network input must never crash the app.
-     * An attacker or buggy sender might send an empty line.
-     */
-    @Test
-    fun `empty request body is handled gracefully`() {
-        val response = createTestHandler().handleAnnouncePublic(
-            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = "")
-        )
-        // Empty body: should return 200 (we accept and ignore empty ANNOUNCE)
-        assertNotNull(response)
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Helper: creates RtspHandler with test callbacks
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Creates an [RtspHandler] with test callbacks that record whether
-     * streaming started/stopped.
-     */
-    private fun createTestHandler(): TestableRtspHandler {
-        return TestableRtspHandler(
-            onStreamingStarted = { streamingStarted = true },
-            onStreamingStopped = { streamingStopped = true }
-        )
-    }
-
-    // Helper assertion
-    private fun assertTrue(message: String, value: Boolean) {
-        org.junit.Assert.assertTrue(message, value)
+        // Audio-only SDP (no video section — used for music/podcast streaming)
+        val VALID_SDP_AUDIO_ONLY = """
+            v=0
+            o=AirTunes AABBCCDDEEFF 1 IN IP4 192.168.1.10
+            s=AirTunes
+            t=0 0
+            m=audio 0 RTP/AVP 96
+            a=rtpmap:96 AppleLossless
+            a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100
+            a=rsaaeskey:MTIzNDU2Nzg5MDEyMzQ1Ng==
+            a=aesiv:MTYtYnl0ZS1pdmluaXR2
+        """.trimIndent()
     }
 }
 
 /**
- * TestableRtspHandler — A subclass of [RtspHandler] that exposes internal
- * methods for testing without requiring a real network socket.
- *
- * WHY: RtspHandler's public API is start/stop (requires a real socket).
- * For unit testing, we need to call the individual request handlers directly.
- * This subclass exposes them via "Public" wrapper methods.
+ * TestableRtspHandler — Subclass of [RtspHandler] that exposes internal methods for unit testing
+ * without requiring a real network socket.
  */
 class TestableRtspHandler(
-    onStreamingStarted: () -> Unit,
+    onStreamingStarted: (SessionDescription) -> Unit,
     onStreamingStopped: () -> Unit
 ) : RtspHandler(
     videoSurfaceProvider = { null },
     onStreamingStarted = onStreamingStarted,
     onStreamingStopped = onStreamingStopped
 ) {
-    fun handleOptionsPublic(request: RtspRequest) = handleOptionsInternal(request)
-    fun handleAnnouncePublic(request: RtspRequest) = handleAnnounceInternal(request)
-    fun handleRecordPublic(request: RtspRequest) = handleRecordInternal(request)
-    fun handleTeardownPublic(request: RtspRequest) = handleTeardownInternal(request)
-    fun handleUnknownMethodPublic(request: RtspRequest) = handleUnknownInternal(request)
+    fun handleOptionsPublic(req: RtspRequest) = handleOptionsInternal(req)
+    fun handleAnnouncePublic(req: RtspRequest) = handleAnnounceInternal(req)
+    fun handleSetupPublic(req: RtspRequest) = handleSetupInternal(req)
+    fun handleRecordPublic(req: RtspRequest) = handleRecordInternal(req)
+    fun handleTeardownPublic(req: RtspRequest) = handleTeardownInternal(req)
+    fun handleUnknownMethodPublic(req: RtspRequest) = handleUnknownInternal(req)
 }

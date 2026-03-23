@@ -115,10 +115,10 @@ Date: 2026-03-23
 - NFR-19: Miracast sender: Windows 10+, Android 4.2+.
 - NFR-20: Cast sender: Chrome 72+, Android 5+.
 
-### 2.5 Code Quality (unchanged)
-- NFR-20: No source file exceeds 400 lines.
-- NFR-21: Every public method has at least one unit test.
-- NFR-22: All classes have KDoc headers.
+### 2.5 Code Quality
+- NFR-23: No source file exceeds 400 lines.
+- NFR-24: Every public method has at least one unit test.
+- NFR-25: All classes have KDoc headers.
 
 ---
 

@@ -1,14 +1,17 @@
 # PhairPlay – Technical Specification
 
-Version: 1.0
+Version: 1.1
 Status: Draft
-Date: 2026-03-22
+Date: 2026-03-23
 
 ---
 
 ## 1. AirPlay 2 Protocol Overview
 
-AirPlay 2 Screen Mirroring works as a layered protocol stack. Here is what happens from the moment a macOS user clicks "AirPlay" to video appearing on the TV:
+AirPlay 2 Screen Mirroring works as a layered protocol stack. The description below covers the full flow from the moment a **macOS or iOS/iPadOS** user taps "AirPlay" to media appearing on the TV.
+
+> **Supported senders:** macOS 12+ (Monterey and later), iOS 13+ / iPadOS 13+.
+> The wire protocol is identical for both — the same RTSP/RTP stack handles both sender types.
 
 ### Step 1 – Service Discovery (mDNS / Bonjour)
 
@@ -110,60 +113,113 @@ AudioTrack (hardware output)
 
 A separate UDP socket (timing port) handles **NTP-based time synchronization** between sender and receiver. This is used to keep audio and video in sync.
 
+### Step 6 – Audio-Only Mode (music / podcasts from macOS and iOS)
+
+When the sender initiates an **audio-only** AirPlay stream (e.g., playing music from Apple Music, Spotify, or a podcast app), the SDP body in the ANNOUNCE request contains **only an audio media section** — there is no `m=video` line.
+
+Detection in `RtspHandler`:
+```kotlin
+val hasVideo = sdp.contains("m=video")
+val hasAudio = sdp.contains("m=audio")
+// audio-only: hasVideo == false, hasAudio == true
+```
+
+Audio-only path:
+```
+RTP bytes (UDP) → AES-128-CTR decrypt → AAC/ALAC decode →
+AudioTrack (hardware output)
+↕ no VideoDecoder started, no SurfaceView shown
+```
+
+UI behaviour: the app remains on the **HomeScreen**. The AirPlay protocol card updates to show sender name and "Audio streaming" detail text. No fullscreen streaming activity is launched.
+
 ---
 
 ## 2. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        PhairPlay App                            │
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────────────────────────────┐  │
-│  │  MainActivity │    │          AirPlayReceiver             │  │
-│  │  (UI layer)   │◄──►│  (orchestrates all components)       │  │
-│  └──────┬───────┘    └──────────────────────────────────────┘  │
-│         │                    │           │           │          │
-│  ┌──────▼───────┐   ┌────────▼──┐  ┌────▼─────┐  ┌─▼───────┐ │
-│  │ WaitingScreen│   │ MdnsService│  │RtspHandler│  │ Logger  │ │
-│  │ StreamScreen │   │ (discovery)│  │(protocol) │  │ Network │ │
-│  └──────────────┘   └───────────┘  └─────┬─────┘  │  Utils  │ │
-│                                           │        └─────────┘ │
-│                                    ┌──────┴──────┐             │
-│                                    │             │             │
-│                             ┌──────▼───┐  ┌─────▼──────┐     │
-│                             │VideoDecoder│  │AudioPlayer │     │
-│                             │(MediaCodec)│  │(AudioTrack)│     │
-│                             └──────┬───┘  └─────┬──────┘     │
-│                                    │             │             │
-└────────────────────────────────────┼─────────────┼─────────────┘
-                                     │             │
-                              ┌──────▼───────────────────┐
-                              │   Android OS / Hardware    │
-                              │  (MediaCodec GPU decoder,  │
-                              │   AudioFlinger, SurfaceView)│
-                              └────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          PhairPlay App                               │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                     UI Layer (Fragments)                        │  │
+│  │   MainActivity ─ HomeFragment ─ SettingsFragment               │  │
+│  └────────────────────────────┬───────────────────────────────────┘  │
+│                               │ binds / observes StateFlow            │
+│  ┌────────────────────────────▼───────────────────────────────────┐  │
+│  │               PhairPlayService  (ForegroundService)             │  │
+│  │  serviceState / airPlayState / miracastState / castState        │  │
+│  └────────┬──────────────────┬───────────────────┬────────────────┘  │
+│           │                  │                   │                   │
+│  ┌────────▼──────┐  ┌────────▼──────┐  ┌────────▼──────┐           │
+│  │ AirPlayReceiver│  │MiracastReceiver│  │ CastReceiver  │           │
+│  │               │  │               │  │               │           │
+│  │ MdnsService   │  │ WifiP2pManager│  │ CastReceiver  │           │
+│  │ RtspHandler   │  │ WfdRtspHandler│  │ Context (GMS) │           │
+│  │ VideoDecoder  │  │ VideoDecoder  │  └───────────────┘           │
+│  │ AudioPlayer   │  │ AudioPlayer   │                               │
+│  └───────┬───────┘  └───────┬───────┘                               │
+│          │                  │                                        │
+│  ┌───────▼──────────────────▼────────────────────────────────────┐  │
+│  │              SettingsRepository (DataStore)                    │  │
+│  │  Flow<AppSettings> — drives enable/disable of each receiver    │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+                      │ MediaCodec / AudioTrack
+              ┌───────▼─────────────────────┐
+              │   Android OS / Hardware      │
+              │  GPU decode, AudioFlinger,   │
+              │  SurfaceView, Wi-Fi P2P      │
+              └─────────────────────────────┘
 
-Data Flow (left to right = sender to receiver):
-macOS ──[mDNS]──► MdnsService
-macOS ──[RTSP/TCP]──► RtspHandler ──► VideoDecoder ──► SurfaceView
-macOS ──[RTP/UDP]──► RtspHandler ──► AudioPlayer ──► AudioTrack
+Data flows (sender → receiver):
+macOS/iOS  ──[mDNS]────────► MdnsService
+macOS/iOS  ──[RTSP/TCP:7000]► RtspHandler ──► VideoDecoder ──► SurfaceView
+macOS/iOS  ──[RTP/UDP]──────► AudioPlayer ──► AudioTrack
+Windows    ──[Wi-Fi P2P]────► MiracastReceiver (WFD RTSP) ──► VideoDecoder
+Chrome/Android ──[Cast]─────► CastReceiver (Cast SDK)
 ```
 
 ---
 
 ## 3. Component Responsibilities
 
+### Service Layer
+
 | Component | File | Responsibility |
 |---|---|---|
-| `MainActivity` | `MainActivity.kt` | App entry point, lifecycle management, connects UI to AirPlayReceiver |
-| `AirPlayReceiver` | `airplay/AirPlayReceiver.kt` | Top-level orchestrator: starts/stops mDNS, RTSP, manages state |
-| `MdnsService` | `airplay/MdnsService.kt` | Registers and unregisters mDNS services via NsdManager |
-| `RtspHandler` | `airplay/RtspHandler.kt` | Parses RTSP messages, handles the session state machine, distributes media data |
-| `VideoDecoder` | `airplay/VideoDecoder.kt` | Configures MediaCodec for H.264, feeds NAL units, outputs to Surface |
-| `AudioPlayer` | `airplay/AudioPlayer.kt` | Decrypts audio, decodes AAC/ALAC, plays via AudioTrack |
-| `WaitingScreen` | `ui/WaitingScreen.kt` | Composable / View for the idle state UI |
-| `StreamingScreen` | `ui/StreamingScreen.kt` | Composable / View holding the SurfaceView for video output |
-| `Logger` | `util/Logger.kt` | Thin wrapper around Timber; adds tags, sanitizes sensitive data |
+| `PhairPlayService` | `service/PhairPlayService.kt` | ForegroundService: owns lifecycle of all protocol receivers; exposes `StateFlow` for UI |
+| `ServiceController` | `service/ServiceController.kt` | Singleton helper: `start` / `stop` / `restart` the service from any Context |
+| `ServiceState` | `service/ServiceState.kt` | Sealed class hierarchy: `Running`, `Stopped`, `Restarting`, `Error(msg)` |
+| `BootReceiver` | `service/BootReceiver.kt` | BOOT_COMPLETED receiver; starts service if `startOnBoot` setting is enabled |
+| `SettingsRepository` | `settings/SettingsRepository.kt` | DataStore-backed; exposes `Flow<AppSettings>`; `suspend update {}` for writes |
+| `AppSettings` | `settings/AppSettings.kt` | Immutable data class with all 7 user-configurable settings |
+
+### Protocol Receivers
+
+| Component | File | Responsibility |
+|---|---|---|
+| `AirPlayReceiver` | `airplay/AirPlayReceiver.kt` | Orchestrates mDNS, RTSP, video/audio pipeline; emits `ProtocolState` |
+| `MdnsService` | `airplay/MdnsService.kt` | Registers/unregisters `_airplay._tcp` + `_raop._tcp` via NsdManager |
+| `RtspHandler` | `airplay/RtspHandler.kt` | Full RTSP state machine (OPTIONS→ANNOUNCE→SETUP→RECORD→TEARDOWN) |
+| `VideoDecoder` | `airplay/VideoDecoder.kt` | MediaCodec H.264 hardware decode → SurfaceView |
+| `AudioPlayer` | `airplay/AudioPlayer.kt` | AES-128-CTR decrypt → AAC/ALAC decode → AudioTrack |
+| `MiracastReceiver` | `miracast/MiracastReceiver.kt` | Wi-Fi P2P discovery; WFD RTSP session (M1–M7); shares VideoDecoder/AudioPlayer |
+| `CastReceiver` | `cast/CastReceiver.kt` | Google Cast SDK receiver; GMS availability check; graceful Fire TV degradation |
+
+### UI Layer
+
+| Component | File | Responsibility |
+|---|---|---|
+| `MainActivity` | `MainActivity.kt` | Single-activity host; side nav panel; swaps Home/Settings fragments |
+| `HomeFragment` | `ui/HomeFragment.kt` | Protocol state cards; service control buttons; binds to PhairPlayService |
+| `SettingsFragment` | `ui/SettingsFragment.kt` | All 7 settings with immediate-save listeners via SettingsRepository |
+
+### Utilities
+
+| Component | File | Responsibility |
+|---|---|---|
 | `NetworkUtils` | `util/NetworkUtils.kt` | Reads device IP, MAC address, network interface info |
 
 ---
@@ -176,12 +232,14 @@ Only libraries that cannot be replaced by Android built-in APIs are included.
 |---|---|---|---|
 | `org.jetbrains.kotlinx:kotlinx-coroutines-android` | 1.8.x | Structured concurrency for all async I/O; part of Kotlin ecosystem | Java threads — no, too low-level; RxJava — no, too heavy |
 | `com.jakewharton.timber:timber` | 5.0.x | Tagged, level-filtered logging with pluggable backends | Log directly — no, hard to filter in release builds |
-| `org.bouncycastle:bcprov-jdk15on` | 1.77 | AES-128-CTR for audio decryption; SRP-6a for future pairing | Android's javax.crypto — partial support, missing SRP |
+| `org.bouncycastle:bcprov-jdk15on` | 1.78.x | AES-128-CTR for audio decryption; SRP-6a for future pairing | Android's javax.crypto — partial support, missing SRP |
+| `androidx.datastore:datastore-preferences` | 1.1.x | Async, coroutine-based typed key-value store for settings | SharedPreferences — no, blocking I/O; Room — no, too heavy for KV |
+| `androidx.leanback:leanback` | 1.2.x | TV-specific focus handling, on-screen keyboard for display name | View-only — insufficient for text input on TV remotes |
 
 **Deliberately excluded:**
-- No Retrofit/OkHttp (we write raw TCP/UDP sockets)
-- No Room/SQLite (no persistence needed)
-- No Jetpack Compose (use View-based UI for max TV compatibility)
+- No Retrofit/OkHttp (raw TCP/UDP sockets for RTSP/RTP)
+- No Room/SQLite (DataStore is sufficient; no relational data)
+- No Jetpack Compose (View-based UI for maximum TV/D-pad compatibility — see ADR-003)
 - No Hilt/Dagger (manual DI is sufficient at this scale)
 
 ---
