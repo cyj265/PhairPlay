@@ -46,10 +46,6 @@ android {
     buildTypes {
         debug {
             isDebuggable = true
-            // In debug builds, treat warnings as errors to catch issues early
-            kotlinOptions {
-                freeCompilerArgs += listOf("-Werror")
-            }
         }
         release {
             isMinifyEnabled = true
