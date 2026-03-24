@@ -4,7 +4,7 @@
 
 [versions]
 # Build tools
-agp = "8.3.2"                          # Android Gradle Plugin
+agp = "8.6.1"                          # Android Gradle Plugin
 kotlin = "1.9.23"                      # Kotlin compiler
 desugar-jdk-libs = "2.0.4"            # Core library desugaring (backports Java 8+ APIs to API 25)
 
@@ -12,7 +12,7 @@ desugar-jdk-libs = "2.0.4"            # Core library desugaring (backports Java 
 appcompat = "1.7.0"
 constraintlayout = "2.1.4"
 core-ktx = "1.13.1"
-leanback = "1.0.0"                     # TV navigation, focus management, on-screen keyboard
+leanback = "1.2.0"                     # TV navigation, focus management, on-screen keyboard
 
 # Kotlin Coroutines — for all async I/O (network, media)
 coroutines = "1.8.1"
