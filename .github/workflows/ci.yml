@@ -51,11 +51,13 @@ jobs:
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== BUILD FAILED ==="
-            # Show key error lines: FAILURE summary, Caused by, and error: lines
-            FAILURES=$(grep -n "FAILURE:\|Caused by:\|error:\|> Task\|Exception\|could not\|Could not\|unresolved reference\|Unresolved reference" app/build/reports/build-error.txt | tail -60)
-            echo "$FAILURES"
-            # Emit as annotation (visible via public check-run annotations API)
-            ERROR_MSG=$(echo "$FAILURES" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
+            cat app/build/reports/build-error.txt
+            # Emit the "Caused by" section (the real error) as annotation
+            CAUSED=$(sed -n '/issues were found when checking AAR/,/^[[:space:]]*$/p' app/build/reports/build-error.txt | head -50)
+            if [ -z "$CAUSED" ]; then
+              CAUSED=$(grep -A5 "Caused by:" app/build/reports/build-error.txt | head -60)
+            fi
+            ERROR_MSG=$(echo "$CAUSED" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
             echo "::error title=assembleGoogletvDebug failed::${ERROR_MSG}"
           fi
           exit $BUILD_EXIT
