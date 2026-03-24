@@ -100,6 +100,17 @@ android {
         checkDependencies = true
     }
 
+    packaging {
+        resources {
+            // BouncyCastle (and some other crypto libs) include OSGI manifest files
+            // that conflict when multiple jars are merged. Exclude them — they are
+            // not needed at runtime on Android (OSGI is a Java EE/OSGi framework).
+            excludes += "META-INF/versions/9/OSGI-INF/**"
+            excludes += "META-INF/NOTICE.md"
+            excludes += "META-INF/LICENSE.md"
+        }
+    }
+
     buildFeatures {
         // BuildConfig is disabled by default in AGP 8.x — enable it explicitly
         // because PhairPlayApp.kt and SettingsFragment.kt use BuildConfig.VERSION_NAME etc.
