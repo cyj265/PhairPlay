@@ -10,13 +10,9 @@ import com.phairplay.util.Logger
  *
  * This stub exposes only the pure-logic members needed by VideoDecoderSpsTest:
  * - VideoDecoder.parseSpsResolution (companion-object function)
- * - SpsBitReader (top-level class in this package, matching the companion name)
+ * - VideoDecoder.Companion.SpsBitReader (nested class, matching production API)
  *
  * Instance methods are no-ops because no JVM test exercises the hardware-decode path.
- *
- * SpsBitReader is deliberately top-level (not nested in companion) so that
- * the Kotlin 1.9.x compiler can resolve it correctly across source files.
- * VideoDecoderSpsTest imports it directly as `SpsBitReader`.
  */
 @Suppress("UNUSED_PARAMETER")
 class VideoDecoder(outputSurface: Any?) {
@@ -70,10 +66,10 @@ class VideoDecoder(outputSurface: Any?) {
                 reader.readUe()
                 reader.readBits(1)
 
-                val picWidthInMbsMinus1       = reader.readUe()
+                val picWidthInMbsMinus1 = reader.readUe()
                 val picHeightInMapUnitsMinus1 = reader.readUe()
 
-                val width  = (picWidthInMbsMinus1 + 1) * 16
+                val width = (picWidthInMbsMinus1 + 1) * 16
                 val height = (picHeightInMapUnitsMinus1 + 1) * 16
 
                 Logger.d("SPS parsed: ${width}x${height} (profile=$profileIdc)")
@@ -84,55 +80,57 @@ class VideoDecoder(outputSurface: Any?) {
                 return null
             }
         }
-    }
-}
 
-/**
- * Bitstream reader for H.264 NAL units.  Pure bit-manipulation; no Android APIs.
- *
- * Exposed as a top-level class (mirroring VideoDecoder.companion.SpsBitReader in production)
- * so that VideoDecoderSpsTest can import and instantiate it directly.
- */
-class SpsBitReader(private val data: ByteArray, startOffset: Int) {
-    private var bytePos = startOffset
-    private var bitPos  = 7  // MSB first
+        /**
+         * Bitstream reader for H.264 NAL units. Pure bit-manipulation; no Android APIs.
+         *
+         * Kept as a companion-object nested class to match the production API used by tests.
+         */
+        class SpsBitReader(private val data: ByteArray, startOffset: Int) {
+            private var bytePos = startOffset
+            private var bitPos = 7  // MSB first
 
-    fun readBit(): Int {
-        if (bytePos >= data.size) throw IndexOutOfBoundsException("SPS RBSP underflow")
-        val bit = (data[bytePos].toInt() ushr bitPos) and 1
-        if (--bitPos < 0) { bitPos = 7; bytePos++ }
-        return bit
-    }
-
-    fun readBits(n: Int): Int {
-        var result = 0
-        repeat(n) { result = (result shl 1) or readBit() }
-        return result
-    }
-
-    fun readUe(): Int {
-        var leadingZeros = 0
-        while (readBit() == 0) {
-            if (++leadingZeros > 31) throw ArithmeticException("ue(v) overflow")
-        }
-        return if (leadingZeros == 0) 0
-               else (1 shl leadingZeros) - 1 + readBits(leadingZeros)
-    }
-
-    fun readSe(): Int {
-        val k = readUe()
-        return if (k == 0) 0 else if (k % 2 == 1) (k + 1) / 2 else -(k / 2)
-    }
-
-    fun skipScalingList(size: Int) {
-        var lastScale = 8
-        var nextScale = 8
-        repeat(size) {
-            if (nextScale != 0) {
-                val deltaScale = readSe()
-                nextScale = (lastScale + deltaScale + 256) % 256
+            fun readBit(): Int {
+                if (bytePos >= data.size) throw IndexOutOfBoundsException("SPS RBSP underflow")
+                val bit = (data[bytePos].toInt() ushr bitPos) and 1
+                if (--bitPos < 0) {
+                    bitPos = 7
+                    bytePos++
+                }
+                return bit
             }
-            lastScale = if (nextScale == 0) lastScale else nextScale
+
+            fun readBits(n: Int): Int {
+                var result = 0
+                repeat(n) { result = (result shl 1) or readBit() }
+                return result
+            }
+
+            fun readUe(): Int {
+                var leadingZeros = 0
+                while (readBit() == 0) {
+                    if (++leadingZeros > 31) throw ArithmeticException("ue(v) overflow")
+                }
+                return if (leadingZeros == 0) 0
+                else (1 shl leadingZeros) - 1 + readBits(leadingZeros)
+            }
+
+            fun readSe(): Int {
+                val k = readUe()
+                return if (k == 0) 0 else if (k % 2 == 1) (k + 1) / 2 else -(k / 2)
+            }
+
+            fun skipScalingList(size: Int) {
+                var lastScale = 8
+                var nextScale = 8
+                repeat(size) {
+                    if (nextScale != 0) {
+                        val deltaScale = readSe()
+                        nextScale = (lastScale + deltaScale + 256) % 256
+                    }
+                    lastScale = if (nextScale == 0) lastScale else nextScale
+                }
+            }
         }
     }
 }
