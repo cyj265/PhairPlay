@@ -52,10 +52,9 @@ jobs:
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== BUILD FAILED — last 200 lines ==="
             tail -200 app/build/reports/build-error.txt
-            echo "## Build Failed" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            tail -200 app/build/reports/build-error.txt >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            # Emit last 30 lines as a GitHub annotation (visible via public check-run annotations API)
+            ERROR_MSG=$(tail -30 app/build/reports/build-error.txt | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
+            echo "::error title=assembleGoogletvDebug failed::${ERROR_MSG}"
           fi
           exit $BUILD_EXIT
 
