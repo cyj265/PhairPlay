@@ -246,12 +246,15 @@ class VideoDecoder(private val outputSurface: Surface) {
 
                 // Default for Baseline/Main profiles per H.264 spec.
                 var chromaFormatIdc = 1
+                var separateColorPlaneFlag = 0
 
                 // High-profile and variants have extra fields before the common fields.
                 val highProfiles = setOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
                 if (profileIdc in highProfiles) {
                     chromaFormatIdc = reader.readUe()
-                    if (chromaFormatIdc == 3) reader.readBits(1)  // separate_colour_plane_flag
+                    if (chromaFormatIdc == 3) {
+                        separateColorPlaneFlag = reader.readBits(1)  // separate_colour_plane_flag
+                    }
                     reader.readUe()     // bit_depth_luma_minus8
                     reader.readUe()     // bit_depth_chroma_minus8
                     reader.readBits(1)  // qpprime_y_zero_transform_bypass_flag
@@ -302,18 +305,20 @@ class VideoDecoder(private val outputSurface: Surface) {
                 val codedWidth = (picWidthInMbsMinus1 + 1) * 16
                 val codedHeight = (picHeightInMapUnitsMinus1 + 1) * 16 * (2 - frameMbsOnlyFlag)
 
-                val subWidthC = when (chromaFormatIdc) {
+                val chromaArrayType = if (separateColorPlaneFlag == 1) 0 else chromaFormatIdc
+
+                val subWidthC = when (chromaArrayType) {
                     0 -> 1
                     1, 2 -> 2
                     else -> 1
                 }
-                val subHeightC = when (chromaFormatIdc) {
+                val subHeightC = when (chromaArrayType) {
                     1 -> 2
                     else -> 1
                 }
 
-                val cropUnitX = if (chromaFormatIdc == 0) 1 else subWidthC
-                val cropUnitY = if (chromaFormatIdc == 0) (2 - frameMbsOnlyFlag) else subHeightC * (2 - frameMbsOnlyFlag)
+                val cropUnitX = if (chromaArrayType == 0) 1 else subWidthC
+                val cropUnitY = if (chromaArrayType == 0) (2 - frameMbsOnlyFlag) else subHeightC * (2 - frameMbsOnlyFlag)
 
                 val width = codedWidth - (cropLeft + cropRight) * cropUnitX
                 val height = codedHeight - (cropTop + cropBottom) * cropUnitY

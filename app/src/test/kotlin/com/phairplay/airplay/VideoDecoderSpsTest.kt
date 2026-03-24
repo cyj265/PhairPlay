@@ -138,6 +138,33 @@ class VideoDecoderSpsTest {
         assertEquals(Pair(1920, 1088), VideoDecoder.parseSpsResolution(sps))
     }
 
+    @Test
+    fun `parseSpsResolution applies frame cropping offsets`() {
+        // 1920x1088 coded with bottom crop of 4 luma lines -> 1920x1080
+        val sps = buildBaselineSps(
+            profileIdc = 77,
+            levelIdc = 40,
+            widthInMbs = 119,
+            heightInMapUnits = 67,
+            frameMbsOnlyFlag = 1,
+            cropBottom = 4
+        )
+        assertEquals(Pair(1920, 1080), VideoDecoder.parseSpsResolution(sps))
+    }
+
+    @Test
+    fun `parseSpsResolution handles interlaced frame dimensions`() {
+        // frame_mbs_only_flag=0 doubles coded height: (44+1)*16*2 = 1440
+        val sps = buildBaselineSps(
+            profileIdc = 66,
+            levelIdc = 31,
+            widthInMbs = 79,
+            heightInMapUnits = 44,
+            frameMbsOnlyFlag = 0
+        )
+        assertEquals(Pair(1280, 1440), VideoDecoder.parseSpsResolution(sps))
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     /**
@@ -151,7 +178,12 @@ class VideoDecoderSpsTest {
         profileIdc: Int,
         levelIdc: Int,
         widthInMbs: Int,
-        heightInMapUnits: Int
+        heightInMapUnits: Int,
+        frameMbsOnlyFlag: Int = 1,
+        cropLeft: Int = 0,
+        cropRight: Int = 0,
+        cropTop: Int = 0,
+        cropBottom: Int = 0
     ): ByteArray {
         val w = SpsBitWriter()
         w.writeByte(0x67)       // NAL type = SPS
@@ -169,9 +201,19 @@ class VideoDecoderSpsTest {
 
         w.writeUe(widthInMbs)       // pic_width_in_mbs_minus1
         w.writeUe(heightInMapUnits) // pic_height_in_map_units_minus1
-        w.writeBit(1)               // frame_mbs_only_flag
+        w.writeBit(frameMbsOnlyFlag) // frame_mbs_only_flag
+        if (frameMbsOnlyFlag == 0) {
+            w.writeBit(0)            // mb_adaptive_frame_field_flag
+        }
         w.writeBit(1)               // direct_8x8_inference_flag
-        w.writeBit(0)               // frame_cropping_flag
+        val hasCropping = cropLeft != 0 || cropRight != 0 || cropTop != 0 || cropBottom != 0
+        w.writeBit(if (hasCropping) 1 else 0) // frame_cropping_flag
+        if (hasCropping) {
+            w.writeUe(cropLeft)
+            w.writeUe(cropRight)
+            w.writeUe(cropTop)
+            w.writeUe(cropBottom)
+        }
 
         return w.toByteArray()
     }
