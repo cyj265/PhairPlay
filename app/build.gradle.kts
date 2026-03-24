@@ -100,6 +100,12 @@ android {
         checkDependencies = true
     }
 
+    buildFeatures {
+        // BuildConfig is disabled by default in AGP 8.x — enable it explicitly
+        // because PhairPlayApp.kt and SettingsFragment.kt use BuildConfig.VERSION_NAME etc.
+        buildConfig = true
+    }
+
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
