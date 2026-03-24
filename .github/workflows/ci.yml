@@ -53,10 +53,7 @@ jobs:
             echo "=== BUILD FAILED ==="
             cat app/build/reports/build-error.txt
             # Emit the "Caused by" section (the real error) as annotation
-            CAUSED=$(sed -n '/issues were found when checking AAR/,/^[[:space:]]*$/p' app/build/reports/build-error.txt | head -50)
-            if [ -z "$CAUSED" ]; then
-              CAUSED=$(grep -A5 "Caused by:" app/build/reports/build-error.txt | head -60)
-            fi
+            CAUSED=$(grep -A 40 "issues were found when checking AAR" app/build/reports/build-error.txt | head -40)
             ERROR_MSG=$(echo "$CAUSED" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
             echo "::error title=assembleGoogletvDebug failed::${ERROR_MSG}"
           fi
