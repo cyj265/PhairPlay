@@ -52,9 +52,12 @@ jobs:
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== BUILD FAILED ==="
             cat app/build/reports/build-error.txt
-            # Emit the "Caused by" section (the real error) as annotation
-            CAUSED=$(grep -A 40 "issues were found when checking AAR" app/build/reports/build-error.txt | head -40)
-            ERROR_MSG=$(echo "$CAUSED" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
+            # Emit key error lines as annotation
+            ERROR=$(grep -n "error:\|Error:\|FAILURE:\|Exception\|Caused by:\|Could not\|could not\|unresolved\|Unresolved\|issues were found" app/build/reports/build-error.txt | grep -v "^[[:space:]]*at " | head -40)
+            if [ -z "$ERROR" ]; then
+              ERROR=$(tail -40 app/build/reports/build-error.txt)
+            fi
+            ERROR_MSG=$(echo "$ERROR" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
             echo "::error title=assembleGoogletvDebug failed::${ERROR_MSG}"
           fi
           exit $BUILD_EXIT
