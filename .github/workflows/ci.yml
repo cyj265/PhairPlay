@@ -47,11 +47,15 @@ jobs:
       - name: Build Google TV (debug)
         run: |
           mkdir -p app/build/reports
-          ./gradlew assembleGoogletvDebug --stacktrace 2>&1 | tee app/build/reports/build-error.txt
+          ./gradlew assembleGoogletvDebug --stacktrace --info 2>&1 | tee app/build/reports/build-error.txt
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== BUILD FAILED — last 100 lines ==="
-            tail -100 app/build/reports/build-error.txt
+            echo "=== BUILD FAILED — last 200 lines ==="
+            tail -200 app/build/reports/build-error.txt
+            echo "## Build Failed" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -200 app/build/reports/build-error.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
           exit $BUILD_EXIT
 
