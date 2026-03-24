@@ -65,7 +65,16 @@ jobs:
       # Step 7: Build the Fire TV debug APK
       # This verifies that the firetv flavor compiles without errors
       - name: Build Fire TV (debug)
-        run: ./gradlew assembleFiretvDebug
+        run: |
+          ./gradlew assembleFiretvDebug --stacktrace 2>&1 | tee app/build/reports/firetv-error.txt
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ $BUILD_EXIT -ne 0 ]; then
+            ERROR=$(grep -n "error:\|Error:\|FAILURE:\|Exception\|Caused by:\|Could not\|unresolved\|Unresolved\|issues were found" app/build/reports/firetv-error.txt | grep -v "^[[:space:]]*at " | head -40)
+            if [ -z "$ERROR" ]; then ERROR=$(tail -40 app/build/reports/firetv-error.txt); fi
+            ERROR_MSG=$(echo "$ERROR" | tr '\n' '|' | sed 's/|$//;s/|/%0A/g')
+            echo "::error title=assembleFiretvDebug failed::${ERROR_MSG}"
+          fi
+          exit $BUILD_EXIT
 
       # Step 8: Run unit tests for both flavors
       # Unit tests run on the build machine (no Android device needed)
