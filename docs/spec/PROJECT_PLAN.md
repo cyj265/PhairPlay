@@ -3,7 +3,7 @@
 Version: 2.1
 Status: Active
 Date: 2026-03-23
-Last Updated: 2026-03-23
+Last Updated: 2026-05-23
 
 ---
 
@@ -23,17 +23,17 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 | Phase | Milestone | Status | Notes |
 |---|---|---|---|
 | 0 | M0 – Spec | ✅ Complete | All spec docs written, codec matrix added (v2.2) |
-| 1 | M1 – Skeleton | 🔄 In Progress | Source structure created; build system configured |
-| 2 | M2 – mDNS | ⏳ Pending | |
-| 3 | M3 – AirPlay Handshake | ⏳ Pending | |
-| 4 | M4 – AirPlay Video | ⏳ Pending | Includes photo sharing |
-| 5 | M5 – AirPlay Audio | ⏳ Pending | Includes optional HEVC, surround audio |
-| 6 | M6 – Miracast | ⏳ Pending | Full codec matrix (H.264 CHP/CBP + opt. HEVC, LPCM, AAC, AC3) |
-| 7 | M7 – Google Cast | ⏳ Pending | Full codec matrix (H.264/VP8 + opt. HEVC/VP9/AV1, AAC/MP3/Opus) |
+| 1 | M1 – Skeleton | ✅ Build-ready | UI, settings, foreground service, and both debug APK flavors build |
+| 2 | M2 – mDNS | 🔄 In Progress | AirPlay mDNS implemented; Miracast WFD advertising groundwork added; Cast remains registration-dependent |
+| 3 | M3 – AirPlay Handshake | 🔄 In Progress | RTSP handler, SDP parsing, `/photo` PUT/DELETE, and unit tests implemented; real macOS/iOS validation pending |
+| 4 | M4 – AirPlay Video | 🔄 In Progress | H.264 decoder/RTP components exist; real mirroring performance validation pending |
+| 5 | M5 – AirPlay Audio | 🔄 In Progress | AAC/ALAC/audio pipeline components exist; A/V sync and audio-only validation pending |
+| 6 | M6 – Miracast | 🔄 Started | Wi-Fi Direct/WFD advertising implemented; full WFD session, MPEG-TS, HDCP, and A/V playback pending |
+| 7 | M7 – Google Cast | 🔄 Started | Stub/fallback exists; full Cast receiver requires registered Cast app ID and SDK validation |
 | 8 | M8 – Stability | ⏳ Pending | |
-| 9 | M9 – Fire TV | ⏳ Pending | |
-| 10 | M10 – i18n | ⏳ Pending | |
-| 11 | M11 – Release | ⏳ Pending | |
+| 9 | M9 – Fire TV | 🔄 Build-ready | Fire TV debug APK builds; real Fire TV validation pending |
+| 10 | M10 – i18n | 🔄 Partial | EN/DE resource structure exists; full UX string audit pending |
+| 11 | M11 – Release | ⏳ Pending | Signed release APKs and GitHub release not created |
 
 ---
 
@@ -55,21 +55,21 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 ## Phase 1 – Skeleton + Service Architecture + UI
 
 **Milestone:** M1
-**Status:** 🔄 In Progress
+**Status:** ✅ Build-ready; real-device validation pending
 
 **Goal:** App starts on both platforms. Google TV-style HomeScreen. ForegroundService running. Settings screen accessible. All three service status cards visible.
 
 **Tasks:**
-- [ ] `HomeFragment.kt` — Google TV Streamer-style home screen with 3 service cards
-- [ ] `SettingsFragment.kt` — settings screen with toggles and text inputs
-- [ ] `ServiceStatusCard.kt` — reusable card component showing protocol status
-- [ ] `PhairPlayService.kt` — ForegroundService with start/stop/restart
-- [ ] `ServiceController.kt` — start/stop/restart API
-- [ ] `AppSettings.kt` — settings data model
-- [ ] `SettingsRepository.kt` — DataStore persistence
-- [ ] Persistent notification with Stop/Restart actions
-- [ ] `res/values/strings.xml` (EN), `res/values-de/strings.xml` (DE)
-- [ ] Unit tests for all new public methods
+- [x] `HomeFragment.kt` — Google TV Streamer-style home screen with 3 service cards
+- [x] `SettingsFragment.kt` — settings screen with toggles and text inputs
+- [x] `PhairPlayService.kt` — ForegroundService with start/stop/restart
+- [x] `ServiceController.kt` — start/stop/restart API
+- [x] `AppSettings.kt` — settings data model
+- [x] `SettingsRepository.kt` — DataStore persistence
+- [x] Persistent notification with Stop/Restart actions
+- [x] `res/values/strings.xml` (EN), `res/values-de/strings.xml` (DE)
+- [x] Focused unit tests for service/settings state
+- [ ] Full real-device UI navigation pass on Google TV and Fire TV
 
 **Definition of Done:**
 - App starts on both platforms without crash
@@ -90,11 +90,11 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 **Goal:** All enabled services advertise on the network. macOS sees AirPlay. Windows sees Miracast. Chrome sees Cast.
 
 **Tasks:**
-- [ ] `MdnsService.kt` — AirPlay mDNS advertisement (complete implementation)
-- [ ] `WifiDirectManager.kt` — Wi-Fi P2P manager for Miracast discovery
+- [x] `MdnsService.kt` — AirPlay mDNS advertisement
+- [x] Miracast Wi-Fi Direct / WFD service advertisement groundwork
 - [ ] `CastAdvertiser.kt` — Cast receiver advertisement stub
-- [ ] `NetworkUtils.kt` — complete implementation (IP, MAC, UUID)
-- [ ] Settings: device name applied to all advertisers
+- [x] `NetworkUtils.kt` — IP, MAC, UUID helpers
+- [x] Settings: device name applied to implemented advertisers
 
 **Definition of Done:**
 - macOS sees PhairPlay within 3s (AC-2.1)
@@ -111,13 +111,15 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 **Goal:** Full AirPlay RTSP session establishment end-to-end, plus HTTP photo endpoint.
 
 **Tasks:**
-- [ ] `RtspHandler.kt` — full RTSP implementation (all methods, SDP parsing)
-- [ ] SDP parser — extract H.264/H.265 params, audio codec params, AAC keys, port numbers
-- [ ] `PhotoHandler.kt` — HTTP PUT/DELETE `/photo` endpoint; JPEG/PNG decode via BitmapFactory
-- [ ] `PhotoScreen.kt` — full-screen Fragment with ImageView and image downsampling
-- [ ] AirPlay `features` bitmask: set Photo bit (bit 1) in mDNS TXT record
-- [ ] Input validation — all fields, max sizes, format checks
-- [ ] Unit tests: all RTSP methods, SDP edge cases, malformed input, photo decode
+- [x] `RtspHandler.kt` — RTSP methods, SDP parsing hookup, pause/flush/parameter handling
+- [x] `RtspRequestReader.kt` — bounded raw socket request parsing, including photo bodies
+- [x] SDP parser — H.264 params, audio codec params, AES key/IV, sample/channel details
+- [x] `PhotoHandler.kt` — HTTP PUT/DELETE `/photo` endpoint; JPEG/PNG validation
+- [x] `PhotoScreen.kt` — full-screen image display
+- [x] AirPlay `features` bitmask includes Photo support in mDNS TXT record
+- [x] Input validation — request size limits and photo format checks
+- [x] Unit tests: RTSP methods, SDP edge cases, malformed input, photo validation
+- [ ] Real macOS/iOS AirPlay handshake and photo transfer validation
 
 **Definition of Done:** AC-3.x — full handshake from macOS without RTSP errors; photo sent from iOS Photos app appears on screen.
 
@@ -318,16 +320,16 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 | # | Phase | Key Deliverable | Status | Primary AC |
 |---|---|---|---|---|
 | M0 | Spec | 4 spec docs, codec matrix, photo/DRM spec | ✅ Complete | AC-0.x |
-| M1 | Skeleton | Service + UI scaffold (both flavors) | 🔄 In Progress | AC-1.x |
-| M2 | Discovery | All 3 protocols advertising | ⏳ Pending | AC-2.x |
-| M3 | AirPlay Handshake + Photo | RTSP session + `/photo` endpoint | ⏳ Pending | AC-3.x |
-| M4 | AirPlay Video | H.264 mandatory ≥25fps; H.265 optional | ⏳ Pending | AC-4.x |
-| M5 | AirPlay Audio | A/V sync ≤40ms; ALAC; optional surround | ⏳ Pending | AC-5.x |
-| M6 | Miracast | H.264 CHP/CBP + LPCM mandatory; HEVC/AAC/AC3 optional | ⏳ Pending | AC-6.x |
-| M7 | Cast | H.264+VP8 mandatory; HEVC/VP9/AV1 optional; Widevine | ⏳ Pending | AC-7.x |
+| M1 | Skeleton | Service + UI scaffold (both flavors) | ✅ Build-ready | AC-1.x |
+| M2 | Discovery | AirPlay mDNS + Miracast WFD advertising groundwork | 🔄 In Progress | AC-2.x |
+| M3 | AirPlay Handshake + Photo | RTSP session + `/photo` endpoint | 🔄 In Progress | AC-3.x |
+| M4 | AirPlay Video | H.264 mandatory ≥25fps; H.265 optional | 🔄 In Progress | AC-4.x |
+| M5 | AirPlay Audio | A/V sync ≤40ms; ALAC; optional surround | 🔄 In Progress | AC-5.x |
+| M6 | Miracast | H.264 CHP/CBP + LPCM mandatory; HEVC/AAC/AC3 optional | 🔄 Started | AC-6.x |
+| M7 | Cast | H.264+VP8 mandatory; HEVC/VP9/AV1 optional; Widevine | 🔄 Started | AC-7.x |
 | M8 | Stability | 30min tests all protocols; auto-reconnect | ⏳ Pending | AC-8.x |
-| M9 | Fire TV | All protocols on Fire TV; Cast graceful fallback | ⏳ Pending | AC-9.x |
-| M10 | i18n | EN+DE complete | ⏳ Pending | AC-10.x |
+| M9 | Fire TV | All protocols on Fire TV; Cast graceful fallback | 🔄 Build-ready | AC-9.x |
+| M10 | i18n | EN+DE complete | 🔄 Partial | AC-10.x |
 | M11 | Release | Signed APKs, CI green, all tests pass | ⏳ Pending | AC-11.x |
 
 ---
