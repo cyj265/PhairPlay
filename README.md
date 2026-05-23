@@ -88,6 +88,13 @@ Not everything in the full product spec is proven end-to-end yet. AirPlay, Mirac
    ```
    The APK will be in `app/build/outputs/apk/`.
 
+   To run the same local checks used by CI before testing on a TV:
+   ```bash
+   ./gradlew :test-runner:test
+   ./gradlew :app:lintGoogletvDebug :app:lintFiretvDebug \
+     :app:assembleGoogletvDebug :app:assembleFiretvDebug
+   ```
+
 4. **Install via ADB**
    ```bash
    # Enable ADB on your TV first (see below)
@@ -151,6 +158,8 @@ Not everything in the full product spec is proven end-to-end yet. AirPlay, Mirac
 - **Audio-only AirPlay** (streaming from Apple Music app) is not fully supported in v1.0.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100ms. Use 5 GHz or Ethernet for best results.
+
+For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
 
 ---
 

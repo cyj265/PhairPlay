@@ -73,12 +73,14 @@
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:src="@drawable/ic_chevron_right"
-                android:contentDescription="" />
+                android:importantForAccessibility="no" />
         </LinearLayout>
 
         <!-- ── Section: Protocols ─────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_protocols"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp" />
 
         <include layout="@layout/settings_toggle_row"
@@ -99,6 +101,8 @@
         <!-- ── Section: AirPlay ───────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_airplay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp" />
 
         <include layout="@layout/settings_toggle_row"
@@ -109,6 +113,8 @@
         <!-- ── Section: Service ───────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_service"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp" />
 
         <include layout="@layout/settings_toggle_row"
@@ -119,6 +125,8 @@
         <!-- ── Section: Developer ─────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_developer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp" />
 
         <include layout="@layout/settings_toggle_row"
@@ -129,6 +137,8 @@
         <!-- ── Section: About ─────────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_about"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp" />
 
         <LinearLayout

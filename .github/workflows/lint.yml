@@ -5,14 +5,22 @@ name: Lint
 
 on:
   push:
-    branches: [ "main", "develop", "claude/**" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main" ]
 
 jobs:
   android-lint:
-    name: Android Lint
+    name: Android Lint (${{ matrix.flavor }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: googletv
+            lint_task: :app:lintGoogletvDebug
+          - flavor: firetv
+            lint_task: :app:lintFiretvDebug
 
     steps:
       - name: Checkout code
@@ -42,13 +50,13 @@ jobs:
       # The lint configuration in app/build.gradle.kts controls what is reported.
       # See: https://developer.android.com/studio/write/lint
       - name: Run Android Lint
-        run: ./gradlew :app:lintGoogletvDebug --stacktrace
+        run: ./gradlew ${{ matrix.lint_task }} --stacktrace
 
       # Upload the lint report so it's easy to review in GitHub
       - name: Upload Lint report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lint-report
+          name: lint-report-${{ matrix.flavor }}
           path: app/build/reports/lint-results-*.html
           retention-days: 30

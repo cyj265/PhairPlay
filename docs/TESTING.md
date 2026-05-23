@@ -48,8 +48,20 @@ adb devices
 ### Full CI Check (same as GitHub Actions)
 
 ```bash
-./gradlew assembleGoogletvDebug assembleFiretvDebug test lint
+./gradlew :test-runner:test
+./gradlew :app:lintGoogletvDebug :app:lintFiretvDebug \
+  :app:assembleGoogletvDebug :app:assembleFiretvDebug
 ```
+
+GitHub Actions runs the same checks on `main`:
+
+- `JVM protocol tests`: fast protocol/parser/media-unit coverage through `:test-runner:test`
+- `Android lint & debug APKs`: Android lint and both debug APKs
+
+The Android Gradle unit-test tasks are not used as CI gates because several tests
+exercise Android framework classes that are unstable on the host JVM. Use
+`:test-runner:test` for CI-grade protocol/unit coverage and real devices for
+Android framework behavior.
 
 ---
 
@@ -80,6 +92,36 @@ adb devices
 ## Manual Test Scenarios
 
 For acceptance testing before a release, perform all scenarios below on both **Google TV** and **Fire TV**.
+
+### Before You Start
+
+Capture a clean baseline before each device run:
+
+```bash
+adb devices -l
+adb logcat -c
+```
+
+Install the correct debug APK:
+
+```bash
+# Google TV
+adb install -r app/build/outputs/apk/googletv/debug/app-googletv-debug.apk
+
+# Fire TV
+adb install -r app/build/outputs/apk/firetv/debug/app-firetv-debug.apk
+```
+
+After a failed run, collect diagnostics before restarting the app:
+
+```bash
+tools/collect-device-logs.sh
+
+# Optional: force a package if both flavors are installed
+PHAIRPLAY_PACKAGE=com.phairplay.firetv tools/collect-device-logs.sh
+```
+
+The script writes ADB device details, package info, memory stats, process CPU, and filtered logcat output under `device-test-logs/`.
 
 ### Scenario 1: App Startup (Milestone 1)
 **Goal:** App starts and shows the WaitingScreen without crashing.

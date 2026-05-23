@@ -1,9 +1,11 @@
 package com.phairplay.miracast
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.WifiP2pManager.Channel
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+import android.os.Build
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 
@@ -81,7 +83,9 @@ class MiracastReceiver(
         Logger.i("MiracastReceiver stopping")
         try {
             stopP2pAdvertisement()
-            channel?.close()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                channel?.close()
+            }
         } catch (e: Exception) {
             Logger.e("Error stopping MiracastReceiver (non-fatal)", e)
         } finally {
@@ -136,19 +140,23 @@ class MiracastReceiver(
         val activeService = serviceInfo ?: return
         if (!isAdvertising) return
 
-        manager.removeLocalService(
-            activeChannel,
-            activeService,
-            object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Logger.d("P2P service advertisement stopped")
-                }
+        try {
+            manager.removeLocalService(
+                activeChannel,
+                activeService,
+                object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Logger.d("P2P service advertisement stopped")
+                    }
 
-                override fun onFailure(reason: Int) {
-                    Logger.w("P2P service removal failed, reason=$reason (non-fatal)")
+                    override fun onFailure(reason: Int) {
+                        Logger.w("P2P service removal failed, reason=$reason (non-fatal)")
+                    }
                 }
-            }
-        )
+            )
+        } catch (e: SecurityException) {
+            Logger.e("Missing Wi-Fi P2P permission while removing Miracast service", e)
+        }
         serviceInfo = null
         isAdvertising = false
     }
@@ -168,6 +176,11 @@ class MiracastReceiver(
             onStateChanged(ProtocolState.ERROR)
             return
         }
+        if (!hasWifiP2pPermission()) {
+            Logger.w("Cannot register Miracast P2P service: missing Wi-Fi Direct permission")
+            onStateChanged(ProtocolState.ERROR)
+            return
+        }
 
         val txtRecord = mapOf(
             "wfd_device_type" to "primary_sink",
@@ -182,25 +195,39 @@ class MiracastReceiver(
             txtRecord
         )
 
-        manager.addLocalService(
-            activeChannel,
-            localService,
-            object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    serviceInfo = localService
-                    isAdvertising = true
-                    Logger.i("Miracast WFD P2P service advertised")
-                    onStateChanged(ProtocolState.ADVERTISING)
-                }
+        try {
+            manager.addLocalService(
+                activeChannel,
+                localService,
+                object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        serviceInfo = localService
+                        isAdvertising = true
+                        Logger.i("Miracast WFD P2P service advertised")
+                        onStateChanged(ProtocolState.ADVERTISING)
+                    }
 
-                override fun onFailure(reason: Int) {
-                    serviceInfo = null
-                    isAdvertising = false
-                    Logger.e("Miracast WFD P2P service registration failed, reason=$reason")
-                    onStateChanged(ProtocolState.ERROR)
+                    override fun onFailure(reason: Int) {
+                        serviceInfo = null
+                        isAdvertising = false
+                        Logger.e("Miracast WFD P2P service registration failed, reason=$reason")
+                        onStateChanged(ProtocolState.ERROR)
+                    }
                 }
-            }
-        )
+            )
+        } catch (e: SecurityException) {
+            serviceInfo = null
+            isAdvertising = false
+            Logger.e("Missing Wi-Fi P2P permission while registering Miracast service", e)
+            onStateChanged(ProtocolState.ERROR)
+        }
+    }
+
+    private fun hasWifiP2pPermission(): Boolean {
+        return context.checkSelfPermission(PERMISSION_NEARBY_WIFI_DEVICES) ==
+            PackageManager.PERMISSION_GRANTED ||
+            context.checkSelfPermission(PERMISSION_ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     /**
@@ -231,5 +258,7 @@ class MiracastReceiver(
         const val WFD_RTSP_PORT = 7236
         private const val SERVICE_INSTANCE_NAME = "PhairPlay"
         private const val SERVICE_TYPE_WFD = "_wfd._tcp"
+        private const val PERMISSION_ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
+        private const val PERMISSION_NEARBY_WIFI_DEVICES = "android.permission.NEARBY_WIFI_DEVICES"
     }
 }

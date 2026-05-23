@@ -65,6 +65,7 @@ $RECYCLE.BIN/
 # Test results
 test-results/
 lint-results/
+device-test-logs/
 
 # Profiling
 *.hprof

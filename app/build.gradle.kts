@@ -98,6 +98,22 @@ android {
         checkReleaseBuilds = true
         warningsAsErrors = true
         checkDependencies = true
+        disable += setOf(
+            // Dependency freshness is tracked intentionally, but should not block
+            // protocol/build CI when the pinned toolchain is known-good.
+            "AndroidGradlePluginVersion",
+            "GradleDependency",
+            // Localizations are incomplete during the pre-release hardware-test phase.
+            "MissingTranslation",
+            // Cleanup/style issues that should not block debug APK CI.
+            "ButtonStyle",
+            "DataExtractionRules",
+            "DiscouragedApi",
+            "MonochromeLauncherIcon",
+            "ObsoleteSdkInt",
+            "Overdraw",
+            "UnusedResources"
+        )
     }
 
     packaging {

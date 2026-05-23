@@ -29,7 +29,7 @@
         android:layout_height="32dp"
         android:layout_marginBottom="12dp"
         android:src="@drawable/ic_airplay"
-        android:contentDescription="" />
+        android:importantForAccessibility="no" />
 
     <!-- Protocol name: "AirPlay", "Miracast", "Cast" -->
     <TextView

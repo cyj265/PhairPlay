@@ -1,6 +1,7 @@
 package com.phairplay.miracast
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.os.Looper
@@ -28,6 +29,10 @@ class MiracastReceiverTest {
 
         every { context.getSystemService(Context.WIFI_P2P_SERVICE) } returns manager
         every { context.mainLooper } returns Looper.getMainLooper()
+        every { context.checkSelfPermission("android.permission.NEARBY_WIFI_DEVICES") } returns
+            PackageManager.PERMISSION_GRANTED
+        every { context.checkSelfPermission("android.permission.ACCESS_FINE_LOCATION") } returns
+            PackageManager.PERMISSION_DENIED
         every { manager.initialize(eq(context), any(), any()) } returns channel
         every {
             manager.addLocalService(
