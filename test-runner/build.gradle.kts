@@ -16,7 +16,7 @@
  * scan the main output directory for @Test classes.
  */
 plugins {
-    kotlin("jvm") version "1.9.23"
+    alias(libs.plugins.kotlin.jvm)
 }
 
 kotlin {

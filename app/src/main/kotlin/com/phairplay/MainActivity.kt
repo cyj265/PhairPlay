@@ -17,9 +17,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.phairplay.service.PhairPlayService
+import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
 import com.phairplay.ui.HomeFragment
+import com.phairplay.ui.PhotoScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
 import kotlinx.coroutines.flow.collectLatest
@@ -54,10 +56,13 @@ class MainActivity : AppCompatActivity() {
 
     // The SurfaceView for full-screen video output
     private lateinit var streamingScreen: StreamingScreen
+    private lateinit var photoScreen: PhotoScreen
 
     // Service binding — gives access to state flows for showing/hiding the streaming overlay
     private var service: PhairPlayService? = null
     private var isBound = false
+    private var currentAirPlayState = ProtocolState.DISABLED
+    private var currentPhotoFrame: PhotoFrame? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -68,8 +73,8 @@ class MainActivity : AppCompatActivity() {
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { getVideoSurface() }
 
-            // Show/hide the streaming overlay whenever AirPlay state changes
-            observeStreamingState()
+            // Show/hide the full-screen overlay for video streams and photos.
+            observeOverlayState()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -88,7 +93,7 @@ class MainActivity : AppCompatActivity() {
 
         Timber.d("MainActivity created")
         bindViews()
-        setupStreamingScreen()
+        setupOverlayScreens()
         setupNavigation()
 
         // Show HomeFragment on first launch
@@ -140,9 +145,12 @@ class MainActivity : AppCompatActivity() {
      * Creates the StreamingScreen (SurfaceView for video) and adds it to the
      * streaming_container. Created eagerly so the Surface is ready before streaming starts.
      */
-    private fun setupStreamingScreen() {
+    private fun setupOverlayScreens() {
         streamingScreen = StreamingScreen(this)
+        photoScreen = PhotoScreen(this)
         streamingContainer.addView(streamingScreen)
+        streamingContainer.addView(photoScreen)
+        photoScreen.visibility = View.GONE
     }
 
     /**
@@ -205,8 +213,19 @@ class MainActivity : AppCompatActivity() {
      * Hides the nav panel and content area to give the stream the full screen.
      */
     fun showStreamingScreen() {
+        photoScreen.visibility = View.GONE
+        streamingScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
+    }
+
+    fun showPhotoScreen(photoFrame: PhotoFrame) {
+        if (photoScreen.showPhoto(photoFrame.bytes)) {
+            streamingScreen.visibility = View.GONE
+            photoScreen.visibility = View.VISIBLE
+            streamingContainer.visibility = View.VISIBLE
+            streamingContainer.bringToFront()
+        }
     }
 
     /**
@@ -214,6 +233,9 @@ class MainActivity : AppCompatActivity() {
      * Called when a stream ends.
      */
     fun hideStreamingScreen() {
+        photoScreen.clearPhoto()
+        photoScreen.visibility = View.GONE
+        streamingScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.GONE
     }
 
@@ -246,22 +268,34 @@ class MainActivity : AppCompatActivity() {
     // ─── Streaming overlay ────────────────────────────────────────────────────
 
     /**
-     * Observes [PhairPlayService.airPlayState] and shows or hides the full-screen
-     * streaming overlay accordingly.
+     * Observes [PhairPlayService.airPlayState] and [PhairPlayService.photoFrame]
+     * and shows the appropriate full-screen overlay.
      *
      * Called once after the service is bound. The coroutine is automatically cancelled
      * by [lifecycleScope] when the Activity stops.
      */
-    private fun observeStreamingState() {
+    private fun observeOverlayState() {
         val svc = service ?: return
         lifecycleScope.launch {
             svc.airPlayState.collectLatest { state ->
-                if (state == ProtocolState.CONNECTED) {
-                    showStreamingScreen()
-                } else {
-                    hideStreamingScreen()
-                }
+                currentAirPlayState = state
+                updateOverlay()
             }
+        }
+        lifecycleScope.launch {
+            svc.photoFrame.collectLatest { frame ->
+                currentPhotoFrame = frame
+                updateOverlay()
+            }
+        }
+    }
+
+    private fun updateOverlay() {
+        val photoFrame = currentPhotoFrame
+        when {
+            currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
+            photoFrame != null -> showPhotoScreen(photoFrame)
+            else -> hideStreamingScreen()
         }
     }
 }

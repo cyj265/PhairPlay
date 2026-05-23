@@ -69,7 +69,7 @@ class AudioPlayer {
             require(aesIv != null && aesIv.size == AES_KEY_LENGTH_BYTES) {
                 "AES IV must be exactly $AES_KEY_LENGTH_BYTES bytes, got ${aesIv?.size}"
             }
-            initializeCipher(aesKey!!, aesIv!!)
+            initializeCipher(aesKey, aesIv)
             Logger.i("Initializing AudioPlayer (encrypted): ${sampleRate}Hz, $channels channels")
         } else {
             Logger.i("Initializing AudioPlayer (unencrypted): ${sampleRate}Hz, $channels channels")
@@ -161,6 +161,7 @@ class AudioPlayer {
      * @param key 16-byte AES key
      * @param iv  16-byte initialization vector (starting counter value)
      */
+    @Suppress("DEPRECATION")
     private fun initializeCipher(key: ByteArray, iv: ByteArray) {
         val keyParam = KeyParameter(key)
         val keyWithIv = ParametersWithIV(keyParam, iv)

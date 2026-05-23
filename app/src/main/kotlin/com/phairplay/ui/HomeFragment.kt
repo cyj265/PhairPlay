@@ -167,13 +167,13 @@ class HomeFragment : Fragment() {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state, Protocol.AIRPLAY) }
+            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state, Protocol.MIRACAST) }
+            svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state, Protocol.CAST) }
+            svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state) }
         }
     }
 
@@ -197,9 +197,8 @@ class HomeFragment : Fragment() {
      *
      * @param card      The card root view (cardAirPlay, cardMiracast, or cardCast).
      * @param state     The current state of this protocol.
-     * @param protocol  Which protocol this card represents.
      */
-    private fun updateProtocolCard(card: View, state: ProtocolState, protocol: Protocol) {
+    private fun updateProtocolCard(card: View, state: ProtocolState) {
         val dot    = card.findViewById<View>(R.id.dot_protocol_status)
         val stateText = card.findViewById<TextView>(R.id.text_protocol_state)
         val detail = card.findViewById<TextView>(R.id.text_protocol_detail)

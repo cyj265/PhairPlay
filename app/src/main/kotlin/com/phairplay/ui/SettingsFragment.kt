@@ -142,7 +142,7 @@ class SettingsFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             val settings = settingsRepository.settingsFlow.first()
             populateUI(settings)
-            setupListeners(settings)
+            setupListeners()
         }
     }
 
@@ -170,7 +170,7 @@ class SettingsFragment : Fragment() {
      * No "Save" button is needed — settings are saved on every interaction.
      * A restart prompt is shown after protocol-affecting changes.
      */
-    private fun setupListeners(initialSettings: AppSettings) {
+    private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
         setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }

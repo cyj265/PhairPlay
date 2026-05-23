@@ -3,19 +3,20 @@ package com.phairplay.miracast
 import android.content.Context
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.WifiP2pManager.Channel
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 
 /**
- * MiracastReceiver — Miracast (Wi-Fi Display / WFD) receiver stub.
+ * MiracastReceiver — Miracast (Wi-Fi Display / WFD) receiver service advertiser.
  *
  * WHY: Miracast allows Windows 10+ and Android devices to wirelessly mirror
  * their screen without being on the same Wi-Fi network. It uses Wi-Fi Direct
  * (P2P) to create a direct device-to-device connection.
  *
  * HOW: Implementation proceeds in phases:
- * - Phase 1 (this stub): Architecture defined, P2P manager initialized
- * - Phase 2 (M2): Wi-Fi P2P service discovery advertised
+ * - Phase 1: Architecture defined, P2P manager initialized
+ * - Phase 2: Wi-Fi P2P service discovery advertised
  * - Phase 3 (M3): WFD RTSP session negotiation
  * - Phase 4 (M6): H.264 video decode + audio playback
  *
@@ -49,6 +50,9 @@ class MiracastReceiver(
     // The communication channel between the app and the Wi-Fi P2P framework
     private var channel: Channel? = null
 
+    // The local DNS-SD service record advertised through Wi-Fi Direct.
+    private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
+
     // Whether the P2P service advertisement is currently active
     @Volatile
     private var isAdvertising = false
@@ -56,10 +60,10 @@ class MiracastReceiver(
     /**
      * Starts the Miracast receiver.
      *
-     * Current implementation (Phase 1 stub):
+     * Current implementation:
      * - Initializes the WifiP2pManager and Channel
      * - Logs availability of Wi-Fi Direct on this device
-     * - TODO (Phase 2): Register P2P service discovery records
+     * - Registers a local Wi-Fi Direct DNS-SD WFD service
      * - TODO (Phase 3): Accept incoming WFD RTSP connections
      */
     fun start() {
@@ -120,20 +124,83 @@ class MiracastReceiver(
         )
 
         Logger.i("WifiP2pManager initialized — registering P2P service")
-        // TODO Phase 2: registerP2pService()
-        onStateChanged(ProtocolState.ADVERTISING)
-        isAdvertising = true
+        registerP2pService()
     }
 
     /**
      * Stops the P2P service advertisement.
-     * TODO Phase 2: implement removeLocalService() call
      */
     private fun stopP2pAdvertisement() {
+        val manager = wifiP2pManager ?: return
+        val activeChannel = channel ?: return
+        val activeService = serviceInfo ?: return
         if (!isAdvertising) return
-        // TODO Phase 2: wifiP2pManager?.removeLocalService(channel, serviceInfo, listener)
+
+        manager.removeLocalService(
+            activeChannel,
+            activeService,
+            object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Logger.d("P2P service advertisement stopped")
+                }
+
+                override fun onFailure(reason: Int) {
+                    Logger.w("P2P service removal failed, reason=$reason (non-fatal)")
+                }
+            }
+        )
+        serviceInfo = null
         isAdvertising = false
-        Logger.d("P2P service advertisement stopped")
+    }
+
+    /**
+     * Registers the WFD local service record used by Wi-Fi Direct discovery.
+     *
+     * Android exposes Wi-Fi Direct service discovery through DNS-SD TXT records.
+     * Miracast senders look for `_wfd._tcp` and then continue with WFD capability
+     * negotiation over RTSP after the P2P group is formed.
+     */
+    private fun registerP2pService() {
+        val manager = wifiP2pManager
+        val activeChannel = channel
+        if (manager == null || activeChannel == null) {
+            Logger.w("Cannot register Miracast P2P service before Wi-Fi P2P initialization")
+            onStateChanged(ProtocolState.ERROR)
+            return
+        }
+
+        val txtRecord = mapOf(
+            "wfd_device_type" to "primary_sink",
+            "wfd_session_available" to "1",
+            "wfd_rtsp_port" to WFD_RTSP_PORT.toString(),
+            "wfd_video_formats" to "h264-chp,h264-cbp",
+            "wfd_audio_codecs" to "lpcm"
+        )
+        val localService = WifiP2pDnsSdServiceInfo.newInstance(
+            SERVICE_INSTANCE_NAME,
+            SERVICE_TYPE_WFD,
+            txtRecord
+        )
+
+        manager.addLocalService(
+            activeChannel,
+            localService,
+            object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    serviceInfo = localService
+                    isAdvertising = true
+                    Logger.i("Miracast WFD P2P service advertised")
+                    onStateChanged(ProtocolState.ADVERTISING)
+                }
+
+                override fun onFailure(reason: Int) {
+                    serviceInfo = null
+                    isAdvertising = false
+                    Logger.e("Miracast WFD P2P service registration failed, reason=$reason")
+                    onStateChanged(ProtocolState.ERROR)
+                }
+            }
+        )
     }
 
     /**
@@ -158,5 +225,11 @@ class MiracastReceiver(
         // TODO Phase 3: implement WFD RTSP session handling
         // Reference: Wi-Fi Display Specification v2.1, Section 6
         Logger.d("WFD session handling — TODO Phase 3")
+    }
+
+    companion object {
+        const val WFD_RTSP_PORT = 7236
+        private const val SERVICE_INSTANCE_NAME = "PhairPlay"
+        private const val SERVICE_TYPE_WFD = "_wfd._tcp"
     }
 }

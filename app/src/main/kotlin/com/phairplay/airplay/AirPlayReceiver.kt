@@ -59,6 +59,10 @@ class AirPlayReceiver(
      * Guaranteed to be called BEFORE [onStateChanged] is called with [ProtocolState.CONNECTED].
      */
     private val onSenderNameChanged: (String) -> Unit = {},
+    /** Called when iOS/macOS sends a JPEG/PNG to the `/photo` endpoint. */
+    private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
+    /** Called when iOS/macOS clears the currently displayed `/photo`. */
+    private val onPhotoCleared: () -> Unit = {},
     /**
      * Called with the actual mDNS-registered name after [start].
      *
@@ -148,7 +152,9 @@ class AirPlayReceiver(
         rtspHandler = RtspHandler(
             videoSurfaceProvider = videoSurfaceProvider,
             onStreamingStarted = { session -> onStreamingStarted(session) },
-            onStreamingStopped = { onStreamingStopped() }
+            onStreamingStopped = { onStreamingStopped() },
+            onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
+            onPhotoCleared = { onPhotoCleared() }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
     }

@@ -26,12 +26,18 @@ class RtspHandlerTest {
     private var streamingStarted = false
     private var lastSession: SessionDescription? = null
     private var streamingStopped = false
+    private var photoReceived = false
+    private var photoCleared = false
+    private var lastPhotoType: PhotoImageType? = null
 
     @Before
     fun setup() {
         streamingStarted = false
         lastSession = null
         streamingStopped = false
+        photoReceived = false
+        photoCleared = false
+        lastPhotoType = null
     }
 
     // ─── OPTIONS ─────────────────────────────────────────────────────────────
@@ -204,6 +210,59 @@ class RtspHandlerTest {
         assertEquals("Not Implemented", response.statusMessage)
     }
 
+    // ─── Photo endpoint ─────────────────────────────────────────────────────
+
+    @Test
+    fun `PUT photo with valid JPEG triggers photo callback`() {
+        val response = createTestHandler().handlePhotoPutPublic(
+            RtspRequest(
+                method = "PUT",
+                uri = "/photo",
+                headers = mapOf("Content-Type" to "image/jpeg"),
+                body = "",
+                bodyBytes = JPEG_BYTES,
+                protocol = "HTTP/1.1"
+            )
+        )
+
+        assertEquals(200, response.statusCode)
+        assertEquals("HTTP/1.1", response.protocol)
+        assertTrue("photo callback should be called", photoReceived)
+        assertEquals(PhotoImageType.JPEG, lastPhotoType)
+    }
+
+    @Test
+    fun `PUT photo with invalid payload returns 400`() {
+        val response = createTestHandler().handlePhotoPutPublic(
+            RtspRequest(
+                method = "PUT",
+                uri = "/photo",
+                headers = mapOf("Content-Type" to "image/jpeg"),
+                body = "not an image",
+                bodyBytes = "not an image".toByteArray(),
+                protocol = "HTTP/1.1"
+            )
+        )
+
+        assertEquals(400, response.statusCode)
+    }
+
+    @Test
+    fun `DELETE photo triggers clear callback`() {
+        val response = createTestHandler().handlePhotoDeletePublic(
+            RtspRequest(
+                method = "DELETE",
+                uri = "/photo",
+                headers = emptyMap(),
+                body = "",
+                protocol = "HTTP/1.1"
+            )
+        )
+
+        assertEquals(200, response.statusCode)
+        assertTrue("photo clear callback should be called", photoCleared)
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private fun createTestHandler(): TestableRtspHandler = TestableRtspHandler(
@@ -212,6 +271,12 @@ class RtspHandlerTest {
             lastSession = session
         },
         onStreamingStopped = { streamingStopped = true }
+        ,
+        onPhotoReceived = { _, imageType ->
+            photoReceived = true
+            lastPhotoType = imageType
+        },
+        onPhotoCleared = { photoCleared = true }
     )
 
     companion object {
@@ -243,6 +308,8 @@ class RtspHandlerTest {
             a=rsaaeskey:MTIzNDU2Nzg5MDEyMzQ1Ng==
             a=aesiv:MTYtYnl0ZS1pdmluaXR2
         """.trimIndent()
+
+        val JPEG_BYTES = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte())
     }
 }
 
@@ -252,11 +319,15 @@ class RtspHandlerTest {
  */
 class TestableRtspHandler(
     onStreamingStarted: (SessionDescription) -> Unit,
-    onStreamingStopped: () -> Unit
+    onStreamingStopped: () -> Unit,
+    onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
+    onPhotoCleared: () -> Unit = {}
 ) : RtspHandler(
     videoSurfaceProvider = { null },
     onStreamingStarted = onStreamingStarted,
-    onStreamingStopped = onStreamingStopped
+    onStreamingStopped = onStreamingStopped,
+    onPhotoReceived = onPhotoReceived,
+    onPhotoCleared = onPhotoCleared
 ) {
     fun handleOptionsPublic(req: RtspRequest) = handleOptionsInternal(req)
     fun handleAnnouncePublic(req: RtspRequest) = handleAnnounceInternal(req)
@@ -265,4 +336,6 @@ class TestableRtspHandler(
     fun handleTeardownPublic(req: RtspRequest) = handleTeardownInternal(req)
     fun handleUnknownMethodPublic(req: RtspRequest) = handleUnknownInternal(req)
     fun handlePausePublic(req: RtspRequest) = handlePauseInternal(req)
+    fun handlePhotoPutPublic(req: RtspRequest) = handlePhotoPutInternal(req)
+    fun handlePhotoDeletePublic(req: RtspRequest) = handlePhotoDeleteInternal(req)
 }

@@ -58,7 +58,6 @@ android {
     }
 
     compileOptions {
-        isCoreLibraryDesugaringEnabled = true   // backports java.util.Base64 etc. to API 25
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -102,6 +101,9 @@ android {
     }
 
     packaging {
+        jniLibs {
+            keepDebugSymbols += "**/*.so"
+        }
         resources {
             // BouncyCastle (and some other crypto libs) include OSGI manifest files
             // that conflict when multiple jars are merged. Exclude them — they are
@@ -127,9 +129,6 @@ android {
 }
 
 dependencies {
-    // Core library desugaring — backports java.util.Base64, java.time.*, etc. to API 25
-    coreLibraryDesugaring(libs.desugar.jdk.libs)
-
     // AndroidX UI (View-based, for maximum TV compatibility)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.constraintlayout)

@@ -81,10 +81,7 @@ class PhairPlayServiceTest {
     // lingers after the session ends.
 
     /** The exact mapping lambda from [PhairPlayService.startAirPlay] — tested as a pure function. */
-    private fun simulateStateChange(
-        state: ProtocolState,
-        currentConnection: ActiveConnection?
-    ): ActiveConnection? {
+    private fun simulateStateChange(state: ProtocolState): ActiveConnection? {
         return when (state) {
             ProtocolState.CONNECTED   -> ActiveConnection("AirPlay Sender", Protocol.AIRPLAY)
             ProtocolState.ADVERTISING,
@@ -95,7 +92,7 @@ class PhairPlayServiceTest {
 
     @Test
     fun `CONNECTED state creates ActiveConnection for AirPlay protocol`() {
-        val connection = simulateStateChange(ProtocolState.CONNECTED, currentConnection = null)
+        val connection = simulateStateChange(ProtocolState.CONNECTED)
 
         assertNotNull("CONNECTED must create an ActiveConnection", connection)
         assertEquals(Protocol.AIRPLAY, connection?.protocol)
@@ -104,30 +101,27 @@ class PhairPlayServiceTest {
 
     @Test
     fun `ADVERTISING state clears ActiveConnection`() {
-        val existing = ActiveConnection("MacBook Pro", Protocol.AIRPLAY)
-        val result = simulateStateChange(ProtocolState.ADVERTISING, currentConnection = existing)
+        val result = simulateStateChange(ProtocolState.ADVERTISING)
         assertNull("ADVERTISING must clear the ActiveConnection", result)
     }
 
     @Test
     fun `DISABLED state clears ActiveConnection`() {
-        val existing = ActiveConnection("iPad", Protocol.AIRPLAY)
-        val result = simulateStateChange(ProtocolState.DISABLED, currentConnection = existing)
+        val result = simulateStateChange(ProtocolState.DISABLED)
         assertNull("DISABLED must clear the ActiveConnection", result)
     }
 
     @Test
     fun `ERROR state clears ActiveConnection`() {
-        val existing = ActiveConnection("iPhone 15", Protocol.AIRPLAY)
-        val result = simulateStateChange(ProtocolState.ERROR, currentConnection = existing)
+        val result = simulateStateChange(ProtocolState.ERROR)
         assertNull("ERROR must clear the ActiveConnection", result)
     }
 
     @Test
     fun `CONNECTED then ADVERTISING transition clears connection`() {
         // Simulate a full connect → teardown cycle
-        val afterConnect      = simulateStateChange(ProtocolState.CONNECTED,   null)
-        val afterAdvertising  = simulateStateChange(ProtocolState.ADVERTISING,  afterConnect)
+        val afterConnect      = simulateStateChange(ProtocolState.CONNECTED)
+        val afterAdvertising  = simulateStateChange(ProtocolState.ADVERTISING)
 
         assertNotNull(afterConnect)
         assertNull("After ADVERTISING, connection must be null", afterAdvertising)
@@ -135,14 +129,14 @@ class PhairPlayServiceTest {
 
     @Test
     fun `CONNECTED ActiveConnection has non-negative duration`() {
-        val connection = simulateStateChange(ProtocolState.CONNECTED, null)!!
+        val connection = simulateStateChange(ProtocolState.CONNECTED)!!
         assertTrue(connection.durationSeconds >= 0L)
     }
 
     @Test
     fun `CONNECTED ActiveConnection startedAt is recent`() {
         val before = System.currentTimeMillis()
-        val connection = simulateStateChange(ProtocolState.CONNECTED, null)!!
+        val connection = simulateStateChange(ProtocolState.CONNECTED)!!
         val after = System.currentTimeMillis()
         assertTrue(connection.startedAt in before..after)
     }
@@ -167,13 +161,14 @@ class PhairPlayServiceTest {
         assertEquals("surface_A", currentProvider?.invoke())
 
         currentProvider = { "surface_B" }
-        assertEquals("surface_B", currentProvider?.invoke())
+        assertEquals("surface_B", currentProvider.invoke())
     }
 
     @Test
     fun `surface provider cleared on Activity stop prevents stale surface reference`() {
         val fakeSurface = Any()
         var currentProvider: (() -> Any?)? = { fakeSurface }
+        assertNotNull("Provider initially references the current Surface", currentProvider?.invoke())
 
         // Activity stops → clear provider to avoid holding destroyed Surface
         currentProvider = { null }

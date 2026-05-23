@@ -74,6 +74,9 @@ class PhairPlayService : Service() {
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
+    private val _photoFrame = MutableStateFlow<PhotoFrame?>(null)
+    val photoFrame: StateFlow<PhotoFrame?> = _photoFrame.asStateFlow()
+
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
@@ -210,10 +213,21 @@ class PhairPlayService : Service() {
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
+            onPhotoReceived = { bytes, imageType ->
+                _photoFrame.value = PhotoFrame(
+                    bytes = bytes.copyOf(),
+                    mimeType = imageType.mimeType
+                )
+                updateNotification(isRunning = true)
+            },
+            onPhotoCleared = {
+                _photoFrame.value = null
+            },
             onStateChanged = { state ->
                 _airPlayState.value = state
                 when (state) {
                     ProtocolState.CONNECTED   -> {
+                        _photoFrame.value = null
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
@@ -259,6 +273,7 @@ class PhairPlayService : Service() {
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
         _castState.value = ProtocolState.DISABLED
+        _photoFrame.value = null
     }
 
     // ─── Notification ────────────────────────────────────────────────────────
@@ -357,3 +372,15 @@ class PhairPlayService : Service() {
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
     }
 }
+
+/**
+ * PhotoFrame — latest still image received via AirPlay `/photo`.
+ *
+ * The bytes are kept in memory only and cleared on DELETE `/photo`, streaming
+ * start, receiver stop, or service destruction.
+ */
+data class PhotoFrame(
+    val bytes: ByteArray,
+    val mimeType: String,
+    val receivedAtMillis: Long = System.currentTimeMillis()
+)
