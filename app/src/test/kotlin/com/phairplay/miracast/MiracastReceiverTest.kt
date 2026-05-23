@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.os.Looper
+import com.phairplay.airplay.RtspRequest
 import com.phairplay.service.ProtocolState
 import io.mockk.every
 import io.mockk.mockk
@@ -68,5 +69,48 @@ class MiracastReceiverTest {
     @Test
     fun `WFD RTSP port uses Miracast default`() {
         assertEquals(7236, MiracastReceiver.WFD_RTSP_PORT)
+    }
+
+    @Test
+    fun `WFD RTSP server advertises sink capabilities`() {
+        val server = WfdRtspServer(
+            onSessionStarted = {},
+            onSessionStopped = {}
+        )
+
+        val response = server.routeRequest(
+            RtspRequest(
+                method = "GET_PARAMETER",
+                uri = "rtsp://192.168.49.1/wfd1.0",
+                headers = mapOf("CSeq" to "2"),
+                body = ""
+            )
+        )
+
+        assertEquals(200, response.statusCode)
+        assertEquals("text/parameters", response.headers["Content-Type"])
+        assertTrue(response.body.contains("wfd_audio_codecs"))
+        assertTrue(response.body.contains("wfd_video_formats"))
+        assertTrue(response.body.contains("wfd_client_rtp_ports"))
+    }
+
+    @Test
+    fun `WFD RTSP PLAY emits connected state once`() {
+        var started = 0
+        val server = WfdRtspServer(
+            onSessionStarted = { started++ },
+            onSessionStopped = {}
+        )
+        val request = RtspRequest(
+            method = "PLAY",
+            uri = "rtsp://192.168.49.1/wfd1.0",
+            headers = mapOf("CSeq" to "5"),
+            body = ""
+        )
+
+        assertEquals(200, server.routeRequest(request).statusCode)
+        assertEquals(200, server.routeRequest(request).statusCode)
+
+        assertEquals(1, started)
     }
 }

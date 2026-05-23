@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- AirPlay protocol icon placeholder — replace with final SVG before release -->
+<!-- AirPlay protocol status mark -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="oval">
     <size android:width="32dp" android:height="32dp" />

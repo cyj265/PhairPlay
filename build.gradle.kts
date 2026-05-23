@@ -6,3 +6,13 @@ plugins {
     alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.jvm) apply false
 }
+
+subprojects {
+    configurations.configureEach {
+        resolutionStrategy.force(
+            "org.jetbrains.kotlin:kotlin-stdlib:1.9.23",
+            "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.23",
+            "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.23"
+        )
+    }
+}

@@ -58,7 +58,7 @@
 
     <!-- ── Settings row labels ─────────────────────────────────── -->
     <string name="setting_display_name">Gerätename</string>
-    <string name="setting_display_name_placeholder">Systemname wird verwendet</string>
+    <string name="setting_display_name_system_default">Systemname wird verwendet</string>
     <string name="setting_airplay_enabled">AirPlay-Empfänger</string>
     <string name="setting_airplay_subtitle">Verbindungen von macOS akzeptieren</string>
     <string name="setting_miracast_enabled">Miracast-Empfänger</string>

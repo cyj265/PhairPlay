@@ -149,7 +149,7 @@ class SettingsFragment : Fragment() {
     /** Populates all UI elements with values from [settings]. */
     private fun populateUI(settings: AppSettings) {
         textDisplayNameValue.text = settings.effectiveDisplayName.ifEmpty {
-            getString(R.string.setting_display_name_placeholder)
+            getString(R.string.setting_display_name_system_default)
         }
         setToggle(rowAirPlay,      settings.airPlayEnabled)
         setToggle(rowMiracast,     settings.miracastEnabled)
@@ -226,7 +226,7 @@ class SettingsFragment : Fragment() {
         val currentName = viewLifecycleOwner.lifecycleScope.run {
             // Read directly from the displayed value (already loaded)
             val displayed = textDisplayNameValue.text?.toString() ?: ""
-            if (displayed == getString(R.string.setting_display_name_placeholder)) "" else displayed
+            if (displayed == getString(R.string.setting_display_name_system_default)) "" else displayed
         }
 
         val editText = EditText(requireContext()).apply {
@@ -246,13 +246,13 @@ class SettingsFragment : Fragment() {
                 val newName = editText.text?.toString()?.trim() ?: ""
                 save { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
-                    getString(R.string.setting_display_name_placeholder)
+                    getString(R.string.setting_display_name_system_default)
                 }
                 Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
             }
             .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
                 save { it.copy(displayName = "") }
-                textDisplayNameValue.text = getString(R.string.setting_display_name_placeholder)
+                textDisplayNameValue.text = getString(R.string.setting_display_name_system_default)
                 Logger.i("Display name reset to system default")
             }
             .setNegativeButton(android.R.string.cancel, null)

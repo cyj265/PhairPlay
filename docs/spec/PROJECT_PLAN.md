@@ -24,12 +24,12 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 |---|---|---|---|
 | 0 | M0 – Spec | ✅ Complete | All spec docs written, codec matrix added (v2.2) |
 | 1 | M1 – Skeleton | ✅ Build-ready | UI, settings, foreground service, and both debug APK flavors build |
-| 2 | M2 – mDNS | 🔄 In Progress | AirPlay mDNS implemented; Miracast WFD advertising groundwork added; Cast remains registration-dependent |
+| 2 | M2 – mDNS | 🔄 In Progress | AirPlay mDNS implemented; Miracast WFD advertising added; Cast remains registration-dependent |
 | 3 | M3 – AirPlay Handshake | 🔄 In Progress | RTSP handler, SDP parsing, `/photo` PUT/DELETE, and unit tests implemented; real macOS/iOS validation pending |
 | 4 | M4 – AirPlay Video | 🔄 In Progress | H.264 decoder/RTP components exist; real mirroring performance validation pending |
 | 5 | M5 – AirPlay Audio | 🔄 In Progress | AAC/ALAC/audio pipeline components exist; A/V sync and audio-only validation pending |
-| 6 | M6 – Miracast | 🔄 Started | Wi-Fi Direct/WFD advertising implemented; full WFD session, MPEG-TS, HDCP, and A/V playback pending |
-| 7 | M7 – Google Cast | 🔄 Started | Stub/fallback exists; full Cast receiver requires registered Cast app ID and SDK validation |
+| 6 | M6 – Miracast | 🔄 Started | Wi-Fi Direct/WFD advertising and RTSP control-plane implemented; MPEG-TS, HDCP, and A/V playback pending |
+| 7 | M7 – Google Cast | 🔄 Started | Google TV Cast Connect SDK lifecycle implemented; full testing requires registered Cast app ID and SDK validation |
 | 8 | M8 – Stability | ⏳ Pending | |
 | 9 | M9 – Fire TV | 🔄 Build-ready | Fire TV debug APK builds; real Fire TV validation pending |
 | 10 | M10 – i18n | 🔄 Partial | EN/DE resource structure exists; full UX string audit pending |
@@ -91,8 +91,8 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 
 **Tasks:**
 - [x] `MdnsService.kt` — AirPlay mDNS advertisement
-- [x] Miracast Wi-Fi Direct / WFD service advertisement groundwork
-- [ ] `CastAdvertiser.kt` — Cast receiver advertisement stub
+- [x] Miracast Wi-Fi Direct / WFD service advertisement
+- [x] Google TV Cast Connect SDK lifecycle and manifest registration
 - [x] `NetworkUtils.kt` — IP, MAC, UUID helpers
 - [x] Settings: device name applied to implemented advertisers
 
@@ -225,8 +225,9 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 
 
 **Setup:**
 - [ ] Register Cast application on Google Cast Developer Console
-- [ ] `CastReceiverManager.kt` — Cast SDK integration (CastReceiverContext, MediaManager)
-- [ ] Graceful fallback on Fire TV (GMS not available — disable Cast toggle automatically)
+- [x] Cast SDK lifecycle integration (CastReceiverContext)
+- [ ] Cast MediaManager load/playback command handling
+- [x] Graceful fallback on Fire TV (GMS not available — Cast reports disabled)
 
 **Mandatory video (H.264 + VP8):**
 - [ ] H.264 AVC decode via VideoDecoder (all profiles including High Profile)

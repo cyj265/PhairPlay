@@ -6,8 +6,20 @@ import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.WifiP2pManager.Channel
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.os.Build
+import com.phairplay.airplay.RtspRequest
+import com.phairplay.airplay.RtspRequestReader
+import com.phairplay.airplay.RtspResponse
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.OutputStream
+import java.net.ServerSocket
+import java.net.Socket
 
 /**
  * MiracastReceiver — Miracast (Wi-Fi Display / WFD) receiver service advertiser.
@@ -19,7 +31,7 @@ import com.phairplay.util.Logger
  * HOW: Implementation proceeds in phases:
  * - Phase 1: Architecture defined, P2P manager initialized
  * - Phase 2: Wi-Fi P2P service discovery advertised
- * - Phase 3 (M3): WFD RTSP session negotiation
+ * - WFD RTSP session negotiation
  * - Phase 4 (M6): H.264 video decode + audio playback
  *
  * Miracast protocol stack:
@@ -36,7 +48,7 @@ import com.phairplay.util.Logger
  * - Real-world compatibility must be tested on actual hardware
  * - Miracast is NOT available on Fire TV with standard APIs
  *
- * Example (future usage):
+ * Example:
  *   val receiver = MiracastReceiver(context) { state -> updateUI(state) }
  *   receiver.start()  // begins P2P service advertisement
  *   receiver.stop()   // stops advertisement and closes session
@@ -59,6 +71,19 @@ class MiracastReceiver(
     @Volatile
     private var isAdvertising = false
 
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.IO + job)
+    private val rtspServer = WfdRtspServer(
+        onSessionStarted = {
+            Logger.i("Miracast WFD session connected")
+            onStateChanged(ProtocolState.CONNECTED)
+        },
+        onSessionStopped = {
+            Logger.i("Miracast WFD session stopped")
+            if (isAdvertising) onStateChanged(ProtocolState.ADVERTISING)
+        }
+    )
+
     /**
      * Starts the Miracast receiver.
      *
@@ -66,7 +91,7 @@ class MiracastReceiver(
      * - Initializes the WifiP2pManager and Channel
      * - Logs availability of Wi-Fi Direct on this device
      * - Registers a local Wi-Fi Direct DNS-SD WFD service
-     * - TODO (Phase 3): Accept incoming WFD RTSP connections
+     * - Opens the WFD RTSP control server on port 7236
      */
     fun start() {
         Logger.i("MiracastReceiver starting")
@@ -83,6 +108,7 @@ class MiracastReceiver(
         Logger.i("MiracastReceiver stopping")
         try {
             stopP2pAdvertisement()
+            rtspServer.stop()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 channel?.close()
             }
@@ -92,6 +118,7 @@ class MiracastReceiver(
             wifiP2pManager = null
             channel = null
             isAdvertising = false
+            job.cancel()
             onStateChanged(ProtocolState.DISABLED)
         }
     }
@@ -203,6 +230,7 @@ class MiracastReceiver(
                     override fun onSuccess() {
                         serviceInfo = localService
                         isAdvertising = true
+                        rtspServer.start(scope)
                         Logger.i("Miracast WFD P2P service advertised")
                         onStateChanged(ProtocolState.ADVERTISING)
                     }
@@ -230,35 +258,182 @@ class MiracastReceiver(
             PackageManager.PERMISSION_GRANTED
     }
 
-    /**
-     * Handles an incoming Miracast WFD RTSP connection.
-     *
-     * The WFD RTSP handshake is similar to AirPlay RTSP but uses different
-     * methods (M1-M7 WFD methods). This method will be implemented in Phase 3.
-     *
-     * WFD RTSP method sequence:
-     *   M1: OPTIONS (capability exchange)
-     *   M2: GET_PARAMETER (sink capabilities)
-     *   M3: SET_PARAMETER (source capabilities)
-     *   M4: SETUP (establish RTP session)
-     *   M5: PLAY (start streaming)
-     *   M6: PAUSE (pause streaming)
-     *   M7: TEARDOWN (stop session)
-     *
-     * TODO Phase 3: implement WFD RTSP handler
-     */
-    @Suppress("unused")
-    private fun handleWfdSession() {
-        // TODO Phase 3: implement WFD RTSP session handling
-        // Reference: Wi-Fi Display Specification v2.1, Section 6
-        Logger.d("WFD session handling — TODO Phase 3")
-    }
-
     companion object {
         const val WFD_RTSP_PORT = 7236
         private const val SERVICE_INSTANCE_NAME = "PhairPlay"
         private const val SERVICE_TYPE_WFD = "_wfd._tcp"
         private const val PERMISSION_ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
         private const val PERMISSION_NEARBY_WIFI_DEVICES = "android.permission.NEARBY_WIFI_DEVICES"
+    }
+}
+
+internal class WfdRtspServer(
+    private val onSessionStarted: () -> Unit,
+    private val onSessionStopped: () -> Unit
+) {
+    private val requestReader = RtspRequestReader(
+        maxMessageBytes = MAX_MESSAGE_BYTES,
+        maxPhotoBytes = MAX_MESSAGE_BYTES
+    )
+
+    @Volatile private var running = false
+    @Volatile private var serverSocket: ServerSocket? = null
+    @Volatile private var activeClient: Socket? = null
+    private var currentCSeq = 0
+    private var sessionStarted = false
+
+    fun start(scope: CoroutineScope) {
+        if (running) return
+        running = true
+        scope.launch(Dispatchers.IO) {
+            runServer(this)
+        }
+    }
+
+    fun stop() {
+        running = false
+        try {
+            activeClient?.close()
+            serverSocket?.close()
+        } catch (e: Exception) {
+            Logger.e("Error closing WFD RTSP sockets (non-fatal)", e)
+        }
+        activeClient = null
+        serverSocket = null
+        if (sessionStarted) {
+            sessionStarted = false
+            onSessionStopped()
+        }
+    }
+
+    private fun runServer(scope: CoroutineScope) {
+        try {
+            serverSocket = ServerSocket(MiracastReceiver.WFD_RTSP_PORT)
+            Logger.i("WFD RTSP server listening on port ${MiracastReceiver.WFD_RTSP_PORT}")
+            while (running && scope.isActive) {
+                val client = serverSocket!!.accept()
+                if (activeClient != null && !activeClient!!.isClosed) {
+                    sendServiceUnavailable(client)
+                    client.close()
+                    continue
+                }
+                activeClient = client
+                handleClient(client)
+            }
+        } catch (e: Exception) {
+            if (running) Logger.e("WFD RTSP server error", e)
+        }
+    }
+
+    private fun handleClient(socket: Socket) {
+        try {
+            val input = socket.getInputStream()
+            val output = socket.getOutputStream()
+            while (running && !socket.isClosed) {
+                val request = requestReader.read(input) ?: break
+                currentCSeq = request.headers["CSeq"]?.toIntOrNull() ?: 0
+                val response = routeRequest(request)
+                sendResponse(output, response)
+                if (request.method == "TEARDOWN") break
+            }
+        } catch (e: Exception) {
+            if (running) Logger.e("Error handling WFD RTSP client", e)
+        } finally {
+            try {
+                socket.close()
+            } catch (e: Exception) {
+                Logger.e("Error closing WFD RTSP client socket (non-fatal)", e)
+            }
+            activeClient = null
+            if (sessionStarted) {
+                sessionStarted = false
+                onSessionStopped()
+            }
+        }
+    }
+
+    internal fun routeRequest(request: RtspRequest): RtspResponse {
+        Logger.d("WFD RTSP ${request.method} ${request.uri}")
+        return when (request.method) {
+            "OPTIONS" -> RtspResponse(
+                statusCode = 200,
+                statusMessage = "OK",
+                headers = mapOf("Public" to "org.wfa.wfd1.0, GET_PARAMETER, SET_PARAMETER")
+            )
+            "GET_PARAMETER" -> RtspResponse(
+                statusCode = 200,
+                statusMessage = "OK",
+                headers = mapOf("Content-Type" to "text/parameters"),
+                body = sinkParameters()
+            )
+            "SET_PARAMETER" -> RtspResponse(statusCode = 200, statusMessage = "OK")
+            "SETUP" -> RtspResponse(
+                statusCode = 200,
+                statusMessage = "OK",
+                headers = mapOf(
+                    "Session" to WFD_SESSION_ID,
+                    "Transport" to "RTP/AVP/TCP;unicast;interleaved=0-1"
+                )
+            )
+            "PLAY" -> {
+                if (!sessionStarted) {
+                    sessionStarted = true
+                    onSessionStarted()
+                }
+                RtspResponse(
+                    statusCode = 200,
+                    statusMessage = "OK",
+                    headers = mapOf("Session" to WFD_SESSION_ID)
+                )
+            }
+            "PAUSE" -> RtspResponse(
+                statusCode = 200,
+                statusMessage = "OK",
+                headers = mapOf("Session" to WFD_SESSION_ID)
+            )
+            "TEARDOWN" -> RtspResponse(
+                statusCode = 200,
+                statusMessage = "OK",
+                headers = mapOf("Session" to WFD_SESSION_ID)
+            )
+            else -> RtspResponse(statusCode = 501, statusMessage = "Not Implemented")
+        }
+    }
+
+    private fun sinkParameters(): String =
+        listOf(
+            "wfd_audio_codecs: LPCM 00000003 00",
+            "wfd_video_formats: 00 00 02 10 0001FFFF 00000000 00000000 00 0000 0000 00 none none",
+            "wfd_client_rtp_ports: RTP/AVP/TCP;unicast 0 0 mode=play",
+            "wfd_content_protection: none",
+            "wfd_display_edid: none",
+            "wfd_coupled_sink: none",
+            "wfd_connector_type: 05"
+        ).joinToString(separator = "\r\n", postfix = "\r\n")
+
+    private fun sendResponse(outputStream: OutputStream, response: RtspResponse) {
+        val sb = StringBuilder()
+        sb.append("${response.protocol} ${response.statusCode} ${response.statusMessage}\r\n")
+        sb.append("CSeq: $currentCSeq\r\n")
+        sb.append("Server: PhairPlay/1.0\r\n")
+        response.headers.forEach { (key, value) -> sb.append("$key: $value\r\n") }
+        if (response.body.isNotEmpty()) {
+            sb.append("Content-Length: ${response.body.toByteArray(Charsets.UTF_8).size}\r\n")
+        }
+        sb.append("\r\n")
+        sb.append(response.body)
+        outputStream.write(sb.toString().toByteArray(Charsets.UTF_8))
+        outputStream.flush()
+    }
+
+    private fun sendServiceUnavailable(socket: Socket) {
+        val response = "RTSP/1.0 503 Service Unavailable\r\nCSeq: 0\r\n\r\n"
+        socket.outputStream.write(response.toByteArray(Charsets.UTF_8))
+        socket.outputStream.flush()
+    }
+
+    companion object {
+        private const val MAX_MESSAGE_BYTES = 65536
+        private const val WFD_SESSION_ID = "PhairPlayWfdSession"
     }
 }
