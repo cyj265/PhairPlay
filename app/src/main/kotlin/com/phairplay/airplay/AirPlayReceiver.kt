@@ -3,6 +3,7 @@ package com.phairplay.airplay
 import android.content.Context
 import android.view.Surface
 import com.phairplay.airplay.handshake.AirPlayNtpClient
+import com.phairplay.airplay.handshake.AudioStreamServer
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -96,10 +97,12 @@ class AirPlayReceiver(
 
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
     @Volatile private var mirrorServer: MirrorStreamServer? = null
+    @Volatile private var audioServer: AudioStreamServer? = null
     @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var mirrorAesKey: ByteArray? = null
     @Volatile private var mirrorEcdhSecret: ByteArray? = null
+    @Volatile private var mirrorAesIv: ByteArray? = null
 
     /**
      * Starts the AirPlay receiver.
@@ -172,10 +175,11 @@ class AirPlayReceiver(
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
-            onMirrorSetupKeys = { aesKey, ecdhSecret, remoteAddr, senderTimingPort ->
-                startMirrorKeys(aesKey, ecdhSecret, remoteAddr, senderTimingPort)
+            onMirrorSetupKeys = { aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
+                startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
-            onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) }
+            onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
+            onMirrorAudioStart = { sampleRate, channels -> startMirrorAudio(sampleRate, channels) }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
     }
@@ -332,11 +336,13 @@ class AirPlayReceiver(
     private fun startMirrorKeys(
         aesKey: ByteArray,
         ecdhSecret: ByteArray,
+        aesIv: ByteArray,
         remoteAddress: java.net.InetAddress,
         senderTimingPort: Int,
     ): Pair<Int, Int> {
         mirrorAesKey = aesKey
         mirrorEcdhSecret = ecdhSecret
+        mirrorAesIv = aesIv
         val event = ServerSocket(0)
         eventSocket = event
         // Accept + drain the event connection. We don't act on events yet, but macOS expects
@@ -373,6 +379,17 @@ class AirPlayReceiver(
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
+    /** Mirror SETUP audio stream (type 96): start the AAC-ELD audio server. @return its data port. */
+    private fun startMirrorAudio(sampleRate: Int, channels: Int): Int {
+        val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 }
+        val ecdhSecret = mirrorEcdhSecret ?: return 0
+        val aesIv = mirrorAesIv ?: return 0
+        return AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels)
+            .also { audioServer = it; it.start(scope) }
+            .dataPort
+            .also { Logger.i("Mirror audio server started on port $it") }
+    }
+
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
     private fun releaseMediaComponents() {
         rtspHandler?.onVideoNalUnit = null
@@ -380,12 +397,15 @@ class AirPlayReceiver(
         audioSocket = null
         mirrorServer?.stop()
         mirrorServer = null
+        audioServer?.stop()
+        audioServer = null
         ntpClient?.stop()
         ntpClient = null
         try { eventSocket?.close() } catch (e: Exception) { /* non-fatal */ }
         eventSocket = null
         mirrorAesKey = null
         mirrorEcdhSecret = null
+        mirrorAesIv = null
         videoDecoder?.release()
         videoDecoder = null
         audioPlayer?.release()

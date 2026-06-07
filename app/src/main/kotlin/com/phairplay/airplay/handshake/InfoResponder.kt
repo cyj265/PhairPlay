@@ -52,7 +52,7 @@ object InfoResponder {
                     "heightPixels" to height.toLong(),
                     "rotation" to false,
                     "refreshRate" to (1.0 / 60.0),
-                    "overscanned" to true,
+                    "overscanned" to false,   // false = macOS uses the full advertised resolution
                     "features" to 14L
                 )
             )

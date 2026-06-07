@@ -60,5 +60,9 @@ object MirrorCrypto {
 
     val START_CODE = byteArrayOf(0, 0, 0, 1)
 
+    /** Audio stream AES key: SHA-512(aesKey ‖ ecdhSecret)[:16] (the IV is the raw SETUP eiv). */
+    fun audioKey(aesKey: ByteArray, ecdhSecret: ByteArray): ByteArray =
+        sha512(aesKey + ecdhSecret).copyOf(16)
+
     private fun sha512(b: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(b)
 }

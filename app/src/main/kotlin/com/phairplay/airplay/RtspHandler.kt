@@ -35,10 +35,13 @@ open class RtspHandler(
      * address and timing port (so the receiver can start NTP). Returns (eventPort, timingPort).
      */
     private val onMirrorSetupKeys: (
-        aesKey: ByteArray, ecdhSecret: ByteArray, remoteAddress: java.net.InetAddress, senderTimingPort: Int
-    ) -> Pair<Int, Int> = { _, _, _, _ -> 0 to 0 },
-    /** AirPlay 2 mirror SETUP msg 2: start the mirror data server for the stream; returns its data port. */
-    private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 }
+        aesKey: ByteArray, ecdhSecret: ByteArray, aesIv: ByteArray,
+        remoteAddress: java.net.InetAddress, senderTimingPort: Int
+    ) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
+    /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
+    private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
+    /** AirPlay 2 mirror SETUP: start the audio server (type 96, AAC-ELD); returns its data port. */
+    private val onMirrorAudioStart: (sampleRate: Int, channels: Int) -> Int = { _, _ -> 0 }
 ) {
 
     private var serverSocket: ServerSocket? = null
@@ -290,9 +293,10 @@ open class RtspHandler(
         if (ekey != null) {
             val aesKey = fairPlay!!.decrypt(ekey)
             val ecdhSecret = pairingSession?.sharedSecret ?: error("mirror SETUP before pair-verify")
+            val aesIv = (req["eiv"] as? ByteArray) ?: ByteArray(16)
             val senderTimingPort = (req["timingPort"] as? Long)?.toInt() ?: 0
             val remoteAddr = currentRemoteAddress ?: error("mirror SETUP without remote address")
-            val (eventPort, timingPort) = onMirrorSetupKeys(aesKey, ecdhSecret, remoteAddr, senderTimingPort)
+            val (eventPort, timingPort) = onMirrorSetupKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             response["eventPort"] = eventPort.toLong()
             response["timingPort"] = timingPort.toLong()
             Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$timingPort (sender timing $senderTimingPort)")
@@ -308,6 +312,12 @@ open class RtspHandler(
                         val dataPort = onMirrorStreamStart(scid)
                         Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())
+                    }
+                    96 -> {
+                        val sr = (stream["sr"] as? Long)?.toInt() ?: 44100
+                        val dataPort = onMirrorAudioStart(sr, 2)
+                        Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz) dataPort=$dataPort")
+                        mapOf("type" to 96L, "dataPort" to dataPort.toLong())
                     }
                     else -> {
                         Logger.i("mirror SETUP stream dict: " + stream.entries.joinToString { (k, v) ->
