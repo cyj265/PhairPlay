@@ -1,6 +1,8 @@
 package com.phairplay.airplay
 
 import com.phairplay.airplay.handshake.InfoResponder
+import com.phairplay.airplay.handshake.PairingKeys
+import com.phairplay.airplay.handshake.PairingSession
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +40,10 @@ open class RtspHandler(
 
     @Volatile
     private var currentSession: SessionDescription? = null
+
+    /** Per-connection AirPlay pairing state (pair-setup / pair-verify). */
+    @Volatile
+    private var pairingSession: PairingSession? = null
 
     private var setupCount = 0
 
@@ -108,6 +114,9 @@ open class RtspHandler(
         val inputStream = socket.getInputStream()
         val outputStream = socket.getOutputStream()
 
+        // Fresh pairing state for each control connection.
+        pairingSession = PairingSession(PairingKeys.get(context))
+
         try {
             while (running && !socket.isClosed) {
                 val request = requestReader.read(inputStream) ?: break
@@ -140,6 +149,7 @@ open class RtspHandler(
             socket.close()
             activeClient = null
             currentSession = null
+            pairingSession = null
             setupCount = 0
             onStreamingStopped()
         }
@@ -191,19 +201,27 @@ open class RtspHandler(
         protocol = request.responseProtocol()
     )
 
-    // --- Handshake stubs (replaced in later phases) -------------------------------------
-    // Phase 2 will implement pairing; Phase 3 FairPlay. For now they 200-OK so we can verify
-    // routing and /info on-device without macOS hitting "Unknown method".
-    private fun handlePairSetup(request: RtspRequest): RtspResponse {
-        Logger.i("STUB POST /pair-setup (${request.bodyBytes.size} bytes) — pairing not yet implemented")
-        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    /** POST /pair-setup — returns our 32-byte Ed25519 public key (binary). */
+    private fun handlePairSetup(request: RtspRequest): RtspResponse = try {
+        val body = pairingSession!!.pairSetup(request.bodyBytes)
+        Logger.i("pair-setup OK (returned ${body.size}-byte public key)")
+        RtspResponse(200, "OK", bodyBytes = body, contentType = OCTET_STREAM, protocol = request.responseProtocol())
+    } catch (e: Exception) {
+        Logger.e("pair-setup failed", e)
+        RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
     }
 
-    private fun handlePairVerify(request: RtspRequest): RtspResponse {
-        Logger.i("STUB POST /pair-verify (${request.bodyBytes.size} bytes) — pairing not yet implemented")
-        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    /** POST /pair-verify — M1 returns ECDH pub + signature (96 bytes); M2 returns empty 200. */
+    private fun handlePairVerify(request: RtspRequest): RtspResponse = try {
+        val body = pairingSession!!.pairVerify(request.bodyBytes)
+        Logger.i("pair-verify ${if (request.bodyBytes.firstOrNull()?.toInt() == 1) "M1" else "M2"} OK (returned ${body.size} bytes)")
+        RtspResponse(200, "OK", bodyBytes = body, contentType = OCTET_STREAM, protocol = request.responseProtocol())
+    } catch (e: Exception) {
+        Logger.e("pair-verify failed", e)
+        RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
     }
 
+    // Phase 3 replaces this with the real FairPlay handshake.
     private fun handleFpSetup(request: RtspRequest): RtspResponse {
         Logger.i("STUB POST /fp-setup (${request.bodyBytes.size} bytes) — FairPlay not yet implemented")
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
@@ -398,6 +416,7 @@ open class RtspHandler(
     companion object {
         private const val RTSP_PORT = 7000
         private const val MAX_MESSAGE_BYTES = 65536
+        private const val OCTET_STREAM = "application/octet-stream"
         private const val SESSION_ID = "PhairPlaySession"
         private const val AUDIO_RTP_PORT = 6001
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
