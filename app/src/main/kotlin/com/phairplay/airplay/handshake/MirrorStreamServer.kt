@@ -34,6 +34,8 @@ class MirrorStreamServer(
     @Volatile private var running = false
     @Volatile private var client: Socket? = null
     @Volatile private var decoder: VideoDecoder? = null
+    private var lastSps: ByteArray? = null
+    private var lastPps: ByteArray? = null
     private var framePtsUs = 0L
 
     /** The OS-assigned TCP port macOS should connect to (returned in the SETUP response). */
@@ -83,9 +85,12 @@ class MirrorStreamServer(
         }
     }
 
-    /** type 1 — unencrypted avcC carrying SPS + PPS; initializes the decoder once. */
+    /**
+     * type 1 — unencrypted avcC carrying SPS + PPS. (Re)initializes the decoder. macOS sends a
+     * fresh config whenever the Mac's resolution changes, so we must rebuild the decoder when the
+     * SPS/PPS differs — otherwise the old-resolution decoder corrupts the new-resolution frames.
+     */
     private fun handleCodec(payload: ByteArray) {
-        if (decoder != null) return
         try {
             val spsSize = ((payload[6].toInt() and 0xFF) shl 8) or (payload[7].toInt() and 0xFF)
             val sps = payload.copyOfRange(8, 8 + spsSize)
@@ -95,15 +100,21 @@ class MirrorStreamServer(
                 (payload[ppsLenOffset + 1].toInt() and 0xFF)
             val pps = payload.copyOfRange(ppsLenOffset + 2, ppsLenOffset + 2 + ppsSize)
 
+            // Already configured for this exact SPS/PPS — nothing to do.
+            if (decoder != null && sps.contentEquals(lastSps) && pps.contentEquals(lastPps)) return
+
             val surface = awaitSurface() ?: run {
                 Logger.e("Mirror: no surface available — cannot start decoder")
                 return
             }
+            decoder?.release()                                   // tear down old-resolution decoder
+            lastSps = sps
+            lastPps = pps
             // csd-0/csd-1 as Annex-B (start-code prefixed) SPS/PPS.
             decoder = VideoDecoder(surface).also {
                 it.initialize(MirrorCrypto.START_CODE + sps, MirrorCrypto.START_CODE + pps, width, height)
             }
-            Logger.i("Mirror decoder initialized (sps=${spsSize}B pps=${ppsSize}B)")
+            Logger.i("Mirror decoder (re)initialized (sps=${spsSize}B pps=${ppsSize}B)")
         } catch (e: Exception) {
             Logger.e("Mirror: failed to parse SPS/PPS", e)
         }

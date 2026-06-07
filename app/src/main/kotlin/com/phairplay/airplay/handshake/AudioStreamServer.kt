@@ -37,11 +37,18 @@ class AudioStreamServer(
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
-    private val socket = DatagramSocket()
+
+    // Bind to the IPv6 wildcard (dual-stack) — macOS sends the audio RTP over the session's
+    // IPv6 link-local address; a default DatagramSocket binds IPv4-only and never receives it.
+    private val socket = DatagramSocket(null).apply {
+        reuseAddress = true
+        bind(java.net.InetSocketAddress(java.net.InetAddress.getByName("::"), 0))
+    }
 
     @Volatile private var running = false
     private var codec: MediaCodec? = null
     private var audioTrack: AudioTrack? = null
+    private var firstPcm = true
 
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
@@ -68,12 +75,21 @@ class AudioStreamServer(
             Logger.i("AudioStreamServer listening on UDP $dataPort (AAC-ELD ${sampleRate}Hz x$channels)")
             val buf = ByteArray(2048)
             val packet = DatagramPacket(buf, buf.size)
+            var first = true
             while (running) {
                 socket.receive(packet)
+                if (first) {
+                    Logger.i("Audio: first RTP packet from ${packet.address?.hostAddress} (${packet.length}B)")
+                    first = false
+                }
                 if (packet.length <= RTP_HEADER) continue
                 // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted AAC payload.
                 val payload = packet.data.copyOfRange(RTP_HEADER, packet.length)
-                decodeFrame(decryptPacket(payload))
+                try {
+                    decodeFrame(decryptPacket(payload))
+                } catch (e: Exception) {
+                    Logger.e("Audio: frame decode error", e)
+                }
             }
         } catch (e: Exception) {
             if (running) Logger.e("Audio stream error", e)
@@ -104,6 +120,7 @@ class AudioStreamServer(
             val outBuf: ByteBuffer = mc.getOutputBuffer(outIdx)!!
             val pcm = ByteArray(info.size)
             outBuf.position(info.offset); outBuf.get(pcm)
+            if (firstPcm) { Logger.i("Audio: first decoded PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
             audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
