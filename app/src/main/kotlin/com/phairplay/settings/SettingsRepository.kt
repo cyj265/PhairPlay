@@ -111,7 +111,8 @@ class SettingsRepository(private val context: Context) {
         castEnabled        = this[Keys.CAST_ENABLED]            ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
-        showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false
+        showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
+        forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false
     )
 
     /**
@@ -126,6 +127,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
         this[Keys.START_ON_BOOT]        = settings.startOnBoot
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
+        this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
     }
 
     /**
@@ -142,5 +144,6 @@ class SettingsRepository(private val context: Context) {
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")
         val START_ON_BOOT       = booleanPreferencesKey("start_on_boot")
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
+        val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
     }
 }

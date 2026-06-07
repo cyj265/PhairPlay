@@ -127,9 +127,13 @@ class VideoDecoder(private val outputSurface: Surface) {
         }
 
         try {
-            // Request an input buffer from MediaCodec.
-            // timeout = 10ms: if no buffer is available (decoder is full), we wait briefly.
-            // In a healthy system, buffers are always available; the timeout prevents hangs.
+            // Drain finished frames FIRST — renders them and frees the pipeline so an input
+            // buffer becomes available. Dropping NAL units corrupts H.264 (loses reference
+            // frames) and causes a black screen until the next keyframe, so we avoid it.
+            releaseOutputBuffers(codec)
+
+            // Wait for an input buffer. Longer than before: on a modest SoC the decoder can
+            // briefly fall behind, and waiting beats dropping (which corrupts the stream).
             val inputBufferIndex = codec.dequeueInputBuffer(INPUT_BUFFER_TIMEOUT_US)
 
             if (inputBufferIndex >= 0) {
@@ -209,9 +213,10 @@ class VideoDecoder(private val outputSurface: Surface) {
     }
 
     companion object {
-        // How long to wait for an input buffer before giving up (microseconds)
-        // 10ms = 10,000µs. This is a short wait to keep latency low.
-        private const val INPUT_BUFFER_TIMEOUT_US = 10_000L
+        // How long to wait for an input buffer before dropping (microseconds).
+        // 100ms — generous enough that the decoder rarely has to drop a NAL unit (which would
+        // corrupt the stream), while still bounding stall if the codec is truly wedged.
+        private const val INPUT_BUFFER_TIMEOUT_US = 100_000L
 
         /**
          * Parses the H.264 SPS NAL unit to extract the actual video resolution.

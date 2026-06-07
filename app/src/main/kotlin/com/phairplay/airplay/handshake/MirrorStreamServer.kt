@@ -26,6 +26,8 @@ class MirrorStreamServer(
     ecdhSecret: ByteArray,
     streamConnectionId: Long,
     private val surfaceProvider: () -> Surface?,
+    private val width: Int = 1920,
+    private val height: Int = 1080,
 ) {
     private val cipher = MirrorCrypto.streamCipher(aesKey, ecdhSecret, streamConnectionId)
     private val serverSocket = ServerSocket(0)            // OS-assigned free port
@@ -99,7 +101,7 @@ class MirrorStreamServer(
             }
             // csd-0/csd-1 as Annex-B (start-code prefixed) SPS/PPS.
             decoder = VideoDecoder(surface).also {
-                it.initialize(MirrorCrypto.START_CODE + sps, MirrorCrypto.START_CODE + pps, 1920, 1080)
+                it.initialize(MirrorCrypto.START_CODE + sps, MirrorCrypto.START_CODE + pps, width, height)
             }
             Logger.i("Mirror decoder initialized (sps=${spsSize}B pps=${ppsSize}B)")
         } catch (e: Exception) {

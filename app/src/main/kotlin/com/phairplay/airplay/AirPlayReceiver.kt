@@ -50,6 +50,9 @@ class AirPlayReceiver(
     private val context: Context,
     /** User-configured display name from Settings (blank = use system device name). */
     private val displayName: String = "",
+    /** Advertised mirroring resolution (from the "high resolution" setting). */
+    private val mirrorWidth: Int = 1920,
+    private val mirrorHeight: Int = 1080,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -162,6 +165,8 @@ class AirPlayReceiver(
     private fun startRtspHandler() {
         rtspHandler = RtspHandler(
             context = context,
+            displayWidth = mirrorWidth,
+            displayHeight = mirrorHeight,
             videoSurfaceProvider = videoSurfaceProvider,
             onStreamingStarted = { session -> onStreamingStarted(session) },
             onStreamingStopped = { onStreamingStopped() },
@@ -362,7 +367,7 @@ class AirPlayReceiver(
     private fun startMirrorStream(streamConnectionId: Long): Int {
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
-        return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider)
+        return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight)
             .also { mirrorServer = it; it.start(scope) }
             .dataPort
             .also { Logger.i("Mirror data server started on port $it") }

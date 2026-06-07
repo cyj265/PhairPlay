@@ -23,6 +23,8 @@ import java.net.Socket
  */
 open class RtspHandler(
     private val context: android.content.Context,
+    private val displayWidth: Int = 1920,
+    private val displayHeight: Int = 1080,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
     private val onStreamingStopped: () -> Unit,
@@ -226,7 +228,7 @@ open class RtspHandler(
     private fun handleInfo(request: RtspRequest): RtspResponse = RtspResponse(
         statusCode = 200,
         statusMessage = "OK",
-        bodyBytes = InfoResponder.build(context),
+        bodyBytes = InfoResponder.build(context, displayWidth, displayHeight),
         contentType = "application/x-apple-binary-plist",
         protocol = request.responseProtocol()
     )
@@ -307,7 +309,12 @@ open class RtspHandler(
                         Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())
                     }
-                    else -> { Logger.i("mirror SETUP: ignoring stream type ${stream["type"]}"); null }
+                    else -> {
+                        Logger.i("mirror SETUP stream dict: " + stream.entries.joinToString { (k, v) ->
+                            "$k=" + when (v) { is ByteArray -> "${v.size}B"; else -> v.toString() }
+                        })
+                        null
+                    }
                 }
             }
             response["streams"] = resStreams

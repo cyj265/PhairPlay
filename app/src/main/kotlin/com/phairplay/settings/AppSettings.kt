@@ -72,8 +72,21 @@ data class AppSettings(
      * - Active protocol name
      * Only useful for development and testing.
      */
-    val showDebugOverlay: Boolean = false
+    val showDebugOverlay: Boolean = false,
+
+    // ─── Video ─────────────────────────────────────────────────────────────
+    /**
+     * When true, advertise a higher mirroring resolution (1440p) in the AirPlay `/info`
+     * `displays` record so macOS renders/encodes the mirror at 2560×1440 instead of 1920×1080.
+     * The TV surface is 1080p, so frames are downscaled (sharper text via supersampling) at
+     * the cost of more decode work — heavier on low-end SoCs.
+     */
+    val forceHighResolution: Boolean = false
 ) {
+
+    /** Advertised mirroring display size: 2560×1440 when [forceHighResolution], else 1920×1080. */
+    val mirrorWidth: Int get() = if (forceHighResolution) 2560 else 1920
+    val mirrorHeight: Int get() = if (forceHighResolution) 1440 else 1080
 
     /**
      * Returns the validated, trimmed display name.

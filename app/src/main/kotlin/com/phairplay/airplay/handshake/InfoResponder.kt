@@ -16,7 +16,7 @@ import com.phairplay.util.NetworkUtils
  */
 object InfoResponder {
 
-    fun build(context: Context): ByteArray {
+    fun build(context: Context, width: Int = 1920, height: Int = 1080): ByteArray {
         val mac = NetworkUtils.getMacAddress()
         val info = mapOf(
             "deviceID" to mac,
@@ -46,10 +46,10 @@ object InfoResponder {
                     "uuid" to "e0ff8a27-6738-3d56-8a16-cc53aacee925",
                     "widthPhysical" to 0L,
                     "heightPhysical" to 0L,
-                    "width" to 1920L,
-                    "height" to 1080L,
-                    "widthPixels" to 1920L,
-                    "heightPixels" to 1080L,
+                    "width" to width.toLong(),
+                    "height" to height.toLong(),
+                    "widthPixels" to width.toLong(),
+                    "heightPixels" to height.toLong(),
                     "rotation" to false,
                     "refreshRate" to (1.0 / 60.0),
                     "overscanned" to true,

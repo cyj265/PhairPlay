@@ -55,6 +55,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowAirPlayPin: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
+    private lateinit var rowForceHighRes: View
     private lateinit var textVersionValue: TextView
     private lateinit var rowReset: LinearLayout
 
@@ -91,6 +92,7 @@ class SettingsFragment : Fragment() {
         rowAirPlayPin       = view.findViewById(R.id.row_airplay_pin)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
+        rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         textVersionValue    = view.findViewById(R.id.text_version_value)
         rowReset            = view.findViewById(R.id.row_reset)
     }
@@ -113,6 +115,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowAirPlayPin,   R.string.setting_airplay_pin,        R.string.setting_airplay_pin_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
+        configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
         textVersionValue.text = BuildConfig.VERSION_NAME
     }
@@ -160,6 +163,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowAirPlayPin,   settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
+        setToggle(rowForceHighRes, settings.forceHighResolution)
     }
 
     private fun setToggle(row: View, value: Boolean) {
@@ -182,6 +186,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowAirPlayPin)   { enabled -> save { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
+        setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
 
         rowReset.setOnClickListener { resetSettings() }
     }

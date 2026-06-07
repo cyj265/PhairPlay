@@ -76,6 +76,10 @@
                 android:importantForAccessibility="no" />
         </LinearLayout>
 
+        <!-- Force higher mirroring resolution (1440p) -->
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_force_high_res" />
+
         <!-- ── Section: Protocols ─────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_protocols"
