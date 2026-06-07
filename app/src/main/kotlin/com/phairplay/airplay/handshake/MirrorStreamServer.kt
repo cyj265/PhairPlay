@@ -100,21 +100,31 @@ class MirrorStreamServer(
                 (payload[ppsLenOffset + 1].toInt() and 0xFF)
             val pps = payload.copyOfRange(ppsLenOffset + 2, ppsLenOffset + 2 + ppsSize)
 
-            // Already configured for this exact SPS/PPS — nothing to do.
-            if (decoder != null && sps.contentEquals(lastSps) && pps.contentEquals(lastPps)) return
+            val d = decoder
+            // Healthy decoder already configured for this exact SPS/PPS — nothing to do.
+            if (d != null && d.isHealthy && sps.contentEquals(lastSps) && pps.contentEquals(lastPps)) return
 
+            lastSps = sps
+            lastPps = pps
+            val sc = MirrorCrypto.START_CODE
+            if (d != null && d.isHealthy) {
+                // Resolution changed: feed the new config inline — adaptive playback absorbs it
+                // without a reconfigure (far more robust than release/recreate).
+                d.decodeNalUnit(sc + sps + sc + pps, framePtsUs)
+                Logger.i("Mirror: fed new SPS/PPS inline (adaptive, sps=${spsSize}B pps=${ppsSize}B)")
+                return
+            }
+
+            // First config, or the previous decoder errored — build a fresh one.
             val surface = awaitSurface() ?: run {
                 Logger.e("Mirror: no surface available — cannot start decoder")
                 return
             }
-            decoder?.release()                                   // tear down old-resolution decoder
-            lastSps = sps
-            lastPps = pps
-            // csd-0/csd-1 as Annex-B (start-code prefixed) SPS/PPS.
+            d?.release()
             decoder = VideoDecoder(surface).also {
-                it.initialize(MirrorCrypto.START_CODE + sps, MirrorCrypto.START_CODE + pps, width, height)
+                it.initialize(sc + sps, sc + pps, width, height)
             }
-            Logger.i("Mirror decoder (re)initialized (sps=${spsSize}B pps=${ppsSize}B)")
+            Logger.i("Mirror decoder initialized (sps=${spsSize}B pps=${ppsSize}B)")
         } catch (e: Exception) {
             Logger.e("Mirror: failed to parse SPS/PPS", e)
         }
@@ -122,8 +132,20 @@ class MirrorStreamServer(
 
     /** type 0 — AES-CTR-encrypted H.264 (AVCC); decrypt → Annex-B → decode. */
     private fun handleVideo(payload: ByteArray) {
-        val d = decoder ?: return                               // wait for SPS/PPS first
+        // ALWAYS advance the AES-CTR keystream for every video payload — even if we can't decode
+        // it right now. Skipping any packet desyncs the keystream and corrupts all later frames.
         val decrypted = cipher.update(payload)
+
+        val d = decoder ?: return                               // no decoder yet — wait for SPS/PPS
+        // Decoder hit an error state — drop it so the next SPS/PPS rebuilds a fresh one.
+        if (!d.isHealthy) {
+            Logger.w("Mirror: decoder unhealthy — dropping, awaiting new SPS/PPS")
+            d.release()
+            decoder = null
+            lastSps = null
+            lastPps = null
+            return
+        }
         val annexB = MirrorCrypto.avccToAnnexB(decrypted)
         if (annexB.isNotEmpty()) {
             d.decodeNalUnit(annexB, framePtsUs)

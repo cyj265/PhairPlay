@@ -38,6 +38,14 @@ class VideoDecoder(private val outputSurface: Surface) {
     private var isInitialized = false
 
     /**
+     * False once MediaCodec has thrown (entered an unrecoverable error state). The caller should
+     * drop this decoder and create a fresh one — error state cannot be cleared by reconfigure.
+     */
+    @Volatile
+    var isHealthy = true
+        private set
+
+    /**
      * Initializes the MediaCodec decoder with the video stream parameters from the SDP.
      *
      * This must be called ONCE before any calls to [decodeNalUnit].
@@ -84,6 +92,10 @@ class VideoDecoder(private val outputSurface: Surface) {
             // These are wrapped in ByteBuffers as required by the MediaCodec API.
             setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(spsBytes))  // SPS
             setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(ppsBytes))  // PPS
+            // Adaptive playback: lets the decoder absorb mid-stream resolution changes (when the
+            // Mac's resolution changes) without a fragile reconfigure, up to these bounds.
+            setInteger(MediaFormat.KEY_MAX_WIDTH, 3840)
+            setInteger(MediaFormat.KEY_MAX_HEIGHT, 2160)
         }
 
         // Create the hardware H.264 decoder.
@@ -161,6 +173,10 @@ class VideoDecoder(private val outputSurface: Surface) {
             // render=true means the frame goes to the Surface immediately.
             releaseOutputBuffers(codec)
 
+        } catch (e: IllegalStateException) {
+            // MediaCodec is now in the error state and cannot recover — flag for recreation.
+            Logger.e("VideoDecoder entered error state — will recreate", e)
+            isHealthy = false
         } catch (e: Exception) {
             Logger.e("Error decoding NAL unit", e)
         }
