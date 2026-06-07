@@ -73,12 +73,15 @@ class SettingsFragment : Fragment() {
     // ─── View Binding ────────────────────────────────────────────────────────
 
     private fun bindViews(view: View) {
-        headerDisplay   = view.findViewById<View>(R.id.header_display).findViewById(R.id.text_section_title)
-        headerProtocols = view.findViewById<View>(R.id.header_protocols).findViewById(R.id.text_section_title)
-        headerAirPlay   = view.findViewById<View>(R.id.header_airplay).findViewById(R.id.text_section_title)
-        headerService   = view.findViewById<View>(R.id.header_service).findViewById(R.id.text_section_title)
-        headerDeveloper = view.findViewById<View>(R.id.header_developer).findViewById(R.id.text_section_title)
-        headerAbout     = view.findViewById<View>(R.id.header_about).findViewById(R.id.text_section_title)
+        // Each header is an <include> of settings_section_header.xml (a bare
+        // TextView). The include's android:id IS the TextView's id, so look it up
+        // directly — no nested lookup.
+        headerDisplay   = view.findViewById(R.id.header_display)
+        headerProtocols = view.findViewById(R.id.header_protocols)
+        headerAirPlay   = view.findViewById(R.id.header_airplay)
+        headerService   = view.findViewById(R.id.header_service)
+        headerDeveloper = view.findViewById(R.id.header_developer)
+        headerAbout     = view.findViewById(R.id.header_about)
 
         rowDisplayName      = view.findViewById(R.id.row_display_name)
         textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
