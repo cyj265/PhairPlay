@@ -22,6 +22,7 @@ val castAppId: String =
 android {
     namespace = "com.phairplay"
     compileSdk = 35
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         // applicationId is overridden per flavor below
@@ -32,6 +33,19 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
+
+        // Native FairPlay (libplayfair.so) — build only for the TV's 32-bit ABI.
+        ndk {
+            abiFilters += "armeabi-v7a"
+        }
+    }
+
+    // Native build: RPiPlay's FairPlay (playfair) compiled via CMake → libplayfair.so.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // Two flavors: one for Google TV, one for Amazon Fire TV.

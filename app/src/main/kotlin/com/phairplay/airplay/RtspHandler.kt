@@ -1,5 +1,6 @@
 package com.phairplay.airplay
 
+import com.phairplay.airplay.handshake.FairPlay
 import com.phairplay.airplay.handshake.InfoResponder
 import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.airplay.handshake.PairingSession
@@ -44,6 +45,10 @@ open class RtspHandler(
     /** Per-connection AirPlay pairing state (pair-setup / pair-verify). */
     @Volatile
     private var pairingSession: PairingSession? = null
+
+    /** Per-connection FairPlay state (fp-setup handshake + stream-key decrypt). */
+    @Volatile
+    private var fairPlay: FairPlay? = null
 
     private var setupCount = 0
 
@@ -114,8 +119,9 @@ open class RtspHandler(
         val inputStream = socket.getInputStream()
         val outputStream = socket.getOutputStream()
 
-        // Fresh pairing state for each control connection.
+        // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
+        fairPlay = FairPlay()
 
         try {
             while (running && !socket.isClosed) {
@@ -150,6 +156,7 @@ open class RtspHandler(
             activeClient = null
             currentSession = null
             pairingSession = null
+            fairPlay = null
             setupCount = 0
             onStreamingStopped()
         }
@@ -221,10 +228,19 @@ open class RtspHandler(
         RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
     }
 
-    // Phase 3 replaces this with the real FairPlay handshake.
-    private fun handleFpSetup(request: RtspRequest): RtspResponse {
-        Logger.i("STUB POST /fp-setup (${request.bodyBytes.size} bytes) — FairPlay not yet implemented")
-        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    /** POST /fp-setup — FairPlay: 16-byte phase 1 → 142-byte reply; 164-byte phase 2 → 32-byte reply. */
+    private fun handleFpSetup(request: RtspRequest): RtspResponse = try {
+        val fp = fairPlay!!
+        val body = when (request.bodyBytes.size) {
+            16 -> fp.setup(request.bodyBytes)
+            164 -> fp.handshake(request.bodyBytes)
+            else -> throw IllegalArgumentException("unexpected fp-setup size ${request.bodyBytes.size}")
+        }
+        Logger.i("fp-setup phase (${request.bodyBytes.size}B in → ${body.size}B out) OK")
+        RtspResponse(200, "OK", bodyBytes = body, contentType = OCTET_STREAM, protocol = request.responseProtocol())
+    } catch (e: Exception) {
+        Logger.e("fp-setup failed", e)
+        RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
     }
 
     /** Handles OPTIONS — macOS asks what RTSP methods are supported. */
