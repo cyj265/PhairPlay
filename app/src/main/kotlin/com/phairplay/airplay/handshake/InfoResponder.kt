@@ -27,8 +27,35 @@ object InfoResponder {
             "name" to NetworkUtils.getDeviceName(context),
             "sourceVersion" to SOURCE_VERSION,
             "pi" to NetworkUtils.getPersistentUuid(context),
+            "pk" to PairingKeys.get(context).edPublic,
+            "vv" to 2L,
             "protovers" to "1.1",
-            "vv" to 2L
+            "keepAliveLowPower" to true,
+            "keepAliveSendStatsAsBody" to true,
+            "audioFormats" to listOf(
+                mapOf("type" to 100L, "audioInputFormats" to 67108860L, "audioOutputFormats" to 67108860L),
+                mapOf("type" to 101L, "audioInputFormats" to 67108860L, "audioOutputFormats" to 67108860L)
+            ),
+            "audioLatencies" to listOf(
+                mapOf("type" to 100L, "audioType" to "default", "inputLatencyMicros" to 0L, "outputLatencyMicros" to 0L),
+                mapOf("type" to 101L, "audioType" to "default", "inputLatencyMicros" to 0L, "outputLatencyMicros" to 0L)
+            ),
+            // Screen the sender can mirror to — without this, macOS aborts after key setup.
+            "displays" to listOf(
+                mapOf(
+                    "uuid" to "e0ff8a27-6738-3d56-8a16-cc53aacee925",
+                    "widthPhysical" to 0L,
+                    "heightPhysical" to 0L,
+                    "width" to 1920L,
+                    "height" to 1080L,
+                    "widthPixels" to 1920L,
+                    "heightPixels" to 1080L,
+                    "rotation" to false,
+                    "refreshRate" to (1.0 / 60.0),
+                    "overscanned" to true,
+                    "features" to 14L
+                )
+            )
         )
         return PlistCodec.encode(info)
     }
@@ -36,8 +63,8 @@ object InfoResponder {
     /** 64-bit features value; mirrors MdnsService's "0x5A7FFFF7,0x1E" (low,high 32-bit halves). */
     private const val AIRPLAY_FEATURES = 0x1E5A7FFFF7L
 
-    /** Bit 2 set = screen-mirroring-capable receiver. */
-    private const val STATUS_FLAGS = 0x4L
+    /** Matches RPiPlay's /info statusFlags (0x44). */
+    private const val STATUS_FLAGS = 68L
 
     private const val MODEL = "AppleTV5,3"
     private const val SOURCE_VERSION = "220.68"

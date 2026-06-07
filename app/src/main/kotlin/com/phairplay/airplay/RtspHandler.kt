@@ -28,8 +28,13 @@ open class RtspHandler(
     private val onStreamingStopped: () -> Unit,
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
     private val onPhotoCleared: () -> Unit = {},
-    /** AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret; returns the event port. */
-    private val onMirrorSetupKeys: (aesKey: ByteArray, ecdhSecret: ByteArray) -> Int = { _, _ -> 0 },
+    /**
+     * AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret + the sender's
+     * address and timing port (so the receiver can start NTP). Returns (eventPort, timingPort).
+     */
+    private val onMirrorSetupKeys: (
+        aesKey: ByteArray, ecdhSecret: ByteArray, remoteAddress: java.net.InetAddress, senderTimingPort: Int
+    ) -> Pair<Int, Int> = { _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror SETUP msg 2: start the mirror data server for the stream; returns its data port. */
     private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 }
 ) {
@@ -54,6 +59,14 @@ open class RtspHandler(
     /** Per-connection FairPlay state (fp-setup handshake + stream-key decrypt). */
     @Volatile
     private var fairPlay: FairPlay? = null
+
+    /** Remote (sender) address of the active control connection — needed for AirPlay 2 NTP. */
+    @Volatile
+    private var currentRemoteAddress: java.net.InetAddress? = null
+
+    /** True once an AirPlay 2 mirroring SETUP has run on this connection (no ANNOUNCE/SDP). */
+    @Volatile
+    private var isMirrorSession = false
 
     private var setupCount = 0
 
@@ -127,6 +140,7 @@ open class RtspHandler(
         // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
         fairPlay = FairPlay()
+        currentRemoteAddress = socket.inetAddress
 
         try {
             while (running && !socket.isClosed) {
@@ -135,7 +149,9 @@ open class RtspHandler(
                 val response = routeRequest(request)
                 sendResponse(outputStream, response)
 
-                if (request.method == "RECORD" && response.statusCode == 200) {
+                // Legacy (audio/SDP) path switches to interleaved RTP after RECORD. Mirroring keeps
+                // the RTSP control channel open (the video arrives on a separate data connection).
+                if (request.method == "RECORD" && response.statusCode == 200 && !isMirrorSession) {
                     Logger.d("RTSP handshake complete — switching to RTP interleaved mode")
                     break
                 }
@@ -162,6 +178,7 @@ open class RtspHandler(
             currentSession = null
             pairingSession = null
             fairPlay = null
+            isMirrorSession = false
             setupCount = 0
             onStreamingStopped()
         }
@@ -257,16 +274,26 @@ open class RtspHandler(
      */
     private fun handleMirrorSetup(request: RtspRequest): RtspResponse = try {
         val req = PlistCodec.decode(request.bodyBytes)
+        Logger.i("mirror SETUP plist: " + req.entries.joinToString { (k, v) ->
+            "$k=" + when (v) {
+                is ByteArray -> "${v.size}B"
+                is List<*> -> "list[${v.size}]"
+                else -> v.toString()
+            }
+        })
         val response = mutableMapOf<String, Any?>()
 
+        isMirrorSession = true
         val ekey = req["ekey"] as? ByteArray
         if (ekey != null) {
             val aesKey = fairPlay!!.decrypt(ekey)
             val ecdhSecret = pairingSession?.sharedSecret ?: error("mirror SETUP before pair-verify")
-            val eventPort = onMirrorSetupKeys(aesKey, ecdhSecret)
+            val senderTimingPort = (req["timingPort"] as? Long)?.toInt() ?: 0
+            val remoteAddr = currentRemoteAddress ?: error("mirror SETUP without remote address")
+            val (eventPort, timingPort) = onMirrorSetupKeys(aesKey, ecdhSecret, remoteAddr, senderTimingPort)
             response["eventPort"] = eventPort.toLong()
-            response["timingPort"] = TIMING_PORT.toLong()
-            Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$TIMING_PORT")
+            response["timingPort"] = timingPort.toLong()
+            Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$timingPort (sender timing $senderTimingPort)")
         }
 
         val streams = req["streams"] as? List<*>
@@ -359,6 +386,15 @@ open class RtspHandler(
 
     /** Handles RECORD — macOS/iOS says start sending media now. */
     open fun handleRecordInternal(request: RtspRequest): RtspResponse {
+        // AirPlay 2 mirroring has no ANNOUNCE/SDP — RECORD just acknowledges the session.
+        if (isMirrorSession) {
+            Logger.i("RECORD (mirror session) — OK")
+            return RtspResponse(
+                statusCode = 200, statusMessage = "OK",
+                headers = mapOf("Audio-Latency" to "0"),
+                protocol = request.responseProtocol()
+            )
+        }
         val session = currentSession
         if (session == null) {
             Logger.e("RECORD received but no session from ANNOUNCE — rejecting")
@@ -376,8 +412,20 @@ open class RtspHandler(
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 
-    private fun handleGetParameter(@Suppress("UNUSED_PARAMETER") request: RtspRequest): RtspResponse {
-        return RtspResponse(statusCode = 200, statusMessage = "OK")
+    private fun handleGetParameter(request: RtspRequest): RtspResponse {
+        val query = request.body.trim()
+        Logger.i("GET_PARAMETER body='$query'")
+        // macOS queries "volume" during mirroring setup and aborts if it gets no value back.
+        return if (query.startsWith("volume")) {
+            RtspResponse(
+                statusCode = 200, statusMessage = "OK",
+                body = "volume: 0.000000\r\n",
+                contentType = "text/parameters",
+                protocol = request.responseProtocol()
+            )
+        } else {
+            RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
+        }
     }
 
     private fun handleSetParameter(request: RtspRequest): RtspResponse {

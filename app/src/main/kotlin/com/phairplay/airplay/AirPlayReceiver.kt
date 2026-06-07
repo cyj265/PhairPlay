@@ -2,6 +2,7 @@ package com.phairplay.airplay
 
 import android.content.Context
 import android.view.Surface
+import com.phairplay.airplay.handshake.AirPlayNtpClient
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -92,6 +93,7 @@ class AirPlayReceiver(
 
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
     @Volatile private var mirrorServer: MirrorStreamServer? = null
+    @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var mirrorAesKey: ByteArray? = null
     @Volatile private var mirrorEcdhSecret: ByteArray? = null
@@ -165,7 +167,9 @@ class AirPlayReceiver(
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
-            onMirrorSetupKeys = { aesKey, ecdhSecret -> startMirrorKeys(aesKey, ecdhSecret) },
+            onMirrorSetupKeys = { aesKey, ecdhSecret, remoteAddr, senderTimingPort ->
+                startMirrorKeys(aesKey, ecdhSecret, remoteAddr, senderTimingPort)
+            },
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
@@ -320,7 +324,12 @@ class AirPlayReceiver(
      * channel (macOS connects to it), and switch the UI to the streaming surface.
      * @return the event channel's TCP port.
      */
-    private fun startMirrorKeys(aesKey: ByteArray, ecdhSecret: ByteArray): Int {
+    private fun startMirrorKeys(
+        aesKey: ByteArray,
+        ecdhSecret: ByteArray,
+        remoteAddress: java.net.InetAddress,
+        senderTimingPort: Int,
+    ): Pair<Int, Int> {
         mirrorAesKey = aesKey
         mirrorEcdhSecret = ecdhSecret
         val event = ServerSocket(0)
@@ -330,6 +339,7 @@ class AirPlayReceiver(
         scope.launch(Dispatchers.IO) {
             try {
                 val s: Socket = event.accept()
+                Logger.i("Event channel: macOS connected from ${s.inetAddress.hostAddress}")
                 val buf = ByteArray(4096)
                 val input = s.getInputStream()
                 while (isActive && input.read(buf) != -1) { /* drain */ }
@@ -337,10 +347,12 @@ class AirPlayReceiver(
                 if (eventSocket != null) Logger.d("Event channel closed")
             }
         }
+        // AirPlay 2 NTP is receiver-initiated: poll the sender's timing port so macOS proceeds.
+        val ntp = AirPlayNtpClient(remoteAddress, senderTimingPort).also { ntpClient = it; it.start(scope) }
         onSenderNameChanged("AirPlay")
         emitState(ProtocolState.CONNECTED)
-        Logger.i("Mirror keys set; event channel on port ${event.localPort}")
-        return event.localPort
+        Logger.i("Mirror keys set; eventPort=${event.localPort} timingPort=${ntp.localPort}")
+        return event.localPort to ntp.localPort
     }
 
     /**
@@ -363,6 +375,8 @@ class AirPlayReceiver(
         audioSocket = null
         mirrorServer?.stop()
         mirrorServer = null
+        ntpClient?.stop()
+        ntpClient = null
         try { eventSocket?.close() } catch (e: Exception) { /* non-fatal */ }
         eventSocket = null
         mirrorAesKey = null
