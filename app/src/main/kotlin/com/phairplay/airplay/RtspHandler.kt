@@ -40,8 +40,8 @@ open class RtspHandler(
     ) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
     private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
-    /** AirPlay 2 mirror SETUP: start the audio server (type 96, AAC-ELD); returns its data port. */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int) -> Int = { _, _ -> 0 }
+    /** AirPlay 2 mirror SETUP: start the audio server (type 96, AAC-ELD); returns (dataPort, controlPort). */
+    private val onMirrorAudioStart: (sampleRate: Int, channels: Int) -> Pair<Int, Int> = { _, _ -> 0 to 0 }
 ) {
 
     private var serverSocket: ServerSocket? = null
@@ -315,9 +315,9 @@ open class RtspHandler(
                     }
                     96 -> {
                         val sr = (stream["sr"] as? Long)?.toInt() ?: 44100
-                        val dataPort = onMirrorAudioStart(sr, 2)
-                        Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz) dataPort=$dataPort")
-                        mapOf("type" to 96L, "dataPort" to dataPort.toLong())
+                        val (dataPort, controlPort) = onMirrorAudioStart(sr, 2)
+                        Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz) dataPort=$dataPort controlPort=$controlPort")
+                        mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
                     }
                     else -> {
                         Logger.i("mirror SETUP stream dict: " + stream.entries.joinToString { (k, v) ->

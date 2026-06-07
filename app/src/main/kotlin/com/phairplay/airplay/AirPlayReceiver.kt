@@ -379,15 +379,15 @@ class AirPlayReceiver(
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
-    /** Mirror SETUP audio stream (type 96): start the AAC-ELD audio server. @return its data port. */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int): Int {
-        val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 }
-        val ecdhSecret = mirrorEcdhSecret ?: return 0
-        val aesIv = mirrorAesIv ?: return 0
-        return AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels)
+    /** Mirror SETUP audio stream (type 96): start the AAC-ELD audio server. @return (dataPort, controlPort). */
+    private fun startMirrorAudio(sampleRate: Int, channels: Int): Pair<Int, Int> {
+        val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
+        val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
+        val aesIv = mirrorAesIv ?: return 0 to 0
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels)
             .also { audioServer = it; it.start(scope) }
-            .dataPort
-            .also { Logger.i("Mirror audio server started on port $it") }
+        Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
+        return server.dataPort to server.controlPort
     }
 
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */

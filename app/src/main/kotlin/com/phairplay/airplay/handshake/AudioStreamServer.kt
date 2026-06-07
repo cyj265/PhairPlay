@@ -40,10 +40,8 @@ class AudioStreamServer(
 
     // Bind to the IPv6 wildcard (dual-stack) — macOS sends the audio RTP over the session's
     // IPv6 link-local address; a default DatagramSocket binds IPv4-only and never receives it.
-    private val socket = DatagramSocket(null).apply {
-        reuseAddress = true
-        bind(java.net.InetSocketAddress(java.net.InetAddress.getByName("::"), 0))
-    }
+    private val socket = ipv6Socket()
+    private val controlSocket = ipv6Socket()   // realtime-audio control channel (drained)
 
     @Volatile private var running = false
     private var codec: MediaCodec? = null
@@ -53,14 +51,24 @@ class AudioStreamServer(
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
 
+    /** UDP control port (returned in the SETUP response; macOS won't send audio without it). */
+    val controlPort: Int get() = controlSocket.localPort
+
     fun start(scope: CoroutineScope) {
         running = true
         scope.launch(Dispatchers.IO) { runReceive() }
+        // Drain the control channel (retransmit/timing requests) — we don't act on it for v1.
+        scope.launch(Dispatchers.IO) {
+            val buf = ByteArray(2048)
+            val pkt = DatagramPacket(buf, buf.size)
+            try { while (running) controlSocket.receive(pkt) } catch (_: Exception) { /* closed */ }
+        }
     }
 
     fun stop() {
         running = false
         runCatching { socket.close() }
+        runCatching { controlSocket.close() }
         runCatching { codec?.stop(); codec?.release() }
         runCatching { audioTrack?.stop(); audioTrack?.release() }
         codec = null
@@ -164,6 +172,12 @@ class AudioStreamServer(
 
     companion object {
         private const val RTP_HEADER = 12
+
+        /** A UDP socket bound to the IPv6 wildcard (dual-stack), OS-assigned port. */
+        private fun ipv6Socket(): DatagramSocket = DatagramSocket(null).apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(java.net.InetAddress.getByName("::"), 0))
+        }
 
         @Suppress("unused")
         private val AUDIO_MANAGER_HINT = AudioManager.STREAM_MUSIC
