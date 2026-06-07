@@ -2,6 +2,7 @@ package com.phairplay.airplay
 
 import android.content.Context
 import android.view.Surface
+import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
@@ -13,6 +14,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.ServerSocket
+import java.net.Socket
 
 /**
  * AirPlayReceiver — Top-level orchestrator for the AirPlay 2 receiver pipeline.
@@ -87,6 +90,12 @@ class AirPlayReceiver(
     // UDP socket for receiving audio RTP packets — opened after RECORD, closed on TEARDOWN
     @Volatile private var audioSocket: DatagramSocket? = null
 
+    // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
+    @Volatile private var mirrorServer: MirrorStreamServer? = null
+    @Volatile private var eventSocket: ServerSocket? = null
+    @Volatile private var mirrorAesKey: ByteArray? = null
+    @Volatile private var mirrorEcdhSecret: ByteArray? = null
+
     /**
      * Starts the AirPlay receiver.
      *
@@ -155,7 +164,9 @@ class AirPlayReceiver(
             onStreamingStarted = { session -> onStreamingStarted(session) },
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
-            onPhotoCleared = { onPhotoCleared() }
+            onPhotoCleared = { onPhotoCleared() },
+            onMirrorSetupKeys = { aesKey, ecdhSecret -> startMirrorKeys(aesKey, ecdhSecret) },
+            onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
     }
@@ -302,11 +313,60 @@ class AirPlayReceiver(
         }
     }
 
+    // ─── Private: AirPlay 2 mirroring ─────────────────────────────────────────
+
+    /**
+     * Mirror SETUP msg 1: stash the decrypted AES key + pairing secret, open the event
+     * channel (macOS connects to it), and switch the UI to the streaming surface.
+     * @return the event channel's TCP port.
+     */
+    private fun startMirrorKeys(aesKey: ByteArray, ecdhSecret: ByteArray): Int {
+        mirrorAesKey = aesKey
+        mirrorEcdhSecret = ecdhSecret
+        val event = ServerSocket(0)
+        eventSocket = event
+        // Accept + drain the event connection. We don't act on events yet, but macOS expects
+        // the advertised event port to be connectable, so keep it open and readable.
+        scope.launch(Dispatchers.IO) {
+            try {
+                val s: Socket = event.accept()
+                val buf = ByteArray(4096)
+                val input = s.getInputStream()
+                while (isActive && input.read(buf) != -1) { /* drain */ }
+            } catch (e: Exception) {
+                if (eventSocket != null) Logger.d("Event channel closed")
+            }
+        }
+        onSenderNameChanged("AirPlay")
+        emitState(ProtocolState.CONNECTED)
+        Logger.i("Mirror keys set; event channel on port ${event.localPort}")
+        return event.localPort
+    }
+
+    /**
+     * Mirror SETUP msg 2: start the data-stream server for the requested stream.
+     * @return the data server's TCP port (macOS connects here to send H.264).
+     */
+    private fun startMirrorStream(streamConnectionId: Long): Int {
+        val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
+        val ecdhSecret = mirrorEcdhSecret ?: return 0
+        return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider)
+            .also { mirrorServer = it; it.start(scope) }
+            .dataPort
+            .also { Logger.i("Mirror data server started on port $it") }
+    }
+
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
     private fun releaseMediaComponents() {
         rtspHandler?.onVideoNalUnit = null
         try { audioSocket?.close() } catch (e: Exception) { /* non-fatal */ }
         audioSocket = null
+        mirrorServer?.stop()
+        mirrorServer = null
+        try { eventSocket?.close() } catch (e: Exception) { /* non-fatal */ }
+        eventSocket = null
+        mirrorAesKey = null
+        mirrorEcdhSecret = null
         videoDecoder?.release()
         videoDecoder = null
         audioPlayer?.release()

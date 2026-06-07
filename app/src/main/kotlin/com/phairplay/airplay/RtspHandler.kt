@@ -4,6 +4,7 @@ import com.phairplay.airplay.handshake.FairPlay
 import com.phairplay.airplay.handshake.InfoResponder
 import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.airplay.handshake.PairingSession
+import com.phairplay.airplay.handshake.PlistCodec
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,11 @@ open class RtspHandler(
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
     private val onStreamingStopped: () -> Unit,
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
-    private val onPhotoCleared: () -> Unit = {}
+    private val onPhotoCleared: () -> Unit = {},
+    /** AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret; returns the event port. */
+    private val onMirrorSetupKeys: (aesKey: ByteArray, ecdhSecret: ByteArray) -> Int = { _, _ -> 0 },
+    /** AirPlay 2 mirror SETUP msg 2: start the mirror data server for the stream; returns its data port. */
+    private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 }
 ) {
 
     private var serverSocket: ServerSocket? = null
@@ -167,7 +172,8 @@ open class RtspHandler(
         return when (request.method) {
             "OPTIONS"       -> handleOptionsInternal(request)
             "ANNOUNCE"      -> handleAnnounceInternal(request)
-            "SETUP"         -> handleSetupInternal(request)
+            // AirPlay 2 mirroring SETUP carries a binary plist; legacy audio SETUP carries SDP-ish text.
+            "SETUP"         -> if (request.isPlistBody()) handleMirrorSetup(request) else handleSetupInternal(request)
             "RECORD"        -> handleRecordInternal(request)
             "TEARDOWN"      -> handleTeardownInternal(request)
             "GET_PARAMETER" -> handleGetParameter(request)
@@ -240,6 +246,54 @@ open class RtspHandler(
         RtspResponse(200, "OK", bodyBytes = body, contentType = OCTET_STREAM, protocol = request.responseProtocol())
     } catch (e: Exception) {
         Logger.e("fp-setup failed", e)
+        RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
+    }
+
+    /**
+     * AirPlay 2 mirroring SETUP (binary plist). Two messages arrive on one connection:
+     *  - msg 1 carries `ekey`+`eiv`+`timingPort` → FairPlay-decrypt the AES key, hand it
+     *    (with the pairing secret) to the receiver, reply with event/timing ports.
+     *  - msg 2 carries `streams`[type 110] → start the mirror data server, reply with its port.
+     */
+    private fun handleMirrorSetup(request: RtspRequest): RtspResponse = try {
+        val req = PlistCodec.decode(request.bodyBytes)
+        val response = mutableMapOf<String, Any?>()
+
+        val ekey = req["ekey"] as? ByteArray
+        if (ekey != null) {
+            val aesKey = fairPlay!!.decrypt(ekey)
+            val ecdhSecret = pairingSession?.sharedSecret ?: error("mirror SETUP before pair-verify")
+            val eventPort = onMirrorSetupKeys(aesKey, ecdhSecret)
+            response["eventPort"] = eventPort.toLong()
+            response["timingPort"] = TIMING_PORT.toLong()
+            Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$TIMING_PORT")
+        }
+
+        val streams = req["streams"] as? List<*>
+        if (streams != null) {
+            val resStreams = streams.mapNotNull { s ->
+                val stream = s as? Map<*, *> ?: return@mapNotNull null
+                when ((stream["type"] as? Long)?.toInt()) {
+                    110 -> {
+                        val scid = (stream["streamConnectionID"] as? Long) ?: 0L
+                        val dataPort = onMirrorStreamStart(scid)
+                        Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
+                        mapOf("type" to 110L, "dataPort" to dataPort.toLong())
+                    }
+                    else -> { Logger.i("mirror SETUP: ignoring stream type ${stream["type"]}"); null }
+                }
+            }
+            response["streams"] = resStreams
+        }
+
+        RtspResponse(
+            200, "OK",
+            bodyBytes = PlistCodec.encode(response),
+            contentType = "application/x-apple-binary-plist",
+            protocol = request.responseProtocol()
+        )
+    } catch (e: Exception) {
+        Logger.e("mirror SETUP failed", e)
         RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
     }
 
@@ -433,6 +487,7 @@ open class RtspHandler(
         private const val RTSP_PORT = 7000
         private const val MAX_MESSAGE_BYTES = 65536
         private const val OCTET_STREAM = "application/octet-stream"
+        private const val TIMING_PORT = 6002   // matches TimingHandler's UDP NTP port
         private const val SESSION_ID = "PhairPlaySession"
         private const val AUDIO_RTP_PORT = 6001
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
@@ -444,3 +499,7 @@ private fun RtspRequest.isPhotoRequest(): Boolean =
 
 private fun RtspRequest.responseProtocol(): String =
     if (protocol.startsWith("HTTP/")) protocol else "RTSP/1.0"
+
+/** True if the body is an Apple binary plist (AirPlay 2 mirroring SETUP), vs legacy SDP. */
+private fun RtspRequest.isPlistBody(): Boolean =
+    bodyBytes.size >= 8 && String(bodyBytes, 0, 8, Charsets.US_ASCII) == "bplist00"
