@@ -92,10 +92,9 @@ class VideoDecoder(private val outputSurface: Surface) {
             // These are wrapped in ByteBuffers as required by the MediaCodec API.
             setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(spsBytes))  // SPS
             setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(ppsBytes))  // PPS
-            // Adaptive playback: lets the decoder absorb mid-stream resolution changes (when the
-            // Mac's resolution changes) without a fragile reconfigure, up to these bounds.
-            setInteger(MediaFormat.KEY_MAX_WIDTH, 3840)
-            setInteger(MediaFormat.KEY_MAX_HEIGHT, 2160)
+            // NOTE: do NOT set KEY_MAX_WIDTH/HEIGHT here — this SoC's MStar decoder rejects
+            // adaptive playback (BadParameter / buffer-count failures) and produces banding.
+            // Resolution changes are handled by recreating the decoder in MirrorStreamServer.
         }
 
         // Create the hardware H.264 decoder.

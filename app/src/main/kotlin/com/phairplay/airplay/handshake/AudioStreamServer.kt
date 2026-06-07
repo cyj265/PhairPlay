@@ -164,7 +164,8 @@ class AudioStreamServer(
                     .setChannelMask(channelMask)
                     .build()
             )
-            .setBufferSizeInBytes(maxOf(minBuf, minBuf * 2))
+            // Generous buffer to absorb network/decode jitter — small buffers underrun and crackle.
+            .setBufferSizeInBytes(maxOf(minBuf * 4, 64 * 1024))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             .also { it.play() }

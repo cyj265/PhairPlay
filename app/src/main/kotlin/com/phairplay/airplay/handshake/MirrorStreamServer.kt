@@ -104,27 +104,19 @@ class MirrorStreamServer(
             // Healthy decoder already configured for this exact SPS/PPS — nothing to do.
             if (d != null && d.isHealthy && sps.contentEquals(lastSps) && pps.contentEquals(lastPps)) return
 
-            lastSps = sps
-            lastPps = pps
-            val sc = MirrorCrypto.START_CODE
-            if (d != null && d.isHealthy) {
-                // Resolution changed: feed the new config inline — adaptive playback absorbs it
-                // without a reconfigure (far more robust than release/recreate).
-                d.decodeNalUnit(sc + sps + sc + pps, framePtsUs)
-                Logger.i("Mirror: fed new SPS/PPS inline (adaptive, sps=${spsSize}B pps=${ppsSize}B)")
-                return
-            }
-
-            // First config, or the previous decoder errored — build a fresh one.
+            // First config, resolution change, or the previous decoder errored — build a fresh one.
             val surface = awaitSurface() ?: run {
                 Logger.e("Mirror: no surface available — cannot start decoder")
                 return
             }
             d?.release()
+            lastSps = sps
+            lastPps = pps
+            val sc = MirrorCrypto.START_CODE
             decoder = VideoDecoder(surface).also {
                 it.initialize(sc + sps, sc + pps, width, height)
             }
-            Logger.i("Mirror decoder initialized (sps=${spsSize}B pps=${ppsSize}B)")
+            Logger.i("Mirror decoder (re)initialized (sps=${spsSize}B pps=${ppsSize}B)")
         } catch (e: Exception) {
             Logger.e("Mirror: failed to parse SPS/PPS", e)
         }
