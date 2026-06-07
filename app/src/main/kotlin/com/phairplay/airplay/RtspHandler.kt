@@ -1,5 +1,6 @@
 package com.phairplay.airplay
 
+import com.phairplay.airplay.handshake.InfoResponder
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +18,7 @@ import java.net.Socket
  * and RECORD, then hands binary interleaved RTP frames to [RtpInterleaved].
  */
 open class RtspHandler(
+    private val context: android.content.Context,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
     private val onStreamingStopped: () -> Unit,
@@ -157,8 +159,54 @@ open class RtspHandler(
             "PAUSE"         -> handlePauseInternal(request)
             "PUT"           -> handlePhotoPutInternal(request)
             "DELETE"        -> handlePhotoDeleteInternal(request)
+            // AirPlay 2 handshake is HTTP-style (GET/POST with bodies) over the RTSP socket.
+            "GET"           -> routeGet(request)
+            "POST"          -> routePost(request)
             else            -> handleUnknownInternal(request)
         }
+    }
+
+    /** Routes AirPlay 2 GET requests by URI path. */
+    private fun routeGet(request: RtspRequest): RtspResponse = when (request.uri.substringBefore("?")) {
+        "/info" -> handleInfo(request)
+        else    -> handleUnknownInternal(request)
+    }
+
+    /** Routes AirPlay 2 POST requests by URI path. */
+    private fun routePost(request: RtspRequest): RtspResponse = when (request.uri.substringBefore("?")) {
+        "/pair-setup"  -> handlePairSetup(request)
+        "/pair-verify" -> handlePairVerify(request)
+        "/fp-setup"    -> handleFpSetup(request)
+        "/feedback"    -> RtspResponse(200, "OK", protocol = request.responseProtocol())
+        "/audioMode"   -> RtspResponse(200, "OK", protocol = request.responseProtocol())
+        else           -> handleUnknownInternal(request)
+    }
+
+    /** GET /info — advertises receiver identity + capabilities (binary plist). */
+    private fun handleInfo(request: RtspRequest): RtspResponse = RtspResponse(
+        statusCode = 200,
+        statusMessage = "OK",
+        bodyBytes = InfoResponder.build(context),
+        contentType = "application/x-apple-binary-plist",
+        protocol = request.responseProtocol()
+    )
+
+    // --- Handshake stubs (replaced in later phases) -------------------------------------
+    // Phase 2 will implement pairing; Phase 3 FairPlay. For now they 200-OK so we can verify
+    // routing and /info on-device without macOS hitting "Unknown method".
+    private fun handlePairSetup(request: RtspRequest): RtspResponse {
+        Logger.i("STUB POST /pair-setup (${request.bodyBytes.size} bytes) — pairing not yet implemented")
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    }
+
+    private fun handlePairVerify(request: RtspRequest): RtspResponse {
+        Logger.i("STUB POST /pair-verify (${request.bodyBytes.size} bytes) — pairing not yet implemented")
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    }
+
+    private fun handleFpSetup(request: RtspRequest): RtspResponse {
+        Logger.i("STUB POST /fp-setup (${request.bodyBytes.size} bytes) — FairPlay not yet implemented")
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
 
     /** Handles OPTIONS — macOS asks what RTSP methods are supported. */
@@ -312,23 +360,28 @@ open class RtspHandler(
     }
 
     private fun sendResponse(outputStream: OutputStream, response: RtspResponse) {
-        val sb = StringBuilder()
-        sb.append("${response.protocol} ${response.statusCode} ${response.statusMessage}\r\n")
+        // Binary-safe: build the header block as ASCII, then write the raw body bytes.
+        // Content-Length must be the BYTE length (not String.length) so binary plists,
+        // FairPlay payloads, and encrypted bodies are framed correctly.
+        val wire = response.wireBody()
+        val head = StringBuilder()
+        head.append("${response.protocol} ${response.statusCode} ${response.statusMessage}\r\n")
         if (response.protocol.startsWith("RTSP")) {
-            sb.append("CSeq: $currentCSeq\r\n")
+            head.append("CSeq: $currentCSeq\r\n")
         }
-        sb.append("Server: PhairPlay/1.0\r\n")
+        head.append("Server: AirTunes/220.68\r\n")
+        response.contentType?.let { head.append("Content-Type: $it\r\n") }
         response.headers.forEach { (key, value) ->
-            sb.append("$key: $value\r\n")
+            head.append("$key: $value\r\n")
         }
-        if (response.body.isNotEmpty()) {
-            sb.append("Content-Length: ${response.body.length}\r\n")
+        if (wire.isNotEmpty()) {
+            head.append("Content-Length: ${wire.size}\r\n")
         }
-        sb.append("\r\n")
-        if (response.body.isNotEmpty()) {
-            sb.append(response.body)
+        head.append("\r\n")
+        outputStream.write(head.toString().toByteArray(Charsets.US_ASCII))
+        if (wire.isNotEmpty()) {
+            outputStream.write(wire)
         }
-        outputStream.write(sb.toString().toByteArray(Charsets.UTF_8))
         outputStream.flush()
     }
 

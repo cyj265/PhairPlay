@@ -150,6 +150,7 @@ class AirPlayReceiver(
 
     private fun startRtspHandler() {
         rtspHandler = RtspHandler(
+            context = context,
             videoSurfaceProvider = videoSurfaceProvider,
             onStreamingStarted = { session -> onStreamingStarted(session) },
             onStreamingStopped = { onStreamingStopped() },

@@ -178,6 +178,9 @@ dependencies {
     // Cryptography — AES-128-CTR for audio decryption, future SRP-6a pairing
     implementation(libs.bouncycastle)
 
+    // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
+    implementation(libs.ddplist)
+
     // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
     // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.
     "googletvImplementation"(libs.play.services.cast.tv)

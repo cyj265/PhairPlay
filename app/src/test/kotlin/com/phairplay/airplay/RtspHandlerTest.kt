@@ -323,6 +323,7 @@ class TestableRtspHandler(
     onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
     onPhotoCleared: () -> Unit = {}
 ) : RtspHandler(
+    context = io.mockk.mockk(relaxed = true),
     videoSurfaceProvider = { null },
     onStreamingStarted = onStreamingStarted,
     onStreamingStopped = onStreamingStopped,
