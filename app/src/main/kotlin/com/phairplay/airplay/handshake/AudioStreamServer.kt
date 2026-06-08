@@ -61,7 +61,16 @@ class AudioStreamServer(
         scope.launch(Dispatchers.IO) {
             val buf = ByteArray(2048)
             val pkt = DatagramPacket(buf, buf.size)
-            try { while (running) controlSocket.receive(pkt) } catch (_: Exception) { /* closed */ }
+            var firstCtrl = true
+            try {
+                while (running) {
+                    controlSocket.receive(pkt)
+                    if (firstCtrl) {
+                        Logger.i("Audio control: first packet (${pkt.length}B, type 0x${(pkt.data[1].toInt() and 0xFF).toString(16)})")
+                        firstCtrl = false
+                    }
+                }
+            } catch (_: Exception) { /* closed */ }
         }
     }
 

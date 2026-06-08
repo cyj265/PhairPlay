@@ -81,7 +81,15 @@ data class AppSettings(
      * The TV surface is 1080p, so frames are downscaled (sharper text via supersampling) at
      * the cost of more decode work — heavier on low-end SoCs.
      */
-    val forceHighResolution: Boolean = false
+    val forceHighResolution: Boolean = false,
+
+    /**
+     * When true, accept the mirroring audio stream (type 96, AAC-ELD). EXPERIMENTAL: macOS uses
+     * realtime audio clock-sync (RTCP) that isn't fully implemented yet, which can make macOS tear
+     * the whole mirror session down after a couple of seconds — so this defaults OFF to keep video
+     * mirroring rock-solid. Turn on to experiment with audio.
+     */
+    val mirrorAudioEnabled: Boolean = false
 ) {
 
     /** Advertised mirroring display size: 2560×1440 when [forceHighResolution], else 1920×1080. */

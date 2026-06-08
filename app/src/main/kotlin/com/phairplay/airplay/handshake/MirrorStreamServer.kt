@@ -164,6 +164,7 @@ class MirrorStreamServer(
             d.release(); decoder = null; lastSps = null; lastPps = null
             return
         }
+        if (framePtsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
         d.decodeNalUnit(annexB, framePtsUs)
         framePtsUs += FRAME_INTERVAL_US
     }

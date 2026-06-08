@@ -209,6 +209,7 @@ class PhairPlayService : Service() {
             displayName = settings.effectiveDisplayName,
             mirrorWidth = settings.mirrorWidth,
             mirrorHeight = settings.mirrorHeight,
+            audioEnabled = settings.mirrorAudioEnabled,
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },

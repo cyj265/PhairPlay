@@ -54,6 +54,8 @@ class AirPlayReceiver(
     /** Advertised mirroring resolution (from the "high resolution" setting). */
     private val mirrorWidth: Int = 1920,
     private val mirrorHeight: Int = 1080,
+    /** Whether to accept the mirroring audio stream (experimental — see AppSettings.mirrorAudioEnabled). */
+    private val audioEnabled: Boolean = false,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -170,6 +172,7 @@ class AirPlayReceiver(
             context = context,
             displayWidth = mirrorWidth,
             displayHeight = mirrorHeight,
+            audioEnabled = audioEnabled,
             videoSurfaceProvider = videoSurfaceProvider,
             onStreamingStarted = { session -> onStreamingStarted(session) },
             onStreamingStopped = { onStreamingStopped() },

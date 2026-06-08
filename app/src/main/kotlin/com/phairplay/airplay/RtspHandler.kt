@@ -25,6 +25,7 @@ open class RtspHandler(
     private val context: android.content.Context,
     private val displayWidth: Int = 1920,
     private val displayHeight: Int = 1080,
+    private val audioEnabled: Boolean = false,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
     private val onStreamingStopped: () -> Unit,
@@ -314,6 +315,10 @@ open class RtspHandler(
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())
                     }
                     96 -> {
+                        if (!audioEnabled) {
+                            Logger.i("mirror stream type=96 ignored (audio disabled in settings)")
+                            return@mapNotNull null
+                        }
                         val sr = (stream["sr"] as? Long)?.toInt() ?: 44100
                         val (dataPort, controlPort) = onMirrorAudioStart(sr, 2)
                         Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz) dataPort=$dataPort controlPort=$controlPort")
