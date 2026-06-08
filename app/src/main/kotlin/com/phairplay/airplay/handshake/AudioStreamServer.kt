@@ -61,13 +61,13 @@ class AudioStreamServer(
         scope.launch(Dispatchers.IO) {
             val buf = ByteArray(2048)
             val pkt = DatagramPacket(buf, buf.size)
-            var firstCtrl = true
+            var ctrlCount = 0
             try {
                 while (running) {
                     controlSocket.receive(pkt)
-                    if (firstCtrl) {
-                        Logger.i("Audio control: first packet (${pkt.length}B, type 0x${(pkt.data[1].toInt() and 0xFF).toString(16)})")
-                        firstCtrl = false
+                    if (ctrlCount < 6) {
+                        Logger.i("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, pkt.length)}")
+                        ctrlCount++
                     }
                 }
             } catch (_: Exception) { /* closed */ }
@@ -96,12 +96,12 @@ class AudioStreamServer(
             Logger.i("AudioStreamServer listening on UDP $dataPort (AAC-ELD ${sampleRate}Hz x$channels)")
             val buf = ByteArray(2048)
             val packet = DatagramPacket(buf, buf.size)
-            var first = true
+            var rtpCount = 0
             while (running) {
                 socket.receive(packet)
-                if (first) {
-                    Logger.i("Audio: first RTP packet from ${packet.address?.hostAddress} (${packet.length}B)")
-                    first = false
+                if (rtpCount < 6) {
+                    Logger.i("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
+                    rtpCount++
                 }
                 if (DIAGNOSTIC_DRAIN_ONLY) continue           // diagnostic: receive + discard only
                 if (packet.length <= RTP_HEADER) continue
@@ -191,6 +191,9 @@ class AudioStreamServer(
         private const val DIAGNOSTIC_DRAIN_ONLY = false
 
         private const val RTP_HEADER = 12
+
+        private fun hex(b: ByteArray, len: Int): String =
+            (0 until minOf(len, b.size)).joinToString(" ") { "%02x".format(b[it]) }
 
         /** A UDP socket bound to the IPv6 wildcard (dual-stack), OS-assigned port. */
         private fun ipv6Socket(): DatagramSocket = DatagramSocket(null).apply {

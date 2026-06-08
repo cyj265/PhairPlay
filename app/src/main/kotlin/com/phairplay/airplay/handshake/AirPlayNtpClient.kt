@@ -53,13 +53,20 @@ class AirPlayNtpClient(
         request[3] = 0x07
         val response = ByteArray(128)
         var first = true
+        var rxCount = 0
         while (running) {
             try {
                 putNtpTimestamp(request, 24, System.currentTimeMillis())
                 socket.send(DatagramPacket(request, request.size, remoteAddress, remoteTimingPort))
                 if (first) { Logger.i("NTP: first timing request sent to macOS"); first = false }
                 try {
-                    socket.receive(DatagramPacket(response, response.size))   // drain reply
+                    val rx = DatagramPacket(response, response.size)
+                    socket.receive(rx)
+                    if (rxCount < 4) {
+                        Logger.i("NTP RX[$rxCount] ${rx.length}B type=0x${(response[1].toInt() and 0xFF).toString(16)}: " +
+                            (0 until minOf(rx.length, 32)).joinToString(" ") { "%02x".format(response[it]) })
+                        rxCount++
+                    }
                 } catch (_: Exception) { /* SO_RCVTIMEO — fine, retry next tick */ }
             } catch (e: Exception) {
                 if (running) Logger.e("NTP client send error", e)
