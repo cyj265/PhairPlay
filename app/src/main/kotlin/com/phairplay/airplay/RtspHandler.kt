@@ -457,8 +457,8 @@ open class RtspHandler(
 
     /** Handles any unrecognized RTSP method. */
     open fun handleUnknownInternal(request: RtspRequest): RtspResponse {
-        Logger.w("Unknown RTSP method: ${request.method}")
-        return RtspResponse(statusCode = 501, statusMessage = "Not Implemented")
+        Logger.w("Unknown/unhandled RTSP: ${request.method} ${request.uri} (${request.bodyBytes.size}B body)")
+        return RtspResponse(statusCode = 501, statusMessage = "Not Implemented", protocol = request.responseProtocol())
     }
 
     /** Handles FLUSH — macOS requests we discard buffered media data (seek/pause). */

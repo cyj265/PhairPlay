@@ -87,8 +87,12 @@ class AudioStreamServer(
 
     private fun runReceive() {
         try {
-            initDecoder()
-            initAudioTrack()
+            if (!DIAGNOSTIC_DRAIN_ONLY) {
+                initDecoder()
+                initAudioTrack()
+            } else {
+                Logger.i("AudioStreamServer DIAGNOSTIC: drain-only (no decode/play)")
+            }
             Logger.i("AudioStreamServer listening on UDP $dataPort (AAC-ELD ${sampleRate}Hz x$channels)")
             val buf = ByteArray(2048)
             val packet = DatagramPacket(buf, buf.size)
@@ -99,6 +103,7 @@ class AudioStreamServer(
                     Logger.i("Audio: first RTP packet from ${packet.address?.hostAddress} (${packet.length}B)")
                     first = false
                 }
+                if (DIAGNOSTIC_DRAIN_ONLY) continue           // diagnostic: receive + discard only
                 if (packet.length <= RTP_HEADER) continue
                 // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted AAC payload.
                 val payload = packet.data.copyOfRange(RTP_HEADER, packet.length)
@@ -181,6 +186,10 @@ class AudioStreamServer(
     }
 
     companion object {
+        // Diagnostic confirmed the teardown is the audio protocol/timing, NOT decode load
+        // (drain-only still tore down). Keep full decode for when audio is enabled.
+        private const val DIAGNOSTIC_DRAIN_ONLY = false
+
         private const val RTP_HEADER = 12
 
         /** A UDP socket bound to the IPv6 wildcard (dual-stack), OS-assigned port. */
