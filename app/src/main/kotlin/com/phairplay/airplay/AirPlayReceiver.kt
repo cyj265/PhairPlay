@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.Surface
 import com.phairplay.airplay.handshake.AirPlayNtpClient
 import com.phairplay.airplay.handshake.AudioStreamServer
+import com.phairplay.airplay.handshake.BufferedAudioServer
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -100,6 +101,7 @@ class AirPlayReceiver(
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
     @Volatile private var mirrorServer: MirrorStreamServer? = null
     @Volatile private var audioServer: AudioStreamServer? = null
+    @Volatile private var bufferedAudioServer: BufferedAudioServer? = null
     @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
@@ -185,7 +187,9 @@ class AirPlayReceiver(
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
             onMirrorAudioStart = { sampleRate, channels -> startMirrorAudio(sampleRate, channels) },
             onMirrorAudioStop = { stopMirrorAudio() },
-            onMirrorVideoStop = { stopMirrorVideo() }
+            onMirrorVideoStop = { stopMirrorVideo() },
+            onBufferedAudioStart = { startBufferedAudio() },
+            onBufferedAudioStop = { stopBufferedAudio() }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
     }
@@ -414,6 +418,21 @@ class AirPlayReceiver(
         Logger.i("Mirror video stream stopped (audio playback continues)")
     }
 
+    /** Starts the AirPlay 2 buffered audio-only stream (type 103, Apple Music → TV); returns its TCP port. */
+    private fun startBufferedAudio(): Int {
+        bufferedAudioServer?.stop()
+        val server = BufferedAudioServer().also { bufferedAudioServer = it; it.start(scope) }
+        Logger.i("Buffered audio server started: dataPort=${server.dataPort}")
+        return server.dataPort
+    }
+
+    /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
+    private fun stopBufferedAudio() {
+        bufferedAudioServer?.stop()
+        bufferedAudioServer = null
+        Logger.i("Buffered audio stream stopped")
+    }
+
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
     private fun releaseMediaComponents() {
         rtspHandler?.onVideoNalUnit = null
@@ -423,6 +442,8 @@ class AirPlayReceiver(
         mirrorServer = null
         audioServer?.stop()
         audioServer = null
+        bufferedAudioServer?.stop()
+        bufferedAudioServer = null
         ntpClient?.stop()
         ntpClient = null
         try { eventClientSocket?.close() } catch (e: Exception) { /* non-fatal */ }

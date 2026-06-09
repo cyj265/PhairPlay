@@ -46,7 +46,11 @@ open class RtspHandler(
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
-    private val onMirrorVideoStop: () -> Unit = {}
+    private val onMirrorVideoStop: () -> Unit = {},
+    /** AirPlay 2 buffered audio-only SETUP (type 103, Apple Music → TV); returns the TCP data port. */
+    private val onBufferedAudioStart: () -> Int = { 0 },
+    /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
+    private val onBufferedAudioStop: () -> Unit = {}
 ) {
 
     private var serverSocket: ServerSocket? = null
@@ -237,6 +241,11 @@ open class RtspHandler(
             "SET_PARAMETER" -> handleSetParameter(request)
             "FLUSH"         -> handleFlush(request)
             "PAUSE"         -> handlePauseInternal(request)
+            // AirPlay 2 buffered-audio control verbs. Acknowledge them (a 501 would abort audio-only
+            // playback) and log their bodies so the anchor/rate/peer formats can be implemented.
+            "SETRATEANCHORTIME", "SETRATEANCHORTIM" -> handleBufferedControl(request, "SETRATEANCHORTIME")
+            "SETPEERS", "SETPEERSX"                 -> handleBufferedControl(request, "SETPEERS")
+            "FLUSHBUFFERED"                         -> handleBufferedControl(request, "FLUSHBUFFERED")
             "PUT"           -> handlePhotoPutInternal(request)
             "DELETE"        -> handlePhotoDeleteInternal(request)
             // AirPlay 2 handshake is HTTP-style (GET/POST with bodies) over the RTSP socket.
@@ -277,6 +286,27 @@ open class RtspHandler(
             }.onFailure { Logger.i("/feedback body ($n B, non-plist)") }
         } else {
             Logger.d("/feedback (empty)")
+        }
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    }
+
+    /**
+     * Acknowledges an AirPlay 2 buffered-audio control verb (SETRATEANCHORTIME / SETPEERS /
+     * FLUSHBUFFERED) and logs its body for protocol capture. Returning 200 keeps audio-only
+     * playback alive; a 501 would make macOS abort. Decode/scheduling is built once the formats
+     * are confirmed from these logs.
+     */
+    private fun handleBufferedControl(request: RtspRequest, label: String): RtspResponse {
+        val n = request.bodyBytes.size
+        if (n > 0) {
+            runCatching {
+                val p = PlistCodec.decode(request.bodyBytes)
+                Logger.i("$label body ($n B): " + p.entries.joinToString { (k, v) ->
+                    "$k=" + when (v) { is ByteArray -> "${v.size}B"; is List<*> -> "list[${v.size}]"; else -> v.toString() }
+                })
+            }.onFailure { Logger.i("$label body ($n B, non-plist): ${request.body.take(120)}") }
+        } else {
+            Logger.i("$label (empty body)")
         }
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
@@ -384,6 +414,22 @@ open class RtspHandler(
                         activeStreamTypes.add(96)
                         Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz x$ch) dataPort=$dataPort controlPort=$controlPort")
                         mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
+                    }
+                    103 -> {
+                        // Buffered (audio-only) AirPlay — Apple Music / Control Center → TV, no mirror.
+                        // DIAGNOSTIC: dump the full stream dict (codec type ct, audioFormat, shk/shiv
+                        // keys, latencies) so the wire format can be confirmed before building decode.
+                        Logger.i("buffered audio stream type=103 dict: " + stream.entries.joinToString { (k, v) ->
+                            "$k=" + when (v) { is ByteArray -> "${v.size}B"; is List<*> -> "list[${v.size}]"; else -> v.toString() }
+                        })
+                        if (!audioEnabled) {
+                            Logger.i("buffered audio (type=103) ignored (audio disabled in settings)")
+                            return@mapNotNull null
+                        }
+                        val dataPort = onBufferedAudioStart()
+                        activeStreamTypes.add(103)
+                        Logger.i("buffered audio stream type=103 dataPort=$dataPort")
+                        mapOf("type" to 103L, "dataPort" to dataPort.toLong())
                     }
                     else -> {
                         Logger.i("mirror SETUP stream dict: " + stream.entries.joinToString { (k, v) ->
@@ -506,6 +552,7 @@ open class RtspHandler(
             // to the eventual socket close.
             if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
             if (streamTypes.contains(110)) { onMirrorVideoStop(); activeStreamTypes.remove(110) }
+            if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
             if (activeStreamTypes.isNotEmpty()) {
                 Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
                 return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
