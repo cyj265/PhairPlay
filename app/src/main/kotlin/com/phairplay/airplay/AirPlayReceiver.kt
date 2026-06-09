@@ -185,11 +185,12 @@ class AirPlayReceiver(
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
-            onMirrorAudioStart = { sampleRate, channels -> startMirrorAudio(sampleRate, channels) },
+            onMirrorAudioStart = { sampleRate, channels, ct -> startMirrorAudio(sampleRate, channels, ct) },
             onMirrorAudioStop = { stopMirrorAudio() },
             onMirrorVideoStop = { stopMirrorVideo() },
             onBufferedAudioStart = { startBufferedAudio() },
-            onBufferedAudioStop = { stopBufferedAudio() }
+            onBufferedAudioStop = { stopBufferedAudio() },
+            onVolume = { v -> audioServer?.setVolume(v) }
         ).also { it.start(scope) }
         Logger.d("RTSP handler started on port 7000")
     }
@@ -394,11 +395,11 @@ class AirPlayReceiver(
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD audio server. @return (dataPort, controlPort). */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int): Pair<Int, Int> {
+    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels)
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType)
             .also { audioServer = it; it.start(scope) }
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
         return server.dataPort to server.controlPort

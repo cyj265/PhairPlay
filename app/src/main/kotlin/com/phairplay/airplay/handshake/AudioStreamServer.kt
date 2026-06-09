@@ -46,9 +46,14 @@ class AudioStreamServer(
     aesIv: ByteArray,
     private val sampleRate: Int,
     private val channels: Int,
+    private val codecType: Int = CT_AAC_ELD,   // SETUP ct: 8 = AAC-ELD (mirror), 4 = AAC-LC (audio-only)
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
+
+    // Playback gain (0..1), set from the sender's AirPlay volume. Applied to the AudioTrack and
+    // re-applied if the track is recreated. Starts at full.
+    @Volatile private var volumeGain = 1f
 
     // Reused across packets: decryptPacket runs only on the playback thread, so one Cipher
     // instance is safe and avoids a Cipher.getInstance allocation on every packet (~92/s).
@@ -227,15 +232,26 @@ class AudioStreamServer(
     }
 
     private fun initDecoder() {
+        // ct=8 AAC-ELD (mirroring, spf 480) vs ct=4 AAC-LC (audio-only / Apple Music, spf 1024).
+        val isAacLc = codecType == CT_AAC_LC
+        val profile = if (isAacLc) MediaCodecInfo.CodecProfileLevel.AACObjectLC
+                      else MediaCodecInfo.CodecProfileLevel.AACObjectELD
+        val asc = if (isAacLc) buildAacLcAsc(sampleRate, channels) else buildAacEldAsc(sampleRate, channels)
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channels).apply {
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD)
-            // AudioSpecificConfig for AAC-ELD, derived from the negotiated rate + channels.
-            setByteBuffer("csd-0", ByteBuffer.wrap(buildAacEldAsc(sampleRate, channels)))
+            setInteger(MediaFormat.KEY_AAC_PROFILE, profile)
+            setByteBuffer("csd-0", ByteBuffer.wrap(asc))
         }
         codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
             configure(format, null, null, 0)
             start()
         }
+        Logger.i("Audio decoder: ${if (isAacLc) "AAC-LC" else "AAC-ELD"} ${sampleRate}Hz x$channels (ct=$codecType)")
+    }
+
+    /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
+    fun setVolume(airplayVolume: Float) {
+        volumeGain = if (airplayVolume <= -144f) 0f else ((airplayVolume + 30f) / 30f).coerceIn(0f, 1f)
+        runCatching { audioTrack?.setVolume(volumeGain) }
     }
 
     private fun initAudioTrack() {
@@ -264,10 +280,13 @@ class AudioStreamServer(
             .setBufferSizeInBytes(minBuf)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-            .also { it.play() }
+            .also { it.setVolume(volumeGain); it.play() }
     }
 
     companion object {
+        const val CT_AAC_LC = 4    // SETUP ct for AAC-LC (audio-only / Apple Music)
+        const val CT_AAC_ELD = 8   // SETUP ct for AAC-ELD (screen-mirroring realtime audio)
+
         private const val RTP_HEADER = 12
 
         // Jitter buffer depth between the receive and playback threads (~1 s at 92 frames/s).
@@ -297,23 +316,29 @@ class AudioStreamServer(
          * ELDSpecificConfig tail (frameLengthFlag=1 for 480 samples; resilience/SBR flags 0;
          * ELDEXT_TERM). For 44.1 kHz stereo this yields the canonical bytes F8 E8 50 00.
          */
+        /** ISO 14496-3 sampling-frequency index for an AAC AudioSpecificConfig. */
+        private fun freqIndexFor(sampleRate: Int): Int = when (sampleRate) {
+            96000 -> 0; 88200 -> 1; 64000 -> 2; 48000 -> 3; 44100 -> 4; 32000 -> 5
+            24000 -> 6; 22050 -> 7; 16000 -> 8; 12000 -> 9; 11025 -> 10; 8000 -> 11; 7350 -> 12
+            else -> 4   // default to 44.1 kHz
+        }
+
+        /**
+         * Builds the AAC-LC AudioSpecificConfig (csd-0): AOT(5)=2 (LC), samplingFrequencyIndex(4),
+         * channelConfiguration(4), GASpecificConfig flags(3)=0. For 44.1 kHz stereo → bytes 12 10.
+         */
+        fun buildAacLcAsc(sampleRate: Int, channels: Int): ByteArray {
+            val freqIndex = freqIndexFor(sampleRate)
+            var bits = 0
+            var n = 0
+            fun put(value: Int, width: Int) { bits = (bits shl width) or (value and ((1 shl width) - 1)); n += width }
+            put(2, 5); put(freqIndex, 4); put(channels, 4); put(0, 3)   // 16 bits total
+            bits = bits shl (16 - n)
+            return byteArrayOf((bits ushr 8).toByte(), bits.toByte())
+        }
+
         fun buildAacEldAsc(sampleRate: Int, channels: Int): ByteArray {
-            val freqIndex = when (sampleRate) {
-                96000 -> 0
-                88200 -> 1
-                64000 -> 2
-                48000 -> 3
-                44100 -> 4
-                32000 -> 5
-                24000 -> 6
-                22050 -> 7
-                16000 -> 8
-                12000 -> 9
-                11025 -> 10
-                8000 -> 11
-                7350 -> 12
-                else -> 4   // default to 44.1 kHz
-            }
+            val freqIndex = freqIndexFor(sampleRate)
             var bits = 0L
             var n = 0
             fun put(value: Int, width: Int) {

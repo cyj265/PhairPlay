@@ -19,6 +19,15 @@ class AudioStreamServerTest {
     }
 
     @Test
+    fun `AAC-LC ASC for 44_100 Hz stereo is 12 10`() {
+        // AOT=2(00010) freqIdx=4(0100) chanCfg=2(0010) GASC=000 → 0001 0010 0001 0000 = 12 10
+        assertArrayEquals(
+            byteArrayOf(0x12.toByte(), 0x10.toByte()),
+            AudioStreamServer.buildAacLcAsc(44100, 2)
+        )
+    }
+
+    @Test
     fun `AAC-ELD ASC encodes 48 kHz mono (freq index 3, channel config 1)`() {
         // AOT-escape(11111 000111) freqIdx=0011 chanCfg=0001 frameLenFlag=1 tail=0... → F8 E6 30 00
         assertArrayEquals(

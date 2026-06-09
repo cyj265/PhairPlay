@@ -41,8 +41,8 @@ open class RtspHandler(
     ) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
     private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
-    /** AirPlay 2 mirror SETUP: start the audio server (type 96, AAC-ELD); returns (dataPort, controlPort). */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int) -> Pair<Int, Int> = { _, _ -> 0 to 0 },
+    /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC audio-only). */
+    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int) -> Pair<Int, Int> = { _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
@@ -50,8 +50,13 @@ open class RtspHandler(
     /** AirPlay 2 buffered audio-only SETUP (type 103, Apple Music → TV); returns the TCP data port. */
     private val onBufferedAudioStart: () -> Int = { 0 },
     /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
-    private val onBufferedAudioStop: () -> Unit = {}
+    private val onBufferedAudioStop: () -> Unit = {},
+    /** Sender volume change (AirPlay dB: −30…0, or ≤ −144 = mute) via SET_PARAMETER. */
+    private val onVolume: (Float) -> Unit = {}
 ) {
+
+    /** Last volume the sender set (AirPlay dB); returned to GET_PARAMETER volume queries. */
+    @Volatile private var currentVolume: Float = 0f
 
     private var serverSocket: ServerSocket? = null
 
@@ -409,10 +414,11 @@ open class RtspHandler(
                             return@mapNotNull null
                         }
                         val sr = (stream["sr"] as? Long)?.toInt() ?: 44100
-                        val ch = (stream["channels"] as? Long)?.toInt() ?: 2   // mirroring is stereo
-                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch)
+                        val ch = (stream["channels"] as? Long)?.toInt() ?: 2
+                        val ct = (stream["ct"] as? Long)?.toInt() ?: 8   // 8 = AAC-ELD (mirror), 4 = AAC-LC (audio-only)
+                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct)
                         activeStreamTypes.add(96)
-                        Logger.i("mirror stream type=96 (AAC-ELD ${sr}Hz x$ch) dataPort=$dataPort controlPort=$controlPort")
+                        Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch) dataPort=$dataPort controlPort=$controlPort")
                         mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
                     }
                     103 -> {
@@ -576,11 +582,12 @@ open class RtspHandler(
     private fun handleGetParameter(request: RtspRequest): RtspResponse {
         val query = request.body.trim()
         Logger.i("GET_PARAMETER body='$query'")
-        // macOS queries "volume" during mirroring setup and aborts if it gets no value back.
+        // macOS queries "volume" during setup and aborts if it gets no value back. Report the
+        // last value the sender set so its volume slider reflects the receiver.
         return if (query.startsWith("volume")) {
             RtspResponse(
                 statusCode = 200, statusMessage = "OK",
-                body = "volume: 0.000000\r\n",
+                body = "volume: %.6f\r\n".format(currentVolume),
                 contentType = "text/parameters",
                 protocol = request.responseProtocol()
             )
@@ -590,7 +597,17 @@ open class RtspHandler(
     }
 
     private fun handleSetParameter(request: RtspRequest): RtspResponse {
-        Logger.d("SET_PARAMETER: ${request.body}")
+        val body = request.body
+        // Text bodies carry "volume: <dB>"; binary bodies carry DMAP now-playing metadata / artwork.
+        if (body.startsWith("volume")) {
+            body.substringAfter(":").trim().toFloatOrNull()?.let { v ->
+                currentVolume = v
+                onVolume(v)
+                Logger.d("SET_PARAMETER volume=$v")
+            }
+        } else {
+            Logger.d("SET_PARAMETER (${request.bodyBytes.size}B, non-volume)")
+        }
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 

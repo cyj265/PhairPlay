@@ -32,9 +32,13 @@ object InfoResponder {
             "protovers" to "1.1",
             "keepAliveLowPower" to true,
             "keepAliveSendStatsAsBody" to true,
+            // Advertise ONLY AAC (AAC-LC 0x400000 | AAC-ELD 0x1000000 = 0x1400000). The TV has no
+            // ALAC/Opus decoder, so if we advertised those (the old broad 0x3FFFFFC), macOS would
+            // pick ALAC for audio-only playback and we'd decode garbage. Restricting to AAC makes
+            // macOS send AAC-LC for audio-only and AAC-ELD for mirroring — both MediaCodec-decodable.
             "audioFormats" to listOf(
-                mapOf("type" to 100L, "audioInputFormats" to 67108860L, "audioOutputFormats" to 67108860L),
-                mapOf("type" to 101L, "audioInputFormats" to 67108860L, "audioOutputFormats" to 67108860L)
+                mapOf("type" to 100L, "audioInputFormats" to 20971520L, "audioOutputFormats" to 20971520L),
+                mapOf("type" to 101L, "audioInputFormats" to 20971520L, "audioOutputFormats" to 20971520L)
             ),
             "audioLatencies" to listOf(
                 mapOf("type" to 100L, "audioType" to "default", "inputLatencyMicros" to 0L, "outputLatencyMicros" to 0L),
