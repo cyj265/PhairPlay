@@ -119,9 +119,34 @@ open class RtspHandler(
         Logger.i("RTSP handler stopped")
     }
 
+    /**
+     * Binds the RTSP port with SO_REUSEADDR, retrying briefly if a just-stopped instance hasn't
+     * released it yet. A quick service stop→start (the activity being destroyed and relaunched)
+     * could otherwise fail with EADDRINUSE, leaving PhairPlay advertising over mDNS while port 7000
+     * was dead — macOS would discover it and try to mirror but nothing could connect ("casting but
+     * nothing shows"). SO_REUSEADDR handles TIME_WAIT; the retry covers the close/rebind race.
+     */
+    private fun bindRtspSocket(): ServerSocket {
+        var lastError: java.io.IOException? = null
+        repeat(BIND_MAX_ATTEMPTS) { attempt ->
+            if (!running) throw java.io.IOException("RTSP server stopped before bind")
+            try {
+                return ServerSocket().apply {
+                    reuseAddress = true
+                    bind(java.net.InetSocketAddress(RTSP_PORT))
+                }
+            } catch (e: java.io.IOException) {
+                lastError = e
+                Logger.w("RTSP port $RTSP_PORT busy (attempt ${attempt + 1}/$BIND_MAX_ATTEMPTS) — retrying in ${BIND_RETRY_MS}ms")
+                try { Thread.sleep(BIND_RETRY_MS) } catch (_: InterruptedException) { throw e }
+            }
+        }
+        throw lastError ?: java.io.IOException("RTSP bind to $RTSP_PORT failed")
+    }
+
     private fun runServer(scope: CoroutineScope) {
         try {
-            serverSocket = ServerSocket(RTSP_PORT)
+            serverSocket = bindRtspSocket()
             Logger.i("RTSP server listening on port $RTSP_PORT")
 
             while (running && scope.isActive) {
@@ -622,6 +647,8 @@ open class RtspHandler(
 
     companion object {
         private const val RTSP_PORT = 7000
+        private const val BIND_MAX_ATTEMPTS = 12      // ~3s total — covers a quick stop→start restart
+        private const val BIND_RETRY_MS = 250L
         private const val MAX_MESSAGE_BYTES = 65536
         private const val OCTET_STREAM = "application/octet-stream"
         private const val TIMING_PORT = 6002   // matches TimingHandler's UDP NTP port

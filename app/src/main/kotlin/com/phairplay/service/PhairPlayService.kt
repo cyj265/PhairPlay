@@ -201,6 +201,15 @@ class PhairPlayService : Service() {
     private fun startAirPlay(settings: AppSettings) {
         // Mirror the debug-overlay setting into the shared stats bus that StreamingScreen reads.
         com.phairplay.airplay.StreamStats.overlayEnabled = settings.showDebugOverlay
+
+        // Idempotent: a redundant ACTION_START (e.g. the activity being recreated while the
+        // foreground service is still alive) must NOT spin up a second AirPlayReceiver competing
+        // for port 7000. The existing receiver keeps running and picks up the new Surface via the
+        // surfaceProvider. A genuine restart goes through ACTION_RESTART (stop → delay → start).
+        if (airPlayReceiver != null) {
+            Logger.i("AirPlay receiver already running — skipping duplicate start")
+            return
+        }
         // Captures the sender name reported by AirPlayReceiver before CONNECTED fires.
         // onSenderNameChanged is called synchronously before emitState(CONNECTED), so
         // this assignment happens-before the Main-thread read in onStateChanged.
