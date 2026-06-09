@@ -232,6 +232,12 @@ class AudioStreamServer(
     }
 
     private fun initDecoder() {
+        if (codecType == CT_ALAC) {
+            // macOS sends ALAC (lossless) for system-audio AirPlay regardless of our advertised
+            // formats, and this TV has no hardware ALAC codec — so there's nothing to decode to.
+            Logger.w("Audio stream is ALAC (ct=2): no ALAC decoder on this device → audio-only " +
+                "playback needs a bundled software ALAC decoder (not yet implemented).")
+        }
         // ct=8 AAC-ELD (mirroring, spf 480) vs ct=4 AAC-LC (audio-only / Apple Music, spf 1024).
         val isAacLc = codecType == CT_AAC_LC
         val profile = if (isAacLc) MediaCodecInfo.CodecProfileLevel.AACObjectLC
@@ -284,6 +290,7 @@ class AudioStreamServer(
     }
 
     companion object {
+        const val CT_ALAC = 2      // SETUP ct for ALAC (system-audio AirPlay; no HW decoder here)
         const val CT_AAC_LC = 4    // SETUP ct for AAC-LC (audio-only / Apple Music)
         const val CT_AAC_ELD = 8   // SETUP ct for AAC-ELD (screen-mirroring realtime audio)
 
