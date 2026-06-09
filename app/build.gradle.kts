@@ -34,9 +34,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
 
-        // Native FairPlay (libplayfair.so) — build only for the TV's 32-bit ABI.
+        // Native FairPlay (libplayfair.so) — build for all Android ABIs so PhairPlay runs on
+        // the full range of Android TV / Fire TV hardware (32- and 64-bit ARM, plus x86/x86_64
+        // for Intel devices, ChromeOS, and emulators). Required for Google Play 64-bit compliance.
         ndk {
-            abiFilters += "armeabi-v7a"
+            abiFilters += setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
         }
     }
 
@@ -137,9 +139,15 @@ android {
             "DataExtractionRules",
             "DiscouragedApi",
             "MonochromeLauncherIcon",
+            // Launcher-icon shape is advisory; on Android TV the banner is the primary
+            // artwork and the icon is rarely shown (sibling of MonochromeLauncherIcon above).
+            "IconLauncherShape",
             "ObsoleteSdkInt",
             "Overdraw",
-            "UnusedResources"
+            "UnusedResources",
+            // Advisory: the project deliberately supports a wide API range for old TVs;
+            // targetSdk is bumped deliberately, not on every new platform release.
+            "OldTargetApi"
         )
     }
 
