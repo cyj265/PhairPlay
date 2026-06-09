@@ -50,6 +50,10 @@ class AudioStreamServer(
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
 
+    // Reused across packets: decryptPacket runs only on the playback thread, so one Cipher
+    // instance is safe and avoids a Cipher.getInstance allocation on every packet (~92/s).
+    private val cbcCipher = Cipher.getInstance("AES/CBC/NoPadding")
+
     // Bind to the IPv6 wildcard (dual-stack) — macOS sends the audio RTP over the session's
     // IPv6 link-local address; a default DatagramSocket binds IPv4-only and never receives it.
     private val socket = ipv6Socket()
@@ -91,6 +95,7 @@ class AudioStreamServer(
             var ctrlCount = 0
             try {
                 while (running) {
+                    pkt.length = buf.size     // reset capacity before each receive (see runReceive)
                     controlSocket.receive(pkt)
                     if (ctrlCount < 6) {
                         Logger.i("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, pkt.length)}")
@@ -123,6 +128,7 @@ class AudioStreamServer(
             var rtpCount = 0
             var recv = 0; var dup = 0; var qDrop = 0
             while (running) {
+                packet.length = buf.size      // reset capacity — receive() shrinks length to the last datagram
                 socket.receive(packet)
                 recv++
                 if (rtpCount < 6) {
@@ -192,10 +198,9 @@ class AudioStreamServer(
     private fun decryptPacket(payload: ByteArray): ByteArray {
         val encryptedLen = (payload.size / 16) * 16
         if (encryptedLen == 0) return payload
-        val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, iv)   // fresh IV per packet (RAOP)
+        cbcCipher.init(Cipher.DECRYPT_MODE, key, iv)   // fresh IV per packet (RAOP)
         val out = payload.copyOf()
-        cipher.doFinal(payload, 0, encryptedLen, out, 0)
+        cbcCipher.doFinal(payload, 0, encryptedLen, out, 0)
         return out
     }
 
@@ -224,8 +229,8 @@ class AudioStreamServer(
     private fun initDecoder() {
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channels).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD)
-            // AudioSpecificConfig for AAC-ELD, 44.1 kHz, stereo.
-            setByteBuffer("csd-0", ByteBuffer.wrap(AAC_ELD_ASC))
+            // AudioSpecificConfig for AAC-ELD, derived from the negotiated rate + channels.
+            setByteBuffer("csd-0", ByteBuffer.wrap(buildAacEldAsc(sampleRate, channels)))
         }
         codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
             configure(format, null, null, 0)
@@ -285,7 +290,46 @@ class AudioStreamServer(
         @Suppress("unused")
         private val AUDIO_MANAGER_HINT = AudioManager.STREAM_MUSIC
 
-        // AudioSpecificConfig: AAC-ELD (AOT 39), 44.1 kHz (index 4), stereo (config 2).
-        private val AAC_ELD_ASC = byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50.toByte(), 0x00.toByte())
+        /**
+         * Builds the AAC-ELD AudioSpecificConfig (csd-0) for the negotiated [sampleRate] and
+         * [channels], instead of hardcoding 44.1 kHz/stereo. Layout: AOT escape(5)=31 + ext(6)=7
+         * (AOT 39 = ELD), samplingFrequencyIndex(4), channelConfiguration(4), then the fixed
+         * ELDSpecificConfig tail (frameLengthFlag=1 for 480 samples; resilience/SBR flags 0;
+         * ELDEXT_TERM). For 44.1 kHz stereo this yields the canonical bytes F8 E8 50 00.
+         */
+        fun buildAacEldAsc(sampleRate: Int, channels: Int): ByteArray {
+            val freqIndex = when (sampleRate) {
+                96000 -> 0
+                88200 -> 1
+                64000 -> 2
+                48000 -> 3
+                44100 -> 4
+                32000 -> 5
+                24000 -> 6
+                22050 -> 7
+                16000 -> 8
+                12000 -> 9
+                11025 -> 10
+                8000 -> 11
+                7350 -> 12
+                else -> 4   // default to 44.1 kHz
+            }
+            var bits = 0L
+            var n = 0
+            fun put(value: Int, width: Int) {
+                bits = (bits shl width) or (value.toLong() and ((1L shl width) - 1))
+                n += width
+            }
+            put(31, 5); put(7, 6)                 // AOT escape → 39 (ELD)
+            put(freqIndex, 4); put(channels, 4)
+            put(1, 1); put(0, 4); put(0, 4)       // frameLengthFlag=1, resilience/SBR=0, ELDEXT_TERM=0
+            bits = bits shl (32 - n)              // left-align into 4 bytes
+            return byteArrayOf(
+                (bits ushr 24).toByte(),
+                (bits ushr 16).toByte(),
+                (bits ushr 8).toByte(),
+                bits.toByte()
+            )
+        }
     }
 }
