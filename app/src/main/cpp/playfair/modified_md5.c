@@ -47,14 +47,17 @@ void swap(uint32_t* a, uint32_t* b)
 
 void modified_md5(unsigned char* originalblockIn, unsigned char* keyIn, unsigned char* keyOut)
 {
-   unsigned char blockIn[64];
-   uint32_t* block_words = (uint32_t*)blockIn;
-   uint32_t* key_words = (uint32_t*)keyIn;
-   uint32_t* out_words = (uint32_t*)keyOut;
+   // Type-pun the 64-byte block via a union (well-defined; avoids the strict-aliasing UB and
+   // unaligned access of casting unsigned char* to uint32_t*). The algorithm reads the block
+   // byte-wise for `input` and word-wise for the i==31 swaps, so both views must share memory.
+   union { unsigned char bytes[64]; uint32_t words[16]; } block;
+   uint32_t key_words[4];
+   uint32_t out_words[4];
    uint32_t A, B, C, D, Z, tmp;
    int i;
-   
-   memcpy(blockIn, originalblockIn, 64);
+
+   memcpy(block.bytes, originalblockIn, 64);
+   memcpy(key_words, keyIn, sizeof(key_words));   // native-endian read, identical to the old cast
 
    // Each cycle does something like this:
    A = key_words[0];
@@ -74,7 +77,7 @@ void modified_md5(unsigned char* originalblockIn, unsigned char* keyIn, unsigned
       else if (i < 64)
          j = 7*i % 16;
 
-      input = blockIn[4*j] << 24 | blockIn[4*j+1] << 16 | blockIn[4*j+2] << 8 | blockIn[4*j+3];
+      input = block.bytes[4*j] << 24 | block.bytes[4*j+1] << 16 | block.bytes[4*j+2] << 8 | block.bytes[4*j+3];
       printf("Key = %08x\n", A);
       Z = A + input + (int)(long long)((1LL << 32) * fabs(sin(i + 1)));
       if (i < 16)
@@ -97,11 +100,11 @@ void modified_md5(unsigned char* originalblockIn, unsigned char* keyIn, unsigned
       if (i == 31)
       {
          // swapsies
-         swap(&block_words[A & 15], &block_words[B & 15]);
-         swap(&block_words[C & 15], &block_words[D & 15]);
-         swap(&block_words[(A & (15<<4))>>4], &block_words[(B & (15<<4))>>4]);
-         swap(&block_words[(A & (15<<8))>>8], &block_words[(B & (15<<8))>>8]);
-         swap(&block_words[(A & (15<<12))>>12], &block_words[(B & (15<<12))>>12]);
+         swap(&block.words[A & 15], &block.words[B & 15]);
+         swap(&block.words[C & 15], &block.words[D & 15]);
+         swap(&block.words[(A & (15<<4))>>4], &block.words[(B & (15<<4))>>4]);
+         swap(&block.words[(A & (15<<8))>>8], &block.words[(B & (15<<8))>>8]);
+         swap(&block.words[(A & (15<<12))>>12], &block.words[(B & (15<<12))>>12]);
       }
    }
    printf("%08X %08X %08X %08X\n", A, B, C, D);
@@ -115,5 +118,5 @@ void modified_md5(unsigned char* originalblockIn, unsigned char* keyIn, unsigned
    out_words[1] = key_words[1] + B;
    out_words[2] = key_words[2] + C;
    out_words[3] = key_words[3] + D;
-   
+   memcpy(keyOut, out_words, sizeof(out_words));   // native-endian write, identical to the old cast
 }
