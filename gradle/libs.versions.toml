@@ -35,6 +35,7 @@ ddplist = "1.28"
 # Testing
 junit = "4.13.2"
 mockk = "1.13.10"
+robolectric = "4.14.1"
 androidx-test-ext = "1.1.5"
 espresso = "3.5.1"
 
@@ -68,6 +69,7 @@ ddplist = { group = "com.googlecode.plist", name = "dd-plist", version.ref = "dd
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidx-test-ext" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 

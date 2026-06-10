@@ -1,8 +1,8 @@
 package com.phairplay.airplay
 
 import com.phairplay.airplay.handshake.RaopRsa
+import com.phairplay.util.Base64Util
 import com.phairplay.util.Logger
-import android.util.Base64
 
 /**
  * SdpParser — Parses the SDP (Session Description Protocol) body from an AirPlay ANNOUNCE request.
@@ -278,7 +278,7 @@ object SdpParser {
     private fun decodeBase64Safely(b64: String?): ByteArray? {
         if (b64.isNullOrBlank()) return null
         return try {
-            Base64.decode(b64, Base64.DEFAULT)
+            Base64Util.decode(b64)
         } catch (e: IllegalArgumentException) {
             Logger.w("SdpParser: invalid Base64 in SDP attribute")
             null

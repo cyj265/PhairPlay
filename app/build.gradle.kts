@@ -211,6 +211,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Robolectric — real Android framework classes (Intent, Base64, …) in JVM unit tests
+    testImplementation(libs.robolectric)
 
     // Instrumented Testing (on device)
     androidTestImplementation(libs.androidx.test.ext.junit)
