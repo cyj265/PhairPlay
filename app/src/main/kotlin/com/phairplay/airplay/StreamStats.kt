@@ -21,6 +21,11 @@ object StreamStats {
     @Volatile var videoQueue = 0       // current decode-queue depth
     @Volatile var videoDropPct = 0     // cumulative % of frames dropped under load
 
+    // Actual decoded video dimensions (from the SPS, so portrait phone streams are portrait here).
+    // StreamingScreen reads these to aspect-fit the Surface instead of stretching to 16:9.
+    @Volatile var videoWidth = 0
+    @Volatile var videoHeight = 0
+
     // ─── Audio (AudioStreamServer) ───────────────────────────────────────────
     @Volatile var audioActive = false  // true while an audio stream is running
     @Volatile var audioQueue = 0       // current playback-queue depth
@@ -29,6 +34,7 @@ object StreamStats {
     /** Clears per-stream counters (call when a mirror session ends). Keeps [overlayEnabled]. */
     fun resetStreams() {
         videoRes = ""; videoFps = 0; videoQueue = 0; videoDropPct = 0
+        videoWidth = 0; videoHeight = 0
         audioActive = false; audioQueue = 0; audioDupPct = 0
     }
 

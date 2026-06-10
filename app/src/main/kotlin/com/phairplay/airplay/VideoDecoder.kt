@@ -72,15 +72,23 @@ class VideoDecoder(private val outputSurface: Surface) {
             return
         }
 
-        // Try to extract actual resolution from the SPS NAL unit.
-        // If parsing fails (e.g., unsupported profile), fall back to the hint dimensions.
-        val (actualWidth, actualHeight) = Companion.parseSpsResolution(spsBytes) ?: run {
-            Logger.d("SPS parsing failed or skipped — using hint: ${width}x${height}")
+        // Try to extract actual resolution from the SPS NAL unit. The parser can misread some senders'
+        // SPS (e.g. iPhone) and return nonsense like 32x87392 — configuring MediaCodec with that wedges
+        // the decoder (no input buffers, no frames). Validate the result and fall back to the hint; the
+        // hardware decoder reads the true size from the SPS (csd-0) itself and reports it via
+        // INFO_OUTPUT_FORMAT_CHANGED, which we use to refine the size for aspect-fit.
+        val parsed = Companion.parseSpsResolution(spsBytes)
+        val (actualWidth, actualHeight) = parsed?.takeIf { isPlausibleSize(it.first, it.second) } ?: run {
+            Logger.w("SPS resolution $parsed implausible/failed — using hint ${width}x${height}")
             Pair(width, height)
         }
 
         Logger.i("Initializing H.264 decoder: ${actualWidth}x${actualHeight} " +
                  "(hint was ${width}x${height})")
+
+        // Provisional size for StreamingScreen aspect-fit; replaced by the decoder's reported size.
+        StreamStats.videoWidth = actualWidth
+        StreamStats.videoHeight = actualHeight
 
         // Create the MediaFormat that describes the H.264 stream to the hardware decoder
         val format = MediaFormat.createVideoFormat(
@@ -197,13 +205,33 @@ class VideoDecoder(private val outputSurface: Surface) {
         val bufferInfo = MediaCodec.BufferInfo()
         var outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
 
-        while (outputBufferIndex >= 0) {
-            // Render immediately. We deliberately do NOT schedule a future render time for A/V sync:
-            // this Surface's BufferQueue holds only ~3 frames, so any hold quickly back-pressures the
-            // decoder → the upstream frame queue saturates → big latency + dropped (corrupt) frames.
-            // A/V alignment is handled by keeping the AUDIO path low-latency instead (AudioStreamServer).
-            codec.releaseOutputBuffer(outputBufferIndex, true)
+        while (outputBufferIndex >= 0 || outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+            if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // The decoder parsed the real size from the SPS — authoritative for aspect-fit.
+                publishOutputSize(codec.outputFormat)
+            } else {
+                // Render immediately. We deliberately do NOT schedule a future render time for A/V sync:
+                // this Surface's BufferQueue holds only ~3 frames, so any hold quickly back-pressures the
+                // decoder → the upstream frame queue saturates → big latency + dropped (corrupt) frames.
+                // A/V alignment is handled by keeping the AUDIO path low-latency instead (AudioStreamServer).
+                codec.releaseOutputBuffer(outputBufferIndex, true)
+            }
             outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
+        }
+    }
+
+    /** Reads the decoder's true display size (honouring the crop rectangle) for StreamingScreen. */
+    private fun publishOutputSize(format: MediaFormat) {
+        var w = format.getInteger(MediaFormat.KEY_WIDTH)
+        var h = format.getInteger(MediaFormat.KEY_HEIGHT)
+        if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
+            w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1
+            h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1
+        }
+        if (isPlausibleSize(w, h)) {
+            StreamStats.videoWidth = w
+            StreamStats.videoHeight = h
+            Logger.i("Video output size ${w}x$h")
         }
     }
 
@@ -229,6 +257,9 @@ class VideoDecoder(private val outputSurface: Surface) {
             isInitialized = false
         }
     }
+
+    /** True if (w, h) look like a real video resolution — rejects parser garbage (e.g. 32x87392). */
+    private fun isPlausibleSize(w: Int, h: Int): Boolean = w in 64..8192 && h in 64..8192
 
     companion object {
         // How long to wait for an input buffer before dropping (microseconds).

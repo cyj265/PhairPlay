@@ -2,6 +2,7 @@ package com.phairplay.ui
 
 import android.app.AlertDialog
 import android.os.Bundle
+import com.phairplay.service.ServiceController
 import android.text.InputFilter
 import android.text.InputType
 import android.view.LayoutInflater
@@ -53,6 +54,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowMiracast: View
     private lateinit var rowCast: View
     private lateinit var rowMirrorAudio: View
+    private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowForceHighRes: View
@@ -90,6 +92,7 @@ class SettingsFragment : Fragment() {
         rowMiracast         = view.findViewById(R.id.row_miracast)
         rowCast             = view.findViewById(R.id.row_cast)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
+        rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
@@ -113,6 +116,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowMiracast,     R.string.setting_miracast_enabled,   R.string.setting_miracast_subtitle)
         configureToggleRow(rowCast,         R.string.setting_cast_enabled,       R.string.setting_cast_subtitle)
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
+        configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
@@ -161,6 +165,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowMiracast,     settings.miracastEnabled)
         setToggle(rowCast,         settings.castEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
+        setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowForceHighRes, settings.forceHighResolution)
@@ -183,7 +188,8 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
         setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
-        setToggleListener(rowMirrorAudio)  { enabled -> save { it.copy(mirrorAudioEnabled = enabled) } }
+        setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
+        setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
@@ -211,6 +217,18 @@ class SettingsFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             settingsRepository.update(transform)
             Logger.d("Settings saved")
+        }
+    }
+
+    /**
+     * Saves a setting that the AirPlay receiver only reads at startup (mirror-audio, PIN auth), then
+     * restarts the service so the change applies immediately instead of on the next manual restart.
+     */
+    private fun saveAndRestart(transform: (AppSettings) -> AppSettings) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            settingsRepository.update(transform)
+            ServiceController.restart(requireContext())
+            Logger.i("Settings saved — restarting receivers to apply")
         }
     }
 

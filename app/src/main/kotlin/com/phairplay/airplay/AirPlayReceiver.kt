@@ -57,6 +57,8 @@ class AirPlayReceiver(
     private val mirrorHeight: Int = 1080,
     /** Whether to accept the mirroring audio stream (experimental — see AppSettings.mirrorAudioEnabled). */
     private val audioEnabled: Boolean = false,
+    /** Require HomeKit-style SRP PIN pairing before streaming (AppSettings.airPlayPinAuthEnabled). */
+    private val pinAuthEnabled: Boolean = false,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -81,8 +83,19 @@ class AirPlayReceiver(
      * the same name — NsdManager resolves the collision by appending " (2)", " (3)", etc.
      * The UI can use this callback to show the user the real registered name.
      */
-    private val onActualNameRegistered: (String) -> Unit = {}
+    private val onActualNameRegistered: (String) -> Unit = {},
+    /**
+     * Audio-only "now playing" state. Emits a [NowPlayingInfo] when audio is streaming WITHOUT video
+     * (system audio, Apple Music, podcasts) so the UI can show a now-playing card instead of a black
+     * surface; emits null when video is mirroring (the video screen takes over) or audio stops.
+     */
+    private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
+    /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
+    private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
+
+    // Persistent store of paired controllers (for PIN access control / pair-verify).
+    private val pairingStore = com.phairplay.airplay.handshake.PairingStore(context)
 
     // SupervisorJob: child coroutine failures don't propagate to siblings.
     private val job = SupervisorJob()
@@ -102,12 +115,27 @@ class AirPlayReceiver(
     @Volatile private var mirrorServer: MirrorStreamServer? = null
     @Volatile private var audioServer: AudioStreamServer? = null
     @Volatile private var bufferedAudioServer: BufferedAudioServer? = null
+    @Volatile private var urlVideoPlayer: AirPlayVideoPlayer? = null
+
+    // Reverse remote control (TV → sender). Created lazily once a sender advertises DACP-ID.
+    private val dacpClient = DacpClient(context)
     @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
     @Volatile private var mirrorAesKey: ByteArray? = null
     @Volatile private var mirrorEcdhSecret: ByteArray? = null
     @Volatile private var mirrorAesIv: ByteArray? = null
+
+    // ─── Now-playing (audio-only) state ──────────────────────────────────────
+    // The now-playing card shows only when audio plays WITHOUT video. We track both stream kinds
+    // plus the latest DMAP metadata/artwork and recompute on every change (see [emitNowPlaying]).
+    @Volatile private var audioPlaying = false
+    @Volatile private var videoPlaying = false
+    @Volatile private var npSenderName = "AirPlay"
+    @Volatile private var npTitle: String? = null
+    @Volatile private var npArtist: String? = null
+    @Volatile private var npAlbum: String? = null
+    @Volatile private var npArtwork: ByteArray? = null
 
     /**
      * Starts the AirPlay receiver.
@@ -146,6 +174,7 @@ class AirPlayReceiver(
             rtspHandler?.stop()
             timingHandler?.stop()
             mdnsService?.stop()
+            dacpClient.stop()
             releaseMediaComponents()
         } catch (e: Exception) {
             Logger.e("Error during AirPlayReceiver stop", e)
@@ -153,6 +182,16 @@ class AirPlayReceiver(
             scope.cancel()
         }
     }
+
+    /**
+     * Sends a DACP transport command (see [DacpClient] constants) from the TV remote back to the
+     * AirPlay sender — e.g. play/pause or skip what the Mac/iPhone is streaming. No-op if no sender
+     * has advertised a DACP identity yet.
+     */
+    fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
+
+    /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
+    fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
 
     // ─── Private: startup ────────────────────────────────────────────────────
 
@@ -185,14 +224,31 @@ class AirPlayReceiver(
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
-            onMirrorAudioStart = { sampleRate, channels, ct -> startMirrorAudio(sampleRate, channels, ct) },
+            onMirrorAudioStart = { sampleRate, channels, ct, spf -> startMirrorAudio(sampleRate, channels, ct, spf) },
             onMirrorAudioStop = { stopMirrorAudio() },
             onMirrorVideoStop = { stopMirrorVideo() },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
-            onVolume = { v -> audioServer?.setVolume(v) }
+            onVolume = { v -> audioServer?.setVolume(v) },
+            onNowPlayingMetadata = { title, artist, album ->
+                npTitle = title; npArtist = artist; npAlbum = album
+                emitNowPlaying()
+            },
+            onArtwork = { bytes ->
+                npArtwork = bytes.takeIf { it.isNotEmpty() }
+                emitNowPlaying()
+            },
+            onVideoPlay = { url, start -> startUrlVideo(url, start) },
+            onVideoRate = { rate -> urlVideoPlayer?.setRate(rate) },
+            onVideoScrub = { pos -> urlVideoPlayer?.scrub(pos) },
+            onVideoStop = { stopUrlVideo() },
+            onPlaybackInfo = { urlVideoPlayer?.info() },
+            onRemoteControlInfo = { dacpId, activeRemote -> dacpClient.configure(dacpId, activeRemote) },
+            pinAuthEnabled = pinAuthEnabled,
+            pairingStore = pairingStore,
+            onShowPin = { pin -> onPinChanged(pin) }
         ).also { it.start(scope) }
-        Logger.d("RTSP handler started on port 7000")
+        Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
     }
 
     // ─── Private: streaming lifecycle ────────────────────────────────────────
@@ -213,6 +269,12 @@ class AirPlayReceiver(
             try {
                 if (session.hasVideo) startVideoDecoder(session)
                 if (session.hasAudio) startAudioPlayer(session)
+                // Legacy (SDP) session: reflect its stream kinds into now-playing state so an
+                // audio-only RAOP session shows the now-playing card.
+                npSenderName = session.senderName.ifBlank { npSenderName }
+                videoPlaying = session.hasVideo
+                audioPlaying = session.hasAudio
+                emitNowPlaying()
                 // Notify PhairPlayService of the sender name BEFORE emitting CONNECTED,
                 // so the name is ready when the ActiveConnection is created.
                 onSenderNameChanged(session.senderName)
@@ -389,18 +451,20 @@ class AirPlayReceiver(
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight)
-            .also { mirrorServer = it; it.start(scope) }
+            .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
-    /** Mirror SETUP audio stream (type 96): start the AAC-ELD audio server. @return (dataPort, controlPort). */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int): Pair<Int, Int> {
+    /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
+    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType)
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
             .also { audioServer = it; it.start(scope) }
+        audioPlaying = true
+        emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
         return server.dataPort to server.controlPort
     }
@@ -409,6 +473,9 @@ class AirPlayReceiver(
     private fun stopMirrorAudio() {
         audioServer?.stop()
         audioServer = null
+        audioPlaying = false
+        clearNowPlayingMetadata()
+        emitNowPlaying()
         Logger.i("Mirror audio stream stopped (video mirroring continues)")
     }
 
@@ -416,13 +483,40 @@ class AirPlayReceiver(
     private fun stopMirrorVideo() {
         mirrorServer?.stop()
         mirrorServer = null
+        videoPlaying = false
+        emitNowPlaying()   // audio may still be playing → now-playing card can take over
         Logger.i("Mirror video stream stopped (audio playback continues)")
+    }
+
+    /**
+     * AirPlay video URL mode (non-mirroring): show the streaming surface and hand the URL to
+     * [AirPlayVideoPlayer], which fetches + plays it via MediaPlayer onto the same Surface.
+     */
+    private fun startUrlVideo(url: String, startFraction: Double) {
+        onSenderNameChanged("AirPlay")
+        emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
+        val player = urlVideoPlayer ?: AirPlayVideoPlayer(
+            surfaceProvider = videoSurfaceProvider,
+            onEnded = { stopUrlVideo() }
+        ).also { urlVideoPlayer = it }
+        player.play(url, startFraction)
+        Logger.i("AirPlay URL video started: $url (start=$startFraction)")
+    }
+
+    /** Stops AirPlay video URL playback (POST /stop or end-of-media) and ends the session. */
+    private fun stopUrlVideo() {
+        urlVideoPlayer?.release()
+        urlVideoPlayer = null
+        onStreamingStopped()
+        Logger.i("AirPlay URL video stopped")
     }
 
     /** Starts the AirPlay 2 buffered audio-only stream (type 103, Apple Music → TV); returns its TCP port. */
     private fun startBufferedAudio(): Int {
         bufferedAudioServer?.stop()
         val server = BufferedAudioServer().also { bufferedAudioServer = it; it.start(scope) }
+        audioPlaying = true   // buffered audio (type 103) is always audio-only
+        emitNowPlaying()
         Logger.i("Buffered audio server started: dataPort=${server.dataPort}")
         return server.dataPort
     }
@@ -431,6 +525,9 @@ class AirPlayReceiver(
     private fun stopBufferedAudio() {
         bufferedAudioServer?.stop()
         bufferedAudioServer = null
+        audioPlaying = false
+        clearNowPlayingMetadata()
+        emitNowPlaying()
         Logger.i("Buffered audio stream stopped")
     }
 
@@ -445,6 +542,8 @@ class AirPlayReceiver(
         audioServer = null
         bufferedAudioServer?.stop()
         bufferedAudioServer = null
+        urlVideoPlayer?.release()
+        urlVideoPlayer = null
         ntpClient?.stop()
         ntpClient = null
         try { eventClientSocket?.close() } catch (e: Exception) { /* non-fatal */ }
@@ -464,6 +563,24 @@ class AirPlayReceiver(
         videoDecoder = null
         audioPlayer?.release()
         audioPlayer = null
+        // Session fully torn down — clear now-playing so the UI leaves the audio card.
+        audioPlaying = false
+        videoPlaying = false
+        clearNowPlayingMetadata()
+        emitNowPlaying()
+    }
+
+    /** Pushes the current now-playing state out: a [NowPlayingInfo] when audio plays without video, else null. */
+    private fun emitNowPlaying() {
+        val show = audioPlaying && !videoPlaying
+        onNowPlayingChanged(
+            if (show) NowPlayingInfo(npSenderName, npTitle, npArtist, npAlbum, npArtwork) else null
+        )
+    }
+
+    /** Drops stale track metadata/artwork when an audio stream ends (so it can't bleed into the next). */
+    private fun clearNowPlayingMetadata() {
+        npTitle = null; npArtist = null; npAlbum = null; npArtwork = null
     }
 
     // ─── Private: state emission ─────────────────────────────────────────────

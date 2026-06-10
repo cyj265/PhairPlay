@@ -59,25 +59,35 @@ class StreamingScreen @JvmOverloads constructor(
         setPadding(24, 16, 24, 16)
         visibility = GONE
     }
+    // Last applied surface size, so we only re-layout on an actual change (rotation/resolution switch).
+    private var lastSurfaceW = Int.MIN_VALUE
+    private var lastSurfaceH = Int.MIN_VALUE
+
     private val handler = Handler(Looper.getMainLooper())
-    private val debugTick = object : Runnable {
+    private val tick = object : Runnable {
         override fun run() {
+            applyAspectFit()
             if (StreamStats.overlayEnabled) {
                 debugView.visibility = VISIBLE
                 debugView.text = StreamStats.summary()
             } else if (debugView.visibility != GONE) {
                 debugView.visibility = GONE
             }
-            handler.postDelayed(this, DEBUG_REFRESH_MS)
+            handler.postDelayed(this, REFRESH_MS)
         }
     }
 
     init {
-        // Add the SurfaceView to fill this FrameLayout completely
+        // Black backing so the letterbox/pillarbox bars (when the video is sized to its aspect ratio
+        // and doesn't fill 16:9) are black — without this, those margins are transparent and the home
+        // menu shows through behind the streaming overlay. The SurfaceView punches its own hole on top.
+        setBackgroundColor(Color.BLACK)
+
+        // SurfaceView is centred; its size is set to the video's aspect ratio by applyAspectFit().
         addView(surfaceView, LayoutParams(
             LayoutParams.MATCH_PARENT,
             LayoutParams.MATCH_PARENT
-        ))
+        ).apply { gravity = Gravity.CENTER })
 
         // Debug HUD overlay, top-left, above the video surface.
         addView(debugView, LayoutParams(
@@ -118,17 +128,43 @@ class StreamingScreen @JvmOverloads constructor(
      */
     fun getSurface(): Surface? = surface
 
+    /**
+     * Sizes the SurfaceView to the decoded video's aspect ratio (letterbox/pillarbox) instead of
+     * stretching it to fill 16:9. Without this, a portrait phone stream is squashed horizontally.
+     * Falls back to filling the container when the size isn't known yet.
+     */
+    private fun applyAspectFit() {
+        val vw = StreamStats.videoWidth
+        val vh = StreamStats.videoHeight
+        val cw = width
+        val ch = height
+        val (targetW, targetH) = if (vw <= 0 || vh <= 0 || cw <= 0 || ch <= 0) {
+            LayoutParams.MATCH_PARENT to LayoutParams.MATCH_PARENT
+        } else {
+            val videoRatio = vw.toFloat() / vh
+            val containerRatio = cw.toFloat() / ch
+            if (videoRatio > containerRatio) cw to (cw / videoRatio).toInt()   // fit width, bars top/bottom
+            else (ch * videoRatio).toInt() to ch                              // fit height, bars left/right
+        }
+        if (targetW == lastSurfaceW && targetH == lastSurfaceH) return
+        lastSurfaceW = targetW
+        lastSurfaceH = targetH
+        surfaceView.layoutParams = (surfaceView.layoutParams as LayoutParams).apply {
+            width = targetW; height = targetH; gravity = Gravity.CENTER
+        }
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        handler.post(debugTick)            // start polling the debug HUD
+        handler.post(tick)                 // drive aspect-fit + debug HUD
     }
 
     override fun onDetachedFromWindow() {
-        handler.removeCallbacks(debugTick)
+        handler.removeCallbacks(tick)
         super.onDetachedFromWindow()
     }
 
     companion object {
-        private const val DEBUG_REFRESH_MS = 500L
+        private const val REFRESH_MS = 200L
     }
 }

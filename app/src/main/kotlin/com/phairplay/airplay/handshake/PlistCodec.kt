@@ -24,6 +24,13 @@ object PlistCodec {
         BinaryPropertyListWriter.writeToArray(toNs(map))
 
     /**
+     * Encodes a map to an XML property list (`text/x-apple-plist+xml`). AirPlay video clients expect
+     * the `GET /playback-info` body in this legacy XML form rather than binary.
+     */
+    fun encodeXml(map: Map<String, Any?>): ByteArray =
+        toNs(map).toXMLPropertyList().toByteArray(Charsets.UTF_8)
+
+    /**
      * Decodes a binary (or XML) plist into a String-keyed map.
      * @throws IllegalArgumentException if the root element is not a dictionary.
      */

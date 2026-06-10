@@ -77,6 +77,14 @@ class PhairPlayService : Service() {
     private val _photoFrame = MutableStateFlow<PhotoFrame?>(null)
     val photoFrame: StateFlow<PhotoFrame?> = _photoFrame.asStateFlow()
 
+    // Non-null while AirPlay audio is playing WITHOUT video — drives the now-playing overlay.
+    private val _nowPlaying = MutableStateFlow<com.phairplay.airplay.NowPlayingInfo?>(null)
+    val nowPlaying: StateFlow<com.phairplay.airplay.NowPlayingInfo?> = _nowPlaying.asStateFlow()
+
+    // Non-null while a PIN should be shown on screen for SRP pair-setup (PIN access control).
+    private val _pairingPin = MutableStateFlow<String?>(null)
+    val pairingPin: StateFlow<String?> = _pairingPin.asStateFlow()
+
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
@@ -117,6 +125,18 @@ class PhairPlayService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     /**
+     * The app was swiped away from recents. Cleanly stop all receivers (which closes the RTSP
+     * connection so an active mirror ends on the sender too) and stop the service — don't let
+     * START_STICKY silently resurrect it as a zombie that keeps advertising/streaming invisibly.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Logger.i("App task removed — stopping receivers + service")
+        stopReceivers()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /**
      * Called by [MainActivity] after it binds, to supply the [Surface] for video rendering.
      *
      * The lambda is invoked lazily — only when a stream is actually being started — so it
@@ -130,6 +150,15 @@ class PhairPlayService : Service() {
      */
     fun setVideoSurfaceProvider(provider: () -> Surface?) {
         videoSurfaceProvider = provider
+    }
+
+    /**
+     * Sends a DACP transport command (TV remote → AirPlay sender), e.g. play/pause or skip what the
+     * Mac/iPhone is streaming. Bound Activities call this from media-key events. No-op if no AirPlay
+     * sender has advertised a DACP identity.
+     */
+    fun sendAirPlayRemoteCommand(command: String) {
+        airPlayReceiver?.sendRemoteCommand(command)
     }
 
     override fun onDestroy() {
@@ -221,6 +250,7 @@ class PhairPlayService : Service() {
             mirrorWidth = settings.mirrorWidth,
             mirrorHeight = settings.mirrorHeight,
             audioEnabled = settings.mirrorAudioEnabled,
+            pinAuthEnabled = settings.airPlayPinAuthEnabled,
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
@@ -236,6 +266,12 @@ class PhairPlayService : Service() {
             },
             onPhotoCleared = {
                 _photoFrame.value = null
+            },
+            onNowPlayingChanged = { info ->
+                _nowPlaying.value = info
+            },
+            onPinChanged = { pin ->
+                _pairingPin.value = pin
             },
             onStateChanged = { state ->
                 _airPlayState.value = state
@@ -288,6 +324,8 @@ class PhairPlayService : Service() {
         _miracastState.value = ProtocolState.DISABLED
         _castState.value = ProtocolState.DISABLED
         _photoFrame.value = null
+        _nowPlaying.value = null
+        _pairingPin.value = null
     }
 
     // ─── Notification ────────────────────────────────────────────────────────

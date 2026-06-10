@@ -16,13 +16,17 @@ import com.phairplay.util.NetworkUtils
  */
 object InfoResponder {
 
-    fun build(context: Context, width: Int = 1920, height: Int = 1080): ByteArray {
+    fun build(context: Context, width: Int = 1920, height: Int = 1080, pinRequired: Boolean = false): ByteArray {
         val mac = NetworkUtils.getMacAddress()
+        // When PIN access control is on, set the "pairing/PIN required" status bit so the sender runs
+        // the SRP pair-setup flow. NOTE: exact flag semantics are sender-version-dependent — verify
+        // against macOS and adjust if pairing doesn't trigger.
+        val statusFlags = if (pinRequired) STATUS_FLAGS or STATUS_FLAG_PIN_REQUIRED else STATUS_FLAGS
         val info = mapOf(
             "deviceID" to mac,
             "macAddress" to mac,
             "features" to AIRPLAY_FEATURES,
-            "statusFlags" to STATUS_FLAGS,
+            "statusFlags" to statusFlags,
             "model" to MODEL,
             "name" to NetworkUtils.getDeviceName(context),
             "sourceVersion" to SOURCE_VERSION,
@@ -69,6 +73,9 @@ object InfoResponder {
 
     /** Matches RPiPlay's /info statusFlags (0x44). */
     private const val STATUS_FLAGS = 68L
+
+    /** Status bit advertising that the receiver requires PIN pairing (0x8 — verify vs macOS). */
+    private const val STATUS_FLAG_PIN_REQUIRED = 0x8L
 
     private const val MODEL = "AppleTV5,3"
     private const val SOURCE_VERSION = "220.68"
