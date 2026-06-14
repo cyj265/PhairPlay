@@ -27,6 +27,8 @@ out/
 *.keystore
 keystore.properties
 release.properties
+release.env
+.release.env
 
 # Local configuration files
 local.defaults.properties
