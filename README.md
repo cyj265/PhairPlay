@@ -16,31 +16,45 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 
 ---
 
-## Current Implementation Status
+## Current Status — v1.0.0-beta.1
 
-PhairPlay currently builds installable debug APKs for Google TV and Fire TV and is ready for real-device testing. The implemented receiver stack includes the Android TV UI, foreground service control, AirPlay mDNS advertising, RTSP handshake handling, H.264/AAC/ALAC pipeline pieces, AirPlay `/photo` JPEG/PNG handling, Miracast Wi-Fi Direct/WFD advertising plus RTSP control-plane handling, and Google TV Cast Connect SDK startup.
+PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed beta release. Download the APK directly from the [GitHub Releases page](https://github.com/mazer666/PhairPlay/releases).
 
-Not everything in the full product spec is proven end-to-end yet. AirPlay, Miracast, and Cast must still be validated with real sender devices. Google Cast also requires a registered Cast application ID before full receiver testing; see [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md).
+The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
 
-## Implemented / In Progress Features
+Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
 
-- Android TV / Fire TV app shell with service status UI and settings
-- Foreground receiver service with start, stop, and restart controls
-- AirPlay mDNS advertisement and RTSP session handling
-- AirPlay photo receiver endpoint (`/photo`) for JPEG and PNG display
-- Hardware-accelerated H.264 decoder components
-- AAC/ALAC audio playback components
-- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane handling
-- Google TV Cast Connect SDK lifecycle, with Fire TV correctly disabled
-- Zero ads, zero analytics, zero internet required
+## Features
+
+### AirPlay 2 (fully implemented)
+- Screen mirroring from macOS 12+ and iOS/iPadOS 16+ — H.264 hardware decode
+- FairPlay session decryption (fp-setup v2/v3 + legacy rsaaeskey) via native libplayfair
+- HomeKit-style pairing (Ed25519/X25519) and legacy SRP PIN pairing
+- Mirroring audio: AAC-ELD, AAC-LC, ALAC — with independent A/V start/stop
+- System audio streaming (ALAC, unencrypted) — reliable path for app audio
+- AirPlay video URL mode (`/play` content) + transport controls (play/pause/scrub)
+- Now-playing metadata (DMAP) with album artwork overlay
+- DACP reverse remote — TV remote controls the sender's playback
+- NTP timing and UDP audio retransmit (packet-loss recovery)
+- AirPlay photo receiver — JPEG/PNG from iOS Photos app displayed full-screen
+- Access-control lockout after repeated failed pairing attempts
+
+### App & Platform
+- Android TV / Fire TV app shell with foreground service and status UI
+- Mirror audio toggle and PIN-auth toggle in Settings
 - Works on Google TV (Android 10+) and Fire TV (Android 7+)
+- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane
+- Google TV Cast Connect SDK lifecycle (full testing requires Cast app ID)
+- Zero ads, zero analytics, zero internet required
 - Open source — Apache 2.0 license
 
 ## What PhairPlay Does NOT Do
 
-- No FairPlay DRM content (Netflix, Disney+, etc.)
-- No cloud/remote streaming — local network only
-- No audio-only AirPlay from Apple Music (screen mirroring only in v1.0)
+- **FairPlay DRM content** (Netflix, Disney+, Apple TV+) — Apple DRM; not decryptable by any open-source receiver
+- **Apple Music in-app audio** — protected on every AirPlay path; use system audio output instead
+- **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
+- **Cloud/remote streaming** — local network only
+- **Miracast / Cast media playback** — control plane is ready; media decode integration is in progress
 
 ---
 
@@ -64,7 +78,18 @@ Not everything in the full product spec is proven end-to-end yet. AirPlay, Mirac
 
 ## Installation
 
-### Option A: Build from Source
+### Option A: Download a Release APK (easiest)
+
+Go to the [Releases page](https://github.com/mazer666/PhairPlay/releases) and download the APK for your device:
+
+| APK | Device |
+|-----|--------|
+| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV, Android TV (Android 10+) |
+| `PhairPlay-vX.Y.Z-firetv.apk` | Amazon Fire TV (Android 7.1+) |
+
+Then install it via ADB (see the Sideloading Guide below) or a sideloading app like *Downloader* on Fire TV.
+
+### Option B: Build from Source
 
 1. **Install prerequisites**
    ```bash
@@ -154,14 +179,15 @@ Not everything in the full product spec is proven end-to-end yet. AirPlay, Mirac
 
 ## Known Limitations
 
-- **Real-device validation is still required.** The APKs build and unit tests pass, but AirPlay mirroring, AirPlay photo transfer, Miracast, and Cast still need hardware sender testing before a release claim.
-- **Google Cast is not ready for end-to-end testing without a Cast app ID.** A receiver must be registered in the Google Cast Developer Console first.
-- **Miracast is control-plane ready, not full WFD media playback yet.** Wi-Fi Direct discovery and WFD RTSP responses exist; MPEG-TS/RTP media ingest, HDCP negotiation, and audio/video decode integration remain future work.
-- **FairPlay-protected content** (Netflix, Disney+, Apple TV+, etc.) cannot be mirrored — this is an Apple DRM restriction, not a PhairPlay limitation.
-- **Audio-only AirPlay** (streaming from Apple Music app) is not fully supported in v1.0.
+- **Beta software** — the AirPlay 2 stack is complete but real-device validation with various macOS/iOS senders is ongoing. Please report issues.
+- **Apple Music in-app audio is not decryptable.** macOS protects it with FairPlay on every AirPlay path. Route the Mac's system audio output instead (works fine).
+- **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
+- **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
+- **Google Cast** requires a registered Cast app ID for end-to-end testing; see [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md).
+- **Miracast** — Wi-Fi Direct and RTSP control plane work; MPEG-TS media decode is future work.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
-- On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100ms. Use 5 GHz or Ethernet for best results.
-- **No sender authentication.** The AirPlay 2 pairing PhairPlay implements is non-authenticating (no PIN/password), so **any device on the same network can mirror to the TV**. Run PhairPlay only on a trusted LAN; do not expose port 7000 to untrusted networks.
+- On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
+- **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
 
 For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
 

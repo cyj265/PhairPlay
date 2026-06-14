@@ -41,19 +41,79 @@ When you stop screen sharing, the Mac sends a "goodbye" message (RTSP TEARDOWN) 
 
 ## Component Overview
 
+### Orchestration & UI
+
 | Component | File | What It Does |
 |---|---|---|
 | `PhairPlayApp` | `PhairPlayApp.kt` | App-level init (logging setup) |
 | `MainActivity` | `MainActivity.kt` | Hosts the UI, manages app lifecycle |
-| `AirPlayReceiver` | `airplay/AirPlayReceiver.kt` | **Orchestrator** — starts/stops all services |
-| `MdnsService` | `airplay/MdnsService.kt` | mDNS advertising (Step 1 above) |
-| `RtspHandler` | `airplay/RtspHandler.kt` | RTSP session (Step 2 above) |
-| `VideoDecoder` | `airplay/VideoDecoder.kt` | Hardware H.264 decode → screen |
-| `AudioPlayer` | `airplay/AudioPlayer.kt` | Audio decrypt + play |
+| `PhairPlayService` | `service/PhairPlayService.kt` | ForegroundService — keeps receiver alive |
+| `AirPlayReceiver` | `airplay/AirPlayReceiver.kt` | **Orchestrator** — starts/stops all sub-services |
 | `WaitingScreen` | `ui/WaitingScreen.kt` | Idle UI — "Ready for AirPlay" |
-| `StreamingScreen` | `ui/StreamingScreen.kt` | Streaming UI — video surface |
-| `Logger` | `util/Logger.kt` | Logging wrapper (Timber) |
+| `StreamingScreen` | `ui/StreamingScreen.kt` | Video SurfaceView (aspect-fit letterbox) |
+| `NowPlayingScreen` | `ui/NowPlayingScreen.kt` | Now-playing metadata + album artwork overlay |
+| `PinScreen` | `ui/PinScreen.kt` | On-screen PIN entry for legacy SRP pairing |
+| `SettingsFragment` | `ui/SettingsFragment.kt` | Mirror audio toggle, PIN-auth toggle, device name |
 | `NetworkUtils` | `util/NetworkUtils.kt` | Reads device name, MAC, IP |
+| `Base64Util` | `util/Base64Util.kt` | Pure-JVM Base64 (unit-testable, no android.util.Base64) |
+
+### Discovery
+
+| Component | File | What It Does |
+|---|---|---|
+| `MdnsService` | `airplay/MdnsService.kt` | mDNS advertising (`_airplay._tcp`, `_raop._tcp`) |
+| `InfoResponder` | `airplay/handshake/InfoResponder.kt` | `GET /info` capability advertisement (binary plist) |
+
+### RTSP & Session Control
+
+| Component | File | What It Does |
+|---|---|---|
+| `RtspHandler` | `airplay/RtspHandler.kt` | **Full AirPlay 2 RTSP router** — all verbs, session lifecycle |
+| `SdpParser` | `airplay/SdpParser.kt` | SDP codec/encryption/channel/rate parsing |
+| `PlistCodec` | `airplay/handshake/PlistCodec.kt` | Apple binary plist encode/decode |
+| `RtspMessages` | `airplay/RtspMessages.kt` | RTSP response builders |
+
+### Pairing & FairPlay
+
+| Component | File | What It Does |
+|---|---|---|
+| `PairingSession` | `airplay/handshake/PairingSession.kt` | HomeKit-style pair-setup/pair-verify (Ed25519/X25519) |
+| `PairingKeys` | `airplay/handshake/PairingKeys.kt` | Ed25519 identity key generation and persistence |
+| `PairingStore` | `airplay/handshake/PairingStore.kt` | Controller key persistence + failed-attempt lockout |
+| `LegacyPairSetupPin` | `airplay/handshake/LegacyPairSetupPin.kt` | SRP-6a PIN pairing + AES-GCM key exchange |
+| `FairPlay` | `airplay/handshake/FairPlay.kt` | fp-setup v2 (RAOP) and v3 (mirroring/Safari) key decryption |
+| `RaopRsa` | `airplay/handshake/RaopRsa.kt` | Legacy rsaaeskey RSA-OAEP recovery (AirPort Express) |
+| `fairplay_jni.c` | `cpp/fairplay_jni.c` | JNI bridge to libplayfair (null/length/OOM validated) |
+| `playfair/` | `cpp/playfair/` | Reverse-engineered FairPlay C library (all ABIs) |
+
+### Video
+
+| Component | File | What It Does |
+|---|---|---|
+| `MirrorStreamServer` | `airplay/handshake/MirrorStreamServer.kt` | Interleaved RTP reassembly from RTSP TCP (`$` framing) |
+| `MirrorCrypto` | `airplay/handshake/MirrorCrypto.kt` | AES-128-CTR decryption (keystream always advanced) |
+| `VideoDecoder` | `airplay/VideoDecoder.kt` | MediaCodec H.264: SPS-driven reinit, self-heal, keyframe resync |
+| `AirPlayVideoPlayer` | `airplay/AirPlayVideoPlayer.kt` | URL video mode (`/play` content) + transport controls |
+
+### Audio
+
+| Component | File | What It Does |
+|---|---|---|
+| `AudioStreamServer` | `airplay/handshake/AudioStreamServer.kt` | Mirror audio (type 96): UDP RTP, AES-128-CBC, AAC-ELD/LC, retransmit |
+| `AlacDecoder` | `airplay/handshake/AlacDecoder.kt` | RAOP/SDP audio: AES-128-CBC + Apple ALAC; mute-on-bad-key guard |
+| `BufferedAudioServer` | `airplay/handshake/BufferedAudioServer.kt` | AirPlay 2 buffered audio (type 103) — accepted, not yet played |
+| `AudioPlayer` | `airplay/AudioPlayer.kt` | Low-level AudioTrack wrapper |
+| `alac/` | `cpp/alac/` | Apple ALAC decoder (C++) + JNI bridge |
+| `AirPlayNtpClient` | `airplay/handshake/AirPlayNtpClient.kt` | Apple NTP for A/V synchronisation |
+| `TimingHandler` | `airplay/TimingHandler.kt` | NTP timing state |
+
+### Metadata & Remote
+
+| Component | File | What It Does |
+|---|---|---|
+| `NowPlayingInfo` | `airplay/NowPlayingInfo.kt` | DMAP parser → title, artist, album, artwork |
+| `DacpClient` | `airplay/DacpClient.kt` | `_dacp._tcp` discovery + reverse remote (TV remote → sender) |
+| `StreamStats` | `airplay/StreamStats.kt` | Per-session RTP statistics (count, duplicates, queue drops) |
 
 ---
 
