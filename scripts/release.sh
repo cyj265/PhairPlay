@@ -89,16 +89,37 @@ cmd_release() {
     require_cmd keytool
     require_cmd git
 
-    # Load signing credentials
+    # Load signing credentials and export them so Gradle picks them up
     [[ -f "$CREDS_FILE" ]] || die "No credentials found. Run: ./scripts/release.sh --setup"
-    # shellcheck source=/dev/null
-    source "$CREDS_FILE"
+    set -a; source "$CREDS_FILE"; set +a
     [[ -f "${KEYSTORE_PATH:-}" ]] || die "Keystore not found at $KEYSTORE_PATH"
+
+    # Auto-detect Android SDK if ANDROID_HOME is not set
+    if [[ -z "${ANDROID_HOME:-}" ]]; then
+        if [[ -d "$HOME/Android/Sdk" ]]; then
+            export ANDROID_HOME="$HOME/Android/Sdk"
+        elif [[ -d "$HOME/Library/Android/sdk" ]]; then
+            export ANDROID_HOME="$HOME/Library/Android/sdk"
+        else
+            die "ANDROID_HOME not set and no SDK found. Install Android Studio or set ANDROID_HOME."
+        fi
+    fi
+
+    # Auto-detect Homebrew JDK if JAVA_HOME is not set
+    if [[ -z "${JAVA_HOME:-}" ]]; then
+        for jdk in /opt/homebrew/opt/openjdk@17 /opt/homebrew/opt/openjdk /usr/libexec/java_home; do
+            if [[ -d "$jdk" ]]; then export JAVA_HOME="$jdk"; break; fi
+        done
+    fi
+    [[ -n "${JAVA_HOME:-}" ]] && export PATH="$JAVA_HOME/bin:$PATH"
 
     cd "$REPO_ROOT"
 
-    # Ensure working tree is clean
-    if ! git diff --quiet || ! git diff --cached --quiet; then
+    # Write local.properties so Gradle finds the Android SDK
+    echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+    # Ensure working tree is clean (local.properties is gitignored)
+    if ! git diff --quiet -- ':!local.properties' || ! git diff --cached --quiet; then
         die "Working tree has uncommitted changes. Commit or stash them first."
     fi
 
