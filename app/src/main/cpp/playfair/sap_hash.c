@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define printf(...) (void)0;
 
@@ -19,8 +20,10 @@ uint32_t rol8x(unsigned char input, int count)
 
 void sap_hash(unsigned char* blockIn, unsigned char* keyOut)
 {
-   uint32_t* block_words = (uint32_t*)blockIn;
-   uint32_t* out_words = (uint32_t*)keyOut;   
+   // Use a union to avoid strict-aliasing UB and unaligned access when reading 32-bit words
+   // from the byte-oriented blockIn pointer (identical approach to modified_md5).
+   union { unsigned char bytes[64]; uint32_t words[16]; } block;
+   memcpy(block.bytes, blockIn, 64);
    unsigned char buffer0[20] = {0x96, 0x5F, 0xC6, 0x53, 0xF8, 0x46, 0xCC, 0x18, 0xDF, 0xBE, 0xB2, 0xF8, 0x38, 0xD7, 0xEC, 0x22, 0x03, 0xD1, 0x20, 0x8F};
    unsigned char buffer1[210];
    unsigned char buffer2[35] = {0x43, 0x54, 0x62, 0x7A, 0x18, 0xC3, 0xD6, 0xB3, 0x9A, 0x56, 0xF6, 0x1C, 0x14, 0x3F, 0x0C, 0x1D, 0x3B, 0x36, 0x83, 0xB1, 0x39, 0x51, 0x4A, 0xAA, 0x09, 0x3E, 0xFE, 0x44, 0xAF, 0xDE, 0xC3, 0x20, 0x9D, 0x42, 0x3A}; 
@@ -33,8 +36,8 @@ void sap_hash(unsigned char* blockIn, unsigned char* keyOut)
    // Load the input into the buffer
    for (i = 0; i < 210; i++)
    {
-      // We need to swap the byte order around so it is the right endianness      
-      uint32_t in_word = block_words[((i % 64)>>2)];
+      // We need to swap the byte order around so it is the right endianness
+      uint32_t in_word = block.words[((i % 64)>>2)];
       uint32_t in_byte = (in_word >> ((3-(i % 4)) << 3)) & 0xff;
       buffer1[i] = in_byte;
    }
