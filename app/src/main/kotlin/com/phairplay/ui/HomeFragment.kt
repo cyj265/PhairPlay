@@ -68,6 +68,9 @@ class HomeFragment : Fragment() {
     private lateinit var cardCast: View
     private lateinit var cardDlna: View
     private lateinit var surfaceDlna: android.view.SurfaceView
+
+    /** Most recent DLNA startup error message, re-applied after card redraws. */
+    private var lastDlnaError: String? = null
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRestart: Button
@@ -188,6 +191,7 @@ class HomeFragment : Fragment() {
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.dlnaError.collectLatest { error ->
+                lastDlnaError = error
                 if (!error.isNullOrBlank()) {
                     cardDlna.findViewById<TextView>(R.id.text_protocol_detail)?.text = error
                 }
@@ -249,5 +253,12 @@ class HomeFragment : Fragment() {
         stateText.setText(stateRes)
         detail.setText(detailRes)
         dot.background.setTint(requireContext().getColor(colorRes))
+
+        // A DLNA startup failure carries a concrete message; keep showing it
+        // instead of the generic error hint (the dlnaState emission may arrive
+        // after the dlnaError emission and would otherwise overwrite it).
+        if (card === cardDlna && state == ProtocolState.ERROR && !lastDlnaError.isNullOrBlank()) {
+            detail.text = lastDlnaError
+        }
     }
 }
