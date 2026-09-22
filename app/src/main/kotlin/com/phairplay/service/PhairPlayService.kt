@@ -79,6 +79,10 @@ class PhairPlayService : Service() {
     private val _dlnaState = MutableStateFlow(ProtocolState.DISABLED)
     val dlnaState: StateFlow<ProtocolState> = _dlnaState.asStateFlow()
 
+    /** Last DLNA startup error (null when healthy); surfaced on the DLNA card. */
+    private val _dlnaError = MutableStateFlow<String?>(null)
+    val dlnaError: StateFlow<String?> = _dlnaError.asStateFlow()
+
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
@@ -343,10 +347,15 @@ class PhairPlayService : Service() {
             dlnaReceiver = DlnaReceiver(
                 context = applicationContext,
                 displayName = settings.effectiveDisplayName,
+                onError = { message ->
+                    _dlnaError.value = message
+                    Logger.e("DLNA error surfaced to UI: $message")
+                },
                 onStateChanged = { state ->
                     _dlnaState.value = state
                     when (state) {
                         ProtocolState.CONNECTED -> {
+                            _dlnaError.value = null
                             _activeConnection.value =
                                 ActiveConnection("DLNA Sender", Protocol.DLNA)
                             updateNotification(isRunning = true, streamingSenderName = "DLNA")
@@ -392,6 +401,7 @@ class PhairPlayService : Service() {
         _miracastState.value = ProtocolState.DISABLED
         _castState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED
+        _dlnaError.value = null
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

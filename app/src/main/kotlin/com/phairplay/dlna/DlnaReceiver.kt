@@ -61,7 +61,8 @@ import java.util.UUID
 class DlnaReceiver(
     private val context: Context,
     private val displayName: String,
-    private val onStateChanged: (ProtocolState) -> Unit
+    private val onStateChanged: (ProtocolState) -> Unit,
+    private val onError: (String) -> Unit = {}
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -145,9 +146,14 @@ class DlnaReceiver(
             Logger.i("DLNA renderer advertising as: $displayName")
             report(ProtocolState.ADVERTISING)
         } catch (e: Exception) {
+            // Report the actual failure instead of silently falling back to
+            // DISABLED, so the UI can show why the renderer is not up.
             Logger.e("DLNA startup failed", e)
+            onError(e.message ?: e.javaClass.simpleName)
+            releaseResources()
+            started = false
+            DlnaPlayerBridge.setControl(null)
             report(ProtocolState.ERROR)
-            stop()
         }
     }
 
@@ -156,7 +162,12 @@ class DlnaReceiver(
         if (!started) return
         started = false
         DlnaPlayerBridge.setControl(null)
+        releaseResources()
+        report(ProtocolState.DISABLED)
+    }
 
+    /** Releases everything owned by the receiver. Main thread only. */
+    private fun releaseResources() {
         try {
             upnpService?.shutdown()
         } catch (e: Exception) {
@@ -178,7 +189,6 @@ class DlnaReceiver(
         }
         player = null
         currentUri = null
-        report(ProtocolState.DISABLED)
     }
 
     /** Binds the player output to a SurfaceView (call when the UI shows DLNA playback). */
