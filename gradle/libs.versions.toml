@@ -34,6 +34,10 @@ ddplist = "1.28"
 
 # DLNA/UPnP — jUPnP (active fork of Cling) media renderer stack, CDDL-1.0
 jupnp = "3.0.3"
+# slf4j 1.7.x + slf4j-android: statically binds jUPnP logging to Logcat.
+# slf4j 2.x uses ServiceLoader-based provider discovery, which is unreliable
+# on Android and can surface as NoClassDefFoundError at runtime.
+slf4j = "1.7.36"
 
 # Media3 (ExoPlayer) — DLNA video playback (HLS / MP4 / DASH)
 media3 = "1.4.1"
@@ -76,6 +80,8 @@ ddplist = { group = "com.googlecode.plist", name = "dd-plist", version.ref = "dd
 jupnp = { group = "org.jupnp", name = "jupnp", version.ref = "jupnp" }
 jupnp-support = { group = "org.jupnp", name = "org.jupnp.support", version.ref = "jupnp" }
 jupnp-android = { group = "org.jupnp", name = "org.jupnp.android", version.ref = "jupnp" }
+slf4j-api = { group = "org.slf4j", name = "slf4j-api", version.ref = "slf4j" }
+slf4j-android = { group = "org.slf4j", name = "slf4j-android", version.ref = "slf4j" }
 
 # Media3 (ExoPlayer) — DLNA video playback
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }

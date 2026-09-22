@@ -223,9 +223,15 @@ dependencies {
     implementation(libs.ddplist)
 
     // DLNA/UPnP — jUPnP renderer stack (SSDP discovery + AVTransport control)
-    implementation(libs.jupnp)
-    implementation(libs.jupnp.support)
-    implementation(libs.jupnp.android)
+    // Exclude slf4j 2.x: its ServiceLoader-based provider discovery is
+    // unreliable on Android and can surface as NoClassDefFoundError at runtime.
+    // slf4j 1.7.x + slf4j-android statically binds logging to Logcat — the
+    // configuration jUPnP's own Android demo ships with.
+    implementation(libs.jupnp) { exclude(group = "org.slf4j") }
+    implementation(libs.jupnp.support) { exclude(group = "org.slf4j") }
+    implementation(libs.jupnp.android) { exclude(group = "org.slf4j") }
+    implementation(libs.slf4j.api)
+    implementation(libs.slf4j.android)
 
     // Media3 (ExoPlayer) — DLNA video playback (HLS / MP4 / DASH)
     implementation(libs.media3.exoplayer)
