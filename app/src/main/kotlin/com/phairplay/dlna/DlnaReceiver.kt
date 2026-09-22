@@ -19,7 +19,7 @@ import com.phairplay.util.Logger
 import org.jupnp.UpnpService
 import org.jupnp.UpnpServiceConfiguration
 import org.jupnp.UpnpServiceImpl
-import org.jupnp.android.AndroidUpnpServiceConfiguration
+import com.phairplay.dlna.transport.DlnaUpnpServiceConfiguration
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
 import org.jupnp.model.meta.DeviceDetails
 import org.jupnp.model.meta.DeviceIdentity
@@ -145,7 +145,7 @@ class DlnaReceiver(
             // the bound service crash on modern phones (whole-process crash).
             // Our router keeps the same stack but skips that receiver; failures
             // are caught below instead of killing the app.
-            val service = object : UpnpServiceImpl(AndroidUpnpServiceConfiguration()) {
+            val service = object : UpnpServiceImpl(DlnaUpnpServiceConfiguration()) {
                 override fun createRouter(
                     protocolFactory: ProtocolFactory,
                     registry: Registry
