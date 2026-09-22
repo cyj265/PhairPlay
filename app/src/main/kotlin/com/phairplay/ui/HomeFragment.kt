@@ -186,6 +186,13 @@ class HomeFragment : Fragment() {
                 updateDlnaPlaybackSurface(state)
             }
         }
+        viewLifecycleOwner.lifecycleScope.launch {
+            svc.dlnaError.collectLatest { error ->
+                if (!error.isNullOrBlank()) {
+                    cardDlna.findViewById<TextView>(R.id.text_protocol_detail)?.text = error
+                }
+            }
+        }
     }
 
     /**
