@@ -116,6 +116,16 @@
             android:exported="false" />
 
         <!--
+            jUPnP Android service — required by the DLNA media renderer.
+            The app binds to AndroidUpnpServiceImpl to advertise a UPnP/AV
+            renderer. exported="false": bound only from within this app by
+            DlnaReceiver.
+        -->
+        <service
+            android:name="org.jupnp.android.AndroidUpnpServiceImpl"
+            android:exported="false" />
+
+        <!--
             BootReceiver — listens for BOOT_COMPLETED and starts PhairPlayService
             if the "Start on boot" setting is enabled.
             exported="false" because it is only triggered by the system broadcast.
