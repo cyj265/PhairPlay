@@ -1,11 +1,7 @@
 package com.phairplay.dlna
 
-import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
 import android.net.wifi.WifiManager
-import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.view.SurfaceView
@@ -21,8 +17,9 @@ import com.phairplay.dlna.renderer.DlnaRendererStateMachine
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import org.jupnp.UpnpService
-import org.jupnp.android.AndroidUpnpService
-import org.jupnp.android.AndroidUpnpServiceImpl
+import org.jupnp.UpnpServiceConfiguration
+import org.jupnp.UpnpServiceImpl
+import org.jupnp.android.AndroidUpnpServiceConfiguration
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
 import org.jupnp.model.meta.DeviceDetails
 import org.jupnp.model.meta.DeviceIdentity
@@ -30,12 +27,16 @@ import org.jupnp.model.meta.LocalDevice
 import org.jupnp.model.meta.LocalService
 import org.jupnp.model.types.UDADeviceType
 import org.jupnp.model.types.UDN
+import org.jupnp.protocol.ProtocolFactory
+import org.jupnp.registry.Registry
 import org.jupnp.support.avtransport.impl.AVTransportService
 import org.jupnp.support.avtransport.lastchange.AVTransportLastChangeParser
 import org.jupnp.support.connectionmanager.ConnectionManagerService
 import org.jupnp.support.lastchange.LastChangeAwareServiceManager
 import org.jupnp.support.model.AVTransport
 import org.jupnp.support.renderingcontrol.lastchange.RenderingControlLastChangeParser
+import org.jupnp.transport.Router
+import org.jupnp.transport.RouterImpl
 import java.util.UUID
 
 /**
@@ -83,34 +84,7 @@ class DlnaReceiver(
     private var currentUri: String? = null
 
     private var upnpService: UpnpService? = null
-    private var upnpBound = false
     private var multicastLock: WifiManager.MulticastLock? = null
-
-    /**
-     * Connection to the jUPnP Android bound service. The actual [UpnpService]
-     * is only available after [ServiceConnection.onServiceConnected]; that is
-     * where the renderer device is registered and advertising starts.
-     */
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            try {
-                val upnp = (binder as AndroidUpnpService).get()
-                upnpService = upnp
-                upnp.registry.addDevice(createRendererDevice())
-                Logger.i("DLNA renderer advertising as: $displayName")
-                report(ProtocolState.ADVERTISING)
-            } catch (e: Exception) {
-                Logger.e("DLNA device registration failed", e)
-                report(ProtocolState.ERROR)
-                stop()
-            }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName) {
-            Logger.w("DLNA UpnpService disconnected")
-            upnpService = null
-        }
-    }
 
     /** Registers the UPnP renderer and starts advertising. Must be called on the main thread. */
     fun start() {
@@ -151,20 +125,25 @@ class DlnaReceiver(
             }
             player = exoPlayer
 
-            // The jUPnP UpnpService runs as an Android bound service; the renderer
-            // device is registered in onServiceConnected above.
-            val bound = context.bindService(
-                Intent(context, AndroidUpnpServiceImpl::class.java),
-                serviceConnection,
-                Context.BIND_AUTO_CREATE
-            )
-            if (!bound) {
-                Logger.e("DLNA: failed to bind AndroidUpnpServiceImpl")
-                report(ProtocolState.ERROR)
-                stop()
-                return
+            // Build the UPnP stack in-process instead of binding the stock
+            // AndroidUpnpServiceImpl: the stock AndroidRouter registers a
+            // ConnectivityBroadcastReceiver without the RECEIVER_EXPORTED/
+            // RECEIVER_NOT_EXPORTED flag that Android 13+ requires, which makes
+            // the bound service crash on modern phones (whole-process crash).
+            // Our router keeps the same stack but skips that receiver; failures
+            // are caught below instead of killing the app.
+            val service = object : UpnpServiceImpl(AndroidUpnpServiceConfiguration()) {
+                override fun createRouter(
+                    protocolFactory: ProtocolFactory,
+                    registry: Registry
+                ): Router {
+                    return SimpleAndroidRouter(configuration, protocolFactory)
+                }
             }
-            upnpBound = true
+            upnpService = service
+            service.registry.addDevice(createRendererDevice())
+            Logger.i("DLNA renderer advertising as: $displayName")
+            report(ProtocolState.ADVERTISING)
         } catch (e: Exception) {
             Logger.e("DLNA startup failed", e)
             report(ProtocolState.ERROR)
@@ -178,13 +157,10 @@ class DlnaReceiver(
         started = false
         DlnaPlayerBridge.setControl(null)
 
-        if (upnpBound) {
-            try {
-                context.unbindService(serviceConnection)
-            } catch (e: Exception) {
-                Logger.w("DLNA unbind warning: ${e.message}")
-            }
-            upnpBound = false
+        try {
+            upnpService?.shutdown()
+        } catch (e: Exception) {
+            Logger.w("DLNA shutdown warning: ${e.message}")
         }
         upnpService = null
 
@@ -328,3 +304,22 @@ class DlnaReceiver(
         )
     }
 }
+
+/**
+ * Router for the DLNA renderer's UPnP stack.
+ *
+ * Deliberately does NOT register a ConnectivityBroadcastReceiver: the stock
+ * jUPnP [org.jupnp.android.AndroidRouter] does so without the
+ * RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED flag that Android 13+ (API 33+)
+ * requires on dynamically registered receivers — that crashes the process on
+ * modern devices. It also skips NetworkUtils.getConnectedNetworkInfo(), a
+ * deprecated API that can return null on recent Android versions.
+ *
+ * The [DlnaReceiver] owns its own MulticastLock, so the router does not need
+ * the Wi-Fi lock management either; it still handles all SSDP/UDP socket
+ * binding and protocol dispatch via [RouterImpl].
+ */
+private class SimpleAndroidRouter(
+    configuration: UpnpServiceConfiguration,
+    protocolFactory: ProtocolFactory
+) : RouterImpl(configuration, protocolFactory)

@@ -32,10 +32,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
-    <!-- Miracast (Wi-Fi Direct / Wi-Fi P2P) -->
+    <!-- Miracast (Wi-Fi Direct / Wi-Fi P2P) and device discovery -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+        Android 13+ device discovery uses NEARBY_WIFI_DEVICES instead of legacy
+        location. Declaring any location permission would make the system ignore
+        NEARBY_WIFI_DEVICES entirely, so location is intentionally NOT declared:
+        the app only discovers and talks to Wi-Fi devices (DLNA/AirPlay/Miracast),
+        not geolocation. On Android 14+ NEARBY_WIFI_DEVICES is also the permission
+        required to start the connectedDevice foreground service.
+    -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
     <!-- Start on boot -->
@@ -113,16 +119,6 @@
         <service
             android:name=".service.PhairPlayService"
             android:foregroundServiceType="connectedDevice"
-            android:exported="false" />
-
-        <!--
-            jUPnP Android service — required by the DLNA media renderer.
-            The app binds to AndroidUpnpServiceImpl to advertise a UPnP/AV
-            renderer. exported="false": bound only from within this app by
-            DlnaReceiver.
-        -->
-        <service
-            android:name="org.jupnp.android.AndroidUpnpServiceImpl"
             android:exported="false" />
 
         <!--
