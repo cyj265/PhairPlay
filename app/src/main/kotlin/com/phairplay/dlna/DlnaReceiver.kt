@@ -141,6 +141,10 @@ class DlnaReceiver(
                     return SimpleAndroidRouter(configuration, protocolFactory)
                 }
             }
+            // UpnpServiceImpl's constructor only stores the configuration — the
+            // registry/router are created by startup(). Without it, registry is
+            // null and addDevice() below would NPE.
+            service.startup()
             upnpService = service
             service.registry.addDevice(createRendererDevice())
             Logger.i("DLNA renderer advertising as: $displayName")
@@ -149,7 +153,12 @@ class DlnaReceiver(
             // Report the actual failure instead of silently falling back to
             // DISABLED, so the UI can show why the renderer is not up.
             Logger.e("DLNA startup failed", e)
-            onError(e.message ?: e.javaClass.simpleName)
+            val where = e.stackTrace.firstOrNull()
+                ?.let { "${it.className}.${it.methodName}" }
+            onError(
+                "${e.javaClass.simpleName}: ${e.message}" +
+                    (where?.let { " @ $it" } ?: "")
+            )
             releaseResources()
             started = false
             DlnaPlayerBridge.setControl(null)
