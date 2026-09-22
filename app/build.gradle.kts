@@ -101,6 +101,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // Jetty 9.4 uses Java 8 APIs (java.util.function, stream, …); core
+        // library desugaring backports them so the Fire TV flavor (minSdk 25)
+        // can dex and run them on Android 7.
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -232,6 +236,9 @@ dependencies {
     implementation(libs.jupnp.android) { exclude(group = "org.slf4j") }
     implementation(libs.slf4j.api)
     implementation(libs.slf4j.android)
+
+    // Java 8 API backport for minSdk 25 (see compileOptions above)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     // Media3 (ExoPlayer) — DLNA video playback (HLS / MP4 / DASH)
     implementation(libs.media3.exoplayer)
