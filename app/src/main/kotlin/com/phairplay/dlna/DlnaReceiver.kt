@@ -1,7 +1,11 @@
 package com.phairplay.dlna
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.net.wifi.WifiManager
+import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.view.SurfaceView
@@ -16,9 +20,10 @@ import com.phairplay.dlna.renderer.DlnaPlayerControl
 import com.phairplay.dlna.renderer.DlnaRendererStateMachine
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
-import org.jupnp.android.AndroidUpnpServiceConfiguration
+import org.jupnp.UpnpService
+import org.jupnp.android.AndroidUpnpService
+import org.jupnp.android.AndroidUpnpServiceImpl
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
-import org.jupnp.UpnpServiceImpl
 import org.jupnp.model.meta.DeviceDetails
 import org.jupnp.model.meta.DeviceIdentity
 import org.jupnp.model.meta.LocalDevice
@@ -77,8 +82,35 @@ class DlnaReceiver(
     @Volatile
     private var currentUri: String? = null
 
-    private var upnpService: UpnpServiceImpl? = null
+    private var upnpService: UpnpService? = null
+    private var upnpBound = false
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    /**
+     * Connection to the jUPnP Android bound service. The actual [UpnpService]
+     * is only available after [ServiceConnection.onServiceConnected]; that is
+     * where the renderer device is registered and advertising starts.
+     */
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            try {
+                val upnp = (binder as AndroidUpnpService).get()
+                upnpService = upnp
+                upnp.registry.addDevice(createRendererDevice())
+                Logger.i("DLNA renderer advertising as: $displayName")
+                report(ProtocolState.ADVERTISING)
+            } catch (e: Exception) {
+                Logger.e("DLNA device registration failed", e)
+                report(ProtocolState.ERROR)
+                stop()
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            Logger.w("DLNA UpnpService disconnected")
+            upnpService = null
+        }
+    }
 
     /** Registers the UPnP renderer and starts advertising. Must be called on the main thread. */
     fun start() {
@@ -119,11 +151,20 @@ class DlnaReceiver(
             }
             player = exoPlayer
 
-            val service = UpnpServiceImpl(AndroidUpnpServiceConfiguration())
-            upnpService = service
-            service.registry.addDevice(createRendererDevice())
-            Logger.i("DLNA renderer advertising as: $displayName")
-            report(ProtocolState.ADVERTISING)
+            // The jUPnP UpnpService runs as an Android bound service; the renderer
+            // device is registered in onServiceConnected above.
+            val bound = context.bindService(
+                Intent(context, AndroidUpnpServiceImpl::class.java),
+                serviceConnection,
+                Context.BIND_AUTO_CREATE
+            )
+            if (!bound) {
+                Logger.e("DLNA: failed to bind AndroidUpnpServiceImpl")
+                report(ProtocolState.ERROR)
+                stop()
+                return
+            }
+            upnpBound = true
         } catch (e: Exception) {
             Logger.e("DLNA startup failed", e)
             report(ProtocolState.ERROR)
@@ -137,10 +178,13 @@ class DlnaReceiver(
         started = false
         DlnaPlayerBridge.setControl(null)
 
-        try {
-            upnpService?.shutdown()
-        } catch (e: Exception) {
-            Logger.w("DLNA shutdown warning: ${e.message}")
+        if (upnpBound) {
+            try {
+                context.unbindService(serviceConnection)
+            } catch (e: Exception) {
+                Logger.w("DLNA unbind warning: ${e.message}")
+            }
+            upnpBound = false
         }
         upnpService = null
 
