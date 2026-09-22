@@ -6,24 +6,35 @@
     ┌──────────────────────────────────────────────────────────┐
     │  "Ready for connections"           [●] Service Running   │
     │                                                          │
-    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
-    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 Cast    │       │
-    │  │  ●Running   │ │  ●Running   │ │  ●Running   │       │
-    │  │  Waiting... │ │  Waiting... │ │  Waiting... │       │
-    │  └─────────────┘ └─────────────┘ └─────────────┘       │
+    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐        │
+    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 Cast    │        │
+    │  │  ●Running   │ │  ●Running   │ │  ●Running   │        │
+    │  │  Waiting... │ │  Waiting... │ │  Waiting... │        │
+    │  └─────────────┘ └─────────────┘ └─────────────┘        │
+    │  ┌─────────────┐                                        │
+    │  │  🟠 DLNA    │  (phone video-app casting)             │
+    │  └─────────────┘                                        │
     │                                                          │
     │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
     │  │  ▶ Start │  │  ■ Stop  │  │  ↺ Restart│             │
     │  └──────────┘  └──────────┘  └──────────┘              │
     └──────────────────────────────────────────────────────────┘
+
+    The root is a FrameLayout so a full-screen SurfaceView can be stacked
+    on top of the scroll content while DLNA video is playing.
 -->
-<ScrollView
+<FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/background_dark"
-    android:fillViewport="true">
+    android:background="@color/background_dark">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/background_dark"
+        android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -134,6 +145,15 @@
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="12dp" />
+
+            <!-- DLNA card -->
+            <include
+                android:id="@+id/card_dlna"
+                layout="@layout/card_protocol_status"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1" />
 
         </LinearLayout>
@@ -197,4 +217,14 @@
         </LinearLayout>
 
     </LinearLayout>
-</ScrollView>
+    </ScrollView>
+
+    <!-- DLNA video playback surface — stacked above the scroll content, hidden
+         until a phone app starts casting; shown while DLNA is playing. -->
+    <SurfaceView
+        android:id="@+id/surface_dlna"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+</FrameLayout>

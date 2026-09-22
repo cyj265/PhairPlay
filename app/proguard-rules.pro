@@ -21,3 +21,19 @@
 -keepattributes SourceFile,LineNumberTable
 -keep public class * extends android.app.Activity
 -keep public class * extends android.app.Service
+
+# ─── DLNA / UPnP (jUPnP) ───────────────────────────────────────────────
+# jUPnP relies heavily on reflection: annotation-driven service binding,
+# the seamless-style state-machine (dynamically generated classes), and
+# registry lookups by class name. Everything must keep its exact name.
+-keep class org.jupnp.** { *; }
+-dontwarn org.jupnp.**
+
+# DLNA renderer state machines (instantiated reflectively by jUPnP)
+-keep class com.phairplay.dlna.renderer.** { *; }
+
+# ─── Media3 / ExoPlayer ─────────────────────────────────────────────────
+# Media3 ships its own consumer ProGuard rules; keep any reflection entry
+# points it relies on.
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**

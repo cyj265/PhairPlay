@@ -9,13 +9,18 @@ import android.content.Context
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.view.Surface
+import android.view.SurfaceView
 import androidx.core.app.NotificationCompat
+import androidx.media3.exoplayer.ExoPlayer
 import com.phairplay.MainActivity
 import com.phairplay.R
-import android.view.Surface
 import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.cast.CastReceiver
+import com.phairplay.dlna.DlnaReceiver
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -71,6 +76,9 @@ class PhairPlayService : Service() {
     private val _castState = MutableStateFlow(ProtocolState.DISABLED)
     val castState: StateFlow<ProtocolState> = _castState.asStateFlow()
 
+    private val _dlnaState = MutableStateFlow(ProtocolState.DISABLED)
+    val dlnaState: StateFlow<ProtocolState> = _dlnaState.asStateFlow()
+
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
@@ -94,6 +102,11 @@ class PhairPlayService : Service() {
     private var airPlayReceiver: AirPlayReceiver? = null
     private var miracastReceiver: MiracastReceiver? = null
     private var castReceiver: CastReceiver? = null
+    private var dlnaReceiver: DlnaReceiver? = null
+
+    // DLNA needs the main thread (ExoPlayer + Cling creation); service starts receivers
+    // from an IO coroutine, so dispatch DLNA lifecycle through the main handler.
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // Settings — read once when starting, re-read on restart
     private lateinit var settingsRepository: SettingsRepository
@@ -178,7 +191,7 @@ class PhairPlayService : Service() {
      */
     private suspend fun startReceivers() {
         val settings = settingsRepository.settingsFlow.first()
-        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}")
+        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
 
         _serviceState.value = ServiceState.Running
         updateNotification(isRunning = true)
@@ -186,6 +199,7 @@ class PhairPlayService : Service() {
         if (settings.airPlayEnabled)   startAirPlay(settings)
         if (settings.miracastEnabled)  startMiracast()
         if (settings.castEnabled)      startCast()
+        if (settings.dlnaEnabled)      startDlna(settings)
     }
 
     /**
@@ -313,16 +327,71 @@ class PhairPlayService : Service() {
         Logger.d("Cast receiver started")
     }
 
+    /**
+     * Creates and starts the [DlnaReceiver] on the main thread.
+     *
+     * ExoPlayer and the Cling UpnpService must be created on the main thread, so
+     * unlike the other receivers this one is dispatched via [mainHandler].
+     * Idempotent like the others: a redundant start while already running is skipped.
+     */
+    private fun startDlna(settings: AppSettings) {
+        mainHandler.post {
+            if (dlnaReceiver != null) {
+                Logger.i("DLNA receiver already running — skipping duplicate start")
+                return@post
+            }
+            dlnaReceiver = DlnaReceiver(
+                context = applicationContext,
+                displayName = settings.effectiveDisplayName,
+                onStateChanged = { state ->
+                    _dlnaState.value = state
+                    when (state) {
+                        ProtocolState.CONNECTED -> {
+                            _activeConnection.value =
+                                ActiveConnection("DLNA Sender", Protocol.DLNA)
+                            updateNotification(isRunning = true, streamingSenderName = "DLNA")
+                        }
+                        ProtocolState.ADVERTISING,
+                        ProtocolState.DISABLED,
+                        ProtocolState.ERROR       -> {
+                            _activeConnection.value = null
+                            updateNotification(isRunning = state != ProtocolState.DISABLED &&
+                                                           state != ProtocolState.ERROR)
+                        }
+                    }
+                }
+            ).also { it.start() }
+            Logger.d("DLNA receiver started (displayName='${settings.effectiveDisplayName}')")
+        }
+    }
+
+    /** Exposes the DLNA player so the UI can attach a SurfaceView for video rendering. */
+    val dlnaPlayer: ExoPlayer?
+        get() = dlnaReceiver?.playerOrNull
+
+    /** Attaches the DLNA player output to the given SurfaceView (main thread). */
+    fun attachDlnaSurface(surfaceView: SurfaceView) {
+        dlnaReceiver?.attachSurface(surfaceView)
+    }
+
+    /** Detaches the DLNA player output (main thread). */
+    fun detachDlnaSurface() {
+        dlnaReceiver?.detachSurface()
+    }
+
     private fun stopAllReceiversInternal() {
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }
         try { castReceiver?.stop() } catch (e: Exception) { Logger.e("Cast stop error", e) }
+        try { dlnaReceiver?.stop() } catch (e: Exception) { Logger.e("DLNA stop error", e) }
         airPlayReceiver = null
         miracastReceiver = null
         castReceiver = null
+        dlnaReceiver = null
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
         _castState.value = ProtocolState.DISABLED
+        _dlnaState.value = ProtocolState.DISABLED
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

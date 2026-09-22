@@ -163,7 +163,10 @@ android {
             "UnusedResources",
             // Advisory: the project deliberately supports a wide API range for old TVs;
             // targetSdk is bumped deliberately, not on every new platform release.
-            "OldTargetApi"
+            "OldTargetApi",
+            // Media3's @UnstableApi opt-in is correctly annotated at compile time
+            // (class-level @OptIn); the lint checker falsely flags usage inside lambdas.
+            "UnsafeOptInUsageError"
         )
     }
 
@@ -218,6 +221,16 @@ dependencies {
 
     // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
     implementation(libs.ddplist)
+
+    // DLNA/UPnP — jUPnP renderer stack (SSDP discovery + AVTransport control)
+    implementation(libs.jupnp)
+    implementation(libs.jupnp.support)
+    implementation(libs.jupnp.android)
+
+    // Media3 (ExoPlayer) — DLNA video playback (HLS / MP4 / DASH)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.exoplayer.hls)
+    implementation(libs.media3.ui)
 
     // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
     // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.

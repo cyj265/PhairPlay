@@ -74,7 +74,7 @@ data class ActiveConnection(
         get() = (System.currentTimeMillis() - startedAt) / 1000L
 }
 
-/** Identifies one of the three supported protocols. */
+/** Identifies one of the supported protocols. */
 enum class Protocol {
-    AIRPLAY, MIRACAST, CAST
+    AIRPLAY, MIRACAST, CAST, DLNA
 }

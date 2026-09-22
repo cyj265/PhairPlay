@@ -49,6 +49,14 @@ data class AppSettings(
      */
     val castEnabled: Boolean = true,
 
+    /**
+     * Whether the DLNA/UPnP MediaRenderer receiver is enabled.
+     * When true: the device advertises as a DLNA renderer via SSDP so phone
+     * video apps (Bilibili, Tencent Video, iQiyi, YouTube…) can cast to it.
+     * When false: SSDP advertisement and the UPnP HTTP control point are stopped.
+     */
+    val dlnaEnabled: Boolean = true,
+
     // ─── AirPlay specific ──────────────────────────────────────────────────
     /**
      * Whether AirPlay connections require PIN authentication.
@@ -106,10 +114,10 @@ data class AppSettings(
 
     /**
      * Returns true if at least one protocol is enabled.
-     * If all three are disabled, the service has nothing to do.
+     * If all are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || miracastEnabled || castEnabled
+        get() = airPlayEnabled || miracastEnabled || castEnabled || dlnaEnabled
 
     companion object {
         /** The default settings instance used on first launch. */

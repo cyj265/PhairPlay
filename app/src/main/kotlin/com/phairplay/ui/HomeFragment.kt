@@ -66,6 +66,8 @@ class HomeFragment : Fragment() {
     private lateinit var cardAirPlay: View
     private lateinit var cardMiracast: View
     private lateinit var cardCast: View
+    private lateinit var cardDlna: View
+    private lateinit var surfaceDlna: android.view.SurfaceView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRestart: Button
@@ -105,6 +107,8 @@ class HomeFragment : Fragment() {
         cardAirPlay      = view.findViewById(R.id.card_airplay)
         cardMiracast     = view.findViewById(R.id.card_miracast)
         cardCast         = view.findViewById(R.id.card_cast)
+        cardDlna         = view.findViewById(R.id.card_dlna)
+        surfaceDlna      = view.findViewById(R.id.surface_dlna)
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
@@ -115,9 +119,10 @@ class HomeFragment : Fragment() {
      * The dynamic parts (state, detail text) are updated when service state changes.
      */
     private fun configureProtocolCards() {
-        setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
-        setupCard(cardMiracast,  R.drawable.ic_miracast, R.string.protocol_miracast)
-        setupCard(cardCast,      R.drawable.ic_cast,     R.string.protocol_cast)
+        setupCard(cardAirPlay,  R.drawable.ic_airplay,  R.string.protocol_airplay)
+        setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast)
+        setupCard(cardCast,     R.drawable.ic_cast,     R.string.protocol_cast)
+        setupCard(cardDlna,     R.drawable.ic_dlna,     R.string.protocol_dlna)
     }
 
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
@@ -174,6 +179,30 @@ class HomeFragment : Fragment() {
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state) }
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            svc.dlnaState.collectLatest { state ->
+                updateProtocolCard(cardDlna, state)
+                updateDlnaPlaybackSurface(state)
+            }
+        }
+    }
+
+    /**
+     * Shows/hides the full-screen DLNA video surface.
+     *
+     * While a phone video app is casting (CONNECTED), the SurfaceView is made
+     * visible and handed to the DLNA player; as soon as the cast ends or the
+     * protocol stops, the surface is hidden and detached so the home UI returns.
+     */
+    private fun updateDlnaPlaybackSurface(state: ProtocolState) {
+        val svc = service ?: return
+        if (state == ProtocolState.CONNECTED) {
+            surfaceDlna.visibility = View.VISIBLE
+            svc.attachDlnaSurface(surfaceDlna)
+        } else {
+            surfaceDlna.visibility = View.GONE
+            svc.detachDlnaSurface()
         }
     }
 

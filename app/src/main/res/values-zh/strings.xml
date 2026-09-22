@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    strings.xml — 简体中文 (zh)
+
+    只需列出与英文不同的字符串；缺失的字符串会自动回退到英文基础文件。
+-->
+<resources>
+
+    <!-- ── 应用全局 ────────────────────────────────────────────── -->
+    <string name="app_name">PhairPlay</string>
+
+    <!-- ── 导航 ────────────────────────────────────────────────── -->
+    <string name="nav_home">首页</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- ── 首页 ────────────────────────────────────────────────── -->
+    <string name="home_title">已就绪，等待连接</string>
+    <!-- %1$s = 投屏设备列表中显示的设备名 -->
+    <string name="home_device_visible_as">显示为：%1$s</string>
+
+    <!-- ── 协议名称 ────────────────────────────────────────────── -->
+    <string name="protocol_airplay">AirPlay</string>
+    <string name="protocol_miracast">Miracast</string>
+    <string name="protocol_cast">Cast</string>
+    <string name="protocol_dlna">DLNA</string>
+
+    <!-- ── 协议状态（状态卡片显示） ─────────────────────────────── -->
+    <string name="protocol_state_disabled">已停用</string>
+    <string name="protocol_state_advertising">广播中</string>
+    <string name="protocol_state_connected">已连接</string>
+    <string name="protocol_state_error">错误</string>
+
+    <!-- ── 协议卡片详情 ────────────────────────────────────────── -->
+    <string name="protocol_detail_disabled">请在设置中启用</string>
+    <string name="protocol_detail_waiting">等待投屏设备…</string>
+    <!-- %1$s = 投屏设备名称 -->
+    <string name="protocol_detail_connected">正在接收 %1$s 的投屏</string>
+    <string name="protocol_detail_error">请检查 Wi-Fi 设置</string>
+
+    <!-- ── 服务状态（顶部角标） ────────────────────────────────── -->
+    <string name="service_state_running">运行中</string>
+    <string name="service_state_stopped">已停止</string>
+    <string name="service_state_restarting">正在重启…</string>
+    <string name="service_state_error">错误</string>
+
+    <!-- ── 区块标题 ────────────────────────────────────────────── -->
+    <string name="section_protocols">投屏协议</string>
+    <string name="section_controls">服务控制</string>
+
+    <!-- ── 控制按钮 ────────────────────────────────────────────── -->
+    <string name="action_start">启动</string>
+    <string name="action_stop">停止</string>
+    <string name="action_restart">重启</string>
+
+    <!-- ── 通知 ────────────────────────────────────────────────── -->
+    <string name="notification_channel_name">PhairPlay 服务</string>
+    <string name="notification_channel_description">AirPlay/Miracast/Cast 投屏接收服务的常驻通知</string>
+    <string name="notification_status_running">接收服务运行中——正在局域网广播</string>
+    <string name="notification_status_stopped">接收服务已停止</string>
+    <!-- %1$s = 投屏设备名称 -->
+    <string name="notification_status_streaming">正在接收 %1$s 的投屏</string>
+
+    <!-- ── 设置区块标题 ────────────────────────────────────────── -->
+    <string name="settings_section_display">显示</string>
+    <string name="settings_section_protocols">投屏协议</string>
+    <string name="settings_section_airplay">AirPlay</string>
+    <string name="settings_section_service">服务</string>
+    <string name="settings_section_developer">开发者</string>
+    <string name="settings_section_about">关于</string>
+
+    <!-- ── 设置项标签 ──────────────────────────────────────────── -->
+    <string name="setting_display_name">设备名称</string>
+    <string name="setting_display_name_system_default">使用系统设备名称</string>
+    <string name="setting_display_name_dialog_hint">留空则使用系统设备名称</string>
+    <string name="setting_display_name_reset">恢复默认</string>
+    <!-- %1$s = 实际注册的 mDNS 名称（冲突时可能与输入不同） -->
+    <string name="setting_display_name_collision_note">已注册为：%1$s</string>
+    <string name="setting_airplay_enabled">AirPlay 接收器</string>
+    <string name="setting_airplay_subtitle">接受来自 macOS 的连接</string>
+    <string name="setting_miracast_enabled">Miracast 接收器</string>
+    <string name="setting_miracast_subtitle">接受来自 Windows 和 Android 的连接</string>
+    <string name="setting_cast_enabled">Google Cast 接收器</string>
+    <string name="setting_cast_subtitle">接受来自 Chrome 和 Android 的连接</string>
+    <string name="setting_dlna_enabled">DLNA 接收器</string>
+    <string name="setting_dlna_subtitle">接收手机 App 的视频投屏（B站、腾讯视频等）</string>
+    <string name="setting_mirror_audio">镜像音频</string>
+    <string name="setting_mirror_audio_subtitle">镜像时同步播放 Mac 的声音</string>
+    <string name="setting_pin_auth">需要配对 PIN</string>
+    <string name="setting_pin_auth_subtitle">在电视上显示验证码，连接前需输入</string>
+    <string name="setting_start_on_boot">开机自启</string>
+    <string name="setting_debug_overlay">调试信息浮层</string>
+    <string name="setting_debug_overlay_subtitle">投屏时实时显示 FPS、队列与丢帧统计</string>
+    <string name="setting_force_high_res">高分辨率（1440p）</string>
+    <string name="setting_force_high_res_subtitle">镜像更清晰；更耗 CPU。关闭 = 1080p</string>
+    <string name="setting_version">版本</string>
+    <string name="setting_reset_defaults">恢复默认设置</string>
+
+    <!-- ── 等待界面 ────────────────────────────────────────────── -->
+    <string name="waiting_title">已就绪，等待 AirPlay</string>
+    <string name="waiting_subtitle">在 Mac 上打开 AirPlay 并选择此设备</string>
+    <string name="waiting_device_label">本设备：</string>
+    <string name="streaming_hint">按返回键停止投屏</string>
+
+    <!-- ── 正在播放（纯音频界面） ──────────────────────────────── -->
+    <string name="now_playing_audio">正在播放音频</string>
+    <string name="now_playing_from">音频来自 %1$s</string>
+
+    <!-- ── 配对 PIN（访问控制） ────────────────────────────────── -->
+    <string name="pairing_pin_title">AirPlay 配对码</string>
+    <string name="pairing_pin_hint">在设备上输入此配对码以连接</string>
+
+    <!-- ── 错误提示 ────────────────────────────────────────────── -->
+    <string name="error_network_unavailable">未连接 Wi-Fi。请连接 Wi-Fi。</string>
+    <string name="error_mdns_failed">局域网广播失败。</string>
+    <string name="error_wifi_p2p_unavailable">此设备不支持 Miracast。</string>
+    <string name="error_cast_unavailable">Google Cast 需要 Google Play 服务（此设备不可用）。</string>
+
+    <!-- ── 无障碍 ──────────────────────────────────────────────── -->
+    <string name="content_desc_airplay_icon">AirPlay 协议图标</string>
+    <string name="content_desc_miracast_icon">Miracast 协议图标</string>
+    <string name="content_desc_cast_icon">Google Cast 协议图标</string>
+    <string name="content_desc_status_dot">状态指示点</string>
+
+</resources>
