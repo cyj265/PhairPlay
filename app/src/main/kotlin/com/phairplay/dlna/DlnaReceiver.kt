@@ -67,6 +67,18 @@ class DlnaReceiver(
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    init {
+        installCrashGuard { throwable ->
+            val where = throwable.stackTrace.firstOrNull()
+                ?.let { "${it.className}.${it.methodName}" }
+            onError(
+                "${throwable.javaClass.simpleName}: ${throwable.message}" +
+                    (where?.let { " @ $it" } ?: "")
+            )
+            mainHandler.post { report(ProtocolState.ERROR) }
+        }
+    }
+
     /**
      * The ExoPlayer instance, created lazily on the main thread by [start].
      * Exposed so the UI can attach a SurfaceView via [attachSurface].
@@ -149,14 +161,16 @@ class DlnaReceiver(
             service.registry.addDevice(createRendererDevice())
             Logger.i("DLNA renderer advertising as: $displayName")
             report(ProtocolState.ADVERTISING)
-        } catch (e: Exception) {
-            // Report the actual failure instead of silently falling back to
-            // DISABLED, so the UI can show why the renderer is not up.
-            Logger.e("DLNA startup failed", e)
-            val where = e.stackTrace.firstOrNull()
+        } catch (t: Throwable) {
+            // Catch Throwable, not just Exception: on modern Android the old
+            // jUPnP stack can fail with Error subclasses (NoSuchMethodError,
+            // ExceptionInInitializerError, …) which would otherwise crash the
+            // process. Surface the failure on the card instead.
+            Logger.e("DLNA startup failed", t)
+            val where = t.stackTrace.firstOrNull()
                 ?.let { "${it.className}.${it.methodName}" }
             onError(
-                "${e.javaClass.simpleName}: ${e.message}" +
+                "${t.javaClass.simpleName}: ${t.message}" +
                     (where?.let { " @ $it" } ?: "")
             )
             releaseResources()
@@ -179,8 +193,8 @@ class DlnaReceiver(
     private fun releaseResources() {
         try {
             upnpService?.shutdown()
-        } catch (e: Exception) {
-            Logger.w("DLNA shutdown warning: ${e.message}")
+        } catch (t: Throwable) {
+            Logger.w("DLNA shutdown warning: ${t.message}")
         }
         upnpService = null
 
@@ -191,10 +205,14 @@ class DlnaReceiver(
         }
         multicastLock = null
 
-        player?.let { p ->
-            p.stop()
-            p.clearMediaItems()
-            p.release()
+        try {
+            player?.let { p ->
+                p.stop()
+                p.clearMediaItems()
+                p.release()
+            }
+        } catch (e: Exception) {
+            Logger.w("ExoPlayer release warning: ${e.message}")
         }
         player = null
         currentUri = null
@@ -321,6 +339,39 @@ class DlnaReceiver(
             DeviceDetails(displayName.ifBlank { "PhairPlay" }),
             arrayOf<LocalService<*>>(avService, renderService, connService)
         )
+    }
+
+    companion object {
+        @Volatile
+        private var crashGuardInstalled = false
+
+        /**
+         * Installs a default uncaught-exception handler that intercepts crashes
+         * originating from the (old) jUPnP stack — its background threads can
+         * throw on modern Android and would otherwise take down the process.
+         * Crashes from any other code keep the platform default behaviour.
+         */
+        private fun installCrashGuard(instanceHandler: (Throwable) -> Unit) {
+            if (crashGuardInstalled) return
+            synchronized(this) {
+                if (crashGuardInstalled) return
+                val default = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                    val fromJupnp = throwable.stackTrace.any {
+                        it.className.startsWith("org.jupnp")
+                    }
+                    if (fromJupnp) {
+                        Logger.e("jUPnP thread crashed (${thread.name})", throwable)
+                        Handler(Looper.getMainLooper()).post {
+                            instanceHandler(throwable)
+                        }
+                    } else {
+                        default?.uncaughtException(thread, throwable)
+                    }
+                }
+                crashGuardInstalled = true
+            }
+        }
     }
 }
 
