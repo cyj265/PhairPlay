@@ -46,8 +46,10 @@ object NetworkUtils {
             ?: Settings.Secure.getString(context.contentResolver, "bluetooth_name")
             ?: DEFAULT_DEVICE_NAME
 
-        // Sanitize: keep only safe characters for mDNS service names
-        val sanitized = rawName.replace(Regex("[^A-Za-z0-9 _\\-]"), "").trim()
+        // Sanitize: keep Unicode letters/digits (Chinese device names included)
+        // plus space/underscore/hyphen — these are all valid in mDNS service
+        // names (RFC 6763 allows arbitrary UTF-8) and in DLNA device names.
+        val sanitized = rawName.replace(Regex("[^\\p{L}\\p{N} _\\-]"), "").trim()
 
         return sanitized.ifEmpty { DEFAULT_DEVICE_NAME }
     }
