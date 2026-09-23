@@ -108,6 +108,30 @@ public class AndroidUpnpStream extends UpnpStream {
                 DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 200 事件订阅(手动) sid=" + sid);
                 socket.getOutputStream().write(resp.getBytes("UTF-8"));
                 socket.getOutputStream().flush();
+                // Remember the subscriber's callback URL and push the initial
+                // LastChange event — Windows stalls the cast without it.
+                if ("SUBSCRIBE".equals(request.method)) {
+                    String callback = null;
+                    if (request.headers != null) {
+                        for (java.util.Map.Entry<String, java.util.List<String>> e : request.headers.entrySet()) {
+                            if ("CALLBACK".equalsIgnoreCase(e.getKey())) {
+                                java.util.List<String> vals = e.getValue();
+                                if (vals != null && !vals.isEmpty()) {
+                                    callback = vals.get(0);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (callback != null) {
+                        int s = callback.indexOf('<');
+                        int e2 = callback.indexOf('>');
+                        if (s >= 0 && e2 > s) {
+                            callback = callback.substring(s + 1, e2).trim();
+                        }
+                    }
+                    GenaNotifier.register(callback, sid);
+                }
                 return;
             }
             DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");

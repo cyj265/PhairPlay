@@ -49,6 +49,10 @@ public final class ManualDlnaHttp {
     private ManualDlnaHttp() {
     }
 
+    public static String getTransportState() {
+        return transportState;
+    }
+
     public static boolean isDeviceDesc(String path) {
         return (BASE + "/desc").equals(path);
     }
@@ -403,6 +407,7 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "PLAYING";
+                GenaNotifier.push();
                 return avtResponse("PlayResponse", "");
             }
             case "Pause": {
@@ -414,6 +419,7 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "PAUSED_PLAYBACK";
+                GenaNotifier.push();
                 return avtResponse("PauseResponse", "");
             }
             case "Stop": {
@@ -426,6 +432,7 @@ public final class ManualDlnaHttp {
                 }
                 transportState = "STOPPED";
                 positionSeconds = 0;
+                GenaNotifier.push();
                 return avtResponse("StopResponse", "");
             }
             case "Seek": {
