@@ -82,7 +82,7 @@ public final class ManualDlnaHttp {
 
     public static String deviceDescriptorXml() {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-            + "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">\n"
+            + "<root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">\n"
             + "  <specVersion><major>1</major><minor>0</minor></specVersion>\n"
             + "  <device>\n"
             + "    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>\n"
@@ -92,6 +92,8 @@ public final class ManualDlnaHttp {
             + "    <modelDescription>PhairPlay DLNA Media Renderer</modelDescription>\n"
             + "    <modelName>PhairPlay</modelName>\n"
             + "    <modelNumber>1.0</modelNumber>\n"
+            + "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
+            + "    <dlna:X_DLNACAP>av-upload,av-download</dlna:X_DLNACAP>\n"
             + "    <UDN>uuid:" + UDN + "</UDN>\n"
             + "    <serviceList>\n"
             + serviceEntry(AVT, "AVTransport")
@@ -537,7 +539,9 @@ public final class ManualDlnaHttp {
             case "GetProtocolInfo": {
                 return cmResponse("GetProtocolInfoResponse",
                     "<Source></Source>"
-                        + "<Sink>http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-msvideo:*,http-get:*:video/quicktime:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-wav:*</Sink>");
+                        + "<Sink>http-get:*:video/*:*,http-get:*:audio/*:*,http-get:*:application/octet-stream:*,"
+                        + "http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-msvideo:*,"
+                        + "http-get:*:video/quicktime:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-wav:*</Sink>");
             }
             case "GetCurrentConnectionIDs": {
                 return cmResponse("GetCurrentConnectionIDsResponse", "<ConnectionIDs>0</ConnectionIDs>");
