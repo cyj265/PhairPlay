@@ -39,6 +39,7 @@ public final class ManualDlnaHttp {
 
     private static final Pattern P_ACTION = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z_][\\w]*)");
     private static final Pattern P_TAG = Pattern.compile("<([A-Za-z0-9_]+)>([^<]*)</\\1>");
+    private static final Pattern P_TAG_NS = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z0-9_]+)>([^<]*)</[A-Za-z_][\\w.-]*:\\2>");
 
     private static volatile String currentUri = "";
     private static volatile String transportState = "NO_MEDIA_PRESENT"; // NO_MEDIA_PRESENT/STOPPED/PLAYING/PAUSED_PLAYBACK
@@ -380,6 +381,7 @@ public final class ManualDlnaHttp {
             case "SetAVTransportURI": {
                 String uri = tag(body, "CurrentURI");
                 if (uri == null || uri.isEmpty()) {
+                    DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI 提取失败 body=" + safeBodyPreview(body));
                     return null;
                 }
                 currentUri = uri;
@@ -619,6 +621,14 @@ public final class ManualDlnaHttp {
         while (m.find()) {
             if (name.equals(m.group(1))) {
                 String v = m.group(2);
+                return v == null ? "" : v;
+            }
+        }
+        // Some control points namespace the arguments, e.g. <u:CurrentURI>.
+        Matcher pm = P_TAG_NS.matcher(body);
+        while (pm.find()) {
+            if (name.equals(pm.group(2))) {
+                String v = pm.group(3);
                 return v == null ? "" : v;
             }
         }
