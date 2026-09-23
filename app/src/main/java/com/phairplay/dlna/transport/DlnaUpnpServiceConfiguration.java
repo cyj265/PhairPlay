@@ -2,6 +2,8 @@ package com.phairplay.dlna.transport;
 
 import org.jupnp.android.AndroidUpnpServiceConfiguration;
 import org.jupnp.transport.impl.jetty.StreamClientConfigurationImpl;
+import org.jupnp.transport.spi.DatagramIO;
+import org.jupnp.transport.spi.MulticastReceiver;
 import org.jupnp.transport.spi.NetworkAddressFactory;
 import org.jupnp.transport.spi.StreamClient;
 import org.jupnp.transport.spi.StreamServer;
@@ -37,5 +39,23 @@ public class DlnaUpnpServiceConfiguration extends AndroidUpnpServiceConfiguratio
     @SuppressWarnings("rawtypes")
     public StreamServer createStreamServer(NetworkAddressFactory networkAddressFactory) {
         return new AndroidStreamServer(STREAM_LISTEN_PORT);
+    }
+
+    /**
+     * SSDP discovery is handled manually by {@link ManualSsdp} (NOTIFY alive
+     * + M-SEARCH responses). jUPnP's multicast/ datagram layers are disabled
+     * so that only our listener owns UDP :1900 and the device is discoverable
+     * even if the jUPnP registry lookup misbehaves at runtime.
+     */
+    @Override
+    @SuppressWarnings("rawtypes")
+    public MulticastReceiver createMulticastReceiver(NetworkAddressFactory networkAddressFactory) {
+        return null;
+    }
+
+    @Override
+    @SuppressWarnings("rawtypes")
+    public DatagramIO createDatagramIO(NetworkAddressFactory networkAddressFactory) {
+        return null;
     }
 }

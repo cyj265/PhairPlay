@@ -20,6 +20,8 @@ import org.jupnp.UpnpService
 import org.jupnp.UpnpServiceConfiguration
 import org.jupnp.UpnpServiceImpl
 import com.phairplay.dlna.transport.DlnaUpnpServiceConfiguration
+import com.phairplay.dlna.transport.ManualSsdp
+import com.phairplay.util.NetworkUtils
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
 import org.jupnp.model.meta.DeviceDetails
 import org.jupnp.model.meta.DeviceIdentity
@@ -98,6 +100,7 @@ class DlnaReceiver(
 
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var manualSsdp: ManualSsdp? = null
 
     /** Registers the UPnP renderer and starts advertising. Must be called on the main thread. */
     fun start() {
@@ -113,6 +116,19 @@ class DlnaReceiver(
             multicastLock = wifiManager.createMulticastLock("phairplay_dlna").apply {
                 setReferenceCounted(false)
                 acquire()
+            }
+
+            // Manual SSDP: announce NOTIFY alive + answer M-SEARCH ourselves,
+            // so discovery does not depend on jUPnP's runtime registry lookup
+            // (which misbehaved for HTTP and could equally break discovery).
+            try {
+                val ip = NetworkUtils.getLocalIpv4()
+                if (!ip.isNullOrBlank()) {
+                    manualSsdp = ManualSsdp().apply { start(ip) }
+                    Logger.i("Manual SSDP started on $ip:1900")
+                }
+            } catch (t: Throwable) {
+                Logger.i("Manual SSDP start failed: ${t.message}")
             }
 
             val exoPlayer = ExoPlayer.Builder(context).build().also { p ->
@@ -202,6 +218,13 @@ class DlnaReceiver(
 
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
+        try {
+            manualSsdp?.stop()
+        } catch (t: Throwable) {
+            Logger.w("Manual SSDP stop warning: ${t.message}")
+        }
+        manualSsdp = null
+
         try {
             upnpService?.shutdown()
         } catch (t: Throwable) {
