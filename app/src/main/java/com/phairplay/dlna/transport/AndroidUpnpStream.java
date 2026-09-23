@@ -94,6 +94,22 @@ public class AndroidUpnpStream extends UpnpStream {
                 writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(ManualDlnaHttp.faultBody()));
                 return;
             }
+            // GENA event subscription: answer manually instead of relying on
+            // jUPnP's event machinery (Windows Play To reports an "unexpected
+            // device error" when the AVTransport subscribe does not complete).
+            if (("SUBSCRIBE".equals(request.method) || "UNSUBSCRIBE".equals(request.method))
+                    && ManualDlnaHttp.isAction(reqPath)) {
+                String sid = "uuid:" + java.util.UUID.randomUUID().toString();
+                String resp = "HTTP/1.1 200 OK\r\n"
+                        + "SID: " + sid + "\r\n"
+                        + "TIMEOUT: Second-1800\r\n"
+                        + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                        + "CONTENT-LENGTH: 0\r\n\r\n";
+                DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 200 事件订阅(手动) sid=" + sid);
+                socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                socket.getOutputStream().flush();
+                return;
+            }
             DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");
 
             StreamRequestMessage requestMessage = new StreamRequestMessage(

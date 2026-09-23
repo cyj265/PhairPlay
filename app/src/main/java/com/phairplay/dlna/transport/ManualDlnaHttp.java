@@ -349,6 +349,15 @@ public final class ManualDlnaHttp {
         }
         if (result == null) {
             DebugLog.INSTANCE.log("SOAP", "未知动作 " + actionName + " svc=" + svc);
+        } else {
+            // Log only state-changing actions; polling actions would flood the log.
+            boolean keyAction = "SetAVTransportURI".equals(actionName)
+                    || "Play".equals(actionName) || "Pause".equals(actionName)
+                    || "Stop".equals(actionName) || "Seek".equals(actionName)
+                    || "SetVolume".equals(actionName);
+            if (keyAction) {
+                DebugLog.INSTANCE.log("SOAP", "动作 " + actionName + " svc=" + svc + " -> OK");
+            }
         }
         return result;
     }
@@ -371,6 +380,7 @@ public final class ManualDlnaHttp {
                 currentUri = uri;
                 transportState = "STOPPED";
                 positionSeconds = 0;
+                DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
                 return avtResponse("SetAVTransportURIResponse", "");
             }
             case "Play": {
