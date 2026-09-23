@@ -373,9 +373,10 @@ class DlnaReceiver(
                 as LocalService<ConnectionManagerService>
 
         return LocalDevice(
-            // Fixed UDN so the device-description URL is predictable:
-            // http://<ip>:8080/upnp/dev/phairplay-dlna-renderer/desc
-            DeviceIdentity(UDN("uuid-phairplay-dlna-renderer")),
+            // Fixed UDN (standard UUID format — Windows/VLC reject non-UUID
+            // UDNs) so the device-description URL is predictable:
+            // http://<ip>:8899/upnp/dev/6f61c845-1dd2-11b2-8f7b-001185123456/desc
+            DeviceIdentity(UDN("uuid:6f61c845-1dd2-11b2-8f7b-001185123456")),
             UDADeviceType("MediaRenderer"),
             DeviceDetails(displayName.ifBlank { "PhairPlay" }),
             arrayOf<LocalService<*>>(avService, renderService, connService)
