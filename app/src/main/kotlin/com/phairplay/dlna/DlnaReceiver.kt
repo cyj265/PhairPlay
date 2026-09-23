@@ -334,7 +334,9 @@ class DlnaReceiver(
                 as LocalService<ConnectionManagerService>
 
         return LocalDevice(
-            DeviceIdentity(UDN("uuid-" + UUID.randomUUID())),
+            // Fixed UDN so the device-description URL is predictable:
+            // http://<ip>:8080/upnp/dev/phairplay-dlna-renderer/desc
+            DeviceIdentity(UDN("uuid-phairplay-dlna-renderer")),
             UDADeviceType("MediaRenderer"),
             DeviceDetails(displayName.ifBlank { "PhairPlay" }),
             arrayOf<LocalService<*>>(avService, renderService, connService)

@@ -124,6 +124,30 @@ object NetworkUtils {
         return newUuid
     }
 
+    /**
+     * Returns the device's current IPv4 address on the active (non-loopback)
+     * network interface, or null if unavailable. Used to show the DLNA
+     * renderer's address (http://ip:8080) on the home screen so it can be
+     * reached manually without SSDP discovery.
+     */
+    fun getLocalIpv4(): String? {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+                ?: return null
+            for (ni in interfaces) {
+                if (ni.isLoopback || !ni.isUp) continue
+                for (addr in ni.inetAddresses) {
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "getLocalIpv4 failed")
+        }
+        return null
+    }
+
     // Constants
     private const val DEFAULT_DEVICE_NAME = "PhairPlay"
     private const val FALLBACK_MAC_ADDRESS = "aa:bb:cc:dd:ee:ff"
