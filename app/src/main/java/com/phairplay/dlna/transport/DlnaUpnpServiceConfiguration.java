@@ -17,9 +17,10 @@ import org.jupnp.transport.spi.StreamServer;
 public class DlnaUpnpServiceConfiguration extends AndroidUpnpServiceConfiguration {
 
     /** Fixed HTTP port so the renderer is reachable without SSDP discovery
-     *  (e.g. http://&lt;box-ip&gt;:8080 from a browser). Port 0 would pick an
+     *  (e.g. http://&lt;box-ip&gt;:8899 from a browser). 8080 is commonly taken
+     *  by other apps, so use a less contested port. Port 0 would pick an
      *  ephemeral port that nobody can guess. */
-    public static final int STREAM_LISTEN_PORT = 8080;
+    public static final int STREAM_LISTEN_PORT = 8899;
 
     public DlnaUpnpServiceConfiguration() {
         super(STREAM_LISTEN_PORT, 0);

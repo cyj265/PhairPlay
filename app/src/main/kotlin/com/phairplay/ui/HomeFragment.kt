@@ -262,11 +262,11 @@ class HomeFragment : Fragment() {
         }
 
         // While advertising, show the fixed renderer address so the box can be
-        // reached manually (http://ip:8080) without SSDP discovery.
+        // reached manually (http://ip:8899) without SSDP discovery.
         if (card === cardDlna && state == ProtocolState.ADVERTISING) {
             val ip = NetworkUtils.getLocalIpv4()
             if (!ip.isNullOrBlank()) {
-                detail.text = "http://$ip:8080"
+                detail.text = "http://$ip:8899"
             }
         }
     }
