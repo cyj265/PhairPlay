@@ -60,6 +60,11 @@ public final class ManualDlnaHttp {
         return path.startsWith(BASE + "/svc/") && path.endsWith("/action");
     }
 
+    /** Any service URL (/desc, /action, /event): used for GENA SUBSCRIBE. */
+    public static boolean isService(String path) {
+        return path.startsWith(BASE + "/svc/");
+    }
+
     /** The service id segment of a /svc/ URL, e.g. "AVTransport". */
     private static String serviceOf(String path) {
         // /upnp/dev/<udn>/svc/<ns>/<svc>/desc|action
