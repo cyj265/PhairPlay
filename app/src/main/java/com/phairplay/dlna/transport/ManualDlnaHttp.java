@@ -283,6 +283,18 @@ public final class ManualDlnaHttp {
             + "<argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument>"
             + "<argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument>"
             + "</argumentList></action>\n"
+            + "    <action><name>PrepareForConnection</name><argumentList>"
+            + "<argument><name>RemoteProtocolInfo</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument>"
+            + "<argument><name>PeerConnectionManager</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument>"
+            + "<argument><name>PeerConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>"
+            + "<argument><name>Direction</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument>"
+            + "<argument><name>ConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>"
+            + "<argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument>"
+            + "<argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument>"
+            + "</argumentList></action>\n"
+            + "    <action><name>ConnectionComplete</name><argumentList>"
+            + "<argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>"
+            + "</argumentList></action>\n"
             + "  </actionList>\n"
             + "  <serviceStateTable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>\n"
@@ -493,6 +505,17 @@ public final class ManualDlnaHttp {
                         + "<PeerConnectionID>-1</PeerConnectionID>"
                         + "<Direction>Input</Direction>"
                         + "<Status>OK</Status>");
+            }
+            // Windows "Play To" / WMP reserves a virtual connection before
+            // pushing media. Must succeed or the cast is aborted.
+            case "PrepareForConnection": {
+                return cmResponse("PrepareForConnectionResponse",
+                    "<ConnectionID>0</ConnectionID>"
+                        + "<RcsID>0</RcsID>"
+                        + "<AVTransportID>0</AVTransportID>");
+            }
+            case "ConnectionComplete": {
+                return cmResponse("ConnectionCompleteResponse", "");
             }
             default:
                 return null;
