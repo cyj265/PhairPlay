@@ -36,6 +36,6 @@ public class DlnaUpnpServiceConfiguration extends AndroidUpnpServiceConfiguratio
     @Override
     @SuppressWarnings("rawtypes")
     public StreamServer createStreamServer(NetworkAddressFactory networkAddressFactory) {
-        return new AndroidStreamServer();
+        return new AndroidStreamServer(STREAM_LISTEN_PORT);
     }
 }

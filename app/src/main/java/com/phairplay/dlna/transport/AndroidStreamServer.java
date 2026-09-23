@@ -30,11 +30,21 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
 
     private final StreamServerConfiguration configuration = new AndroidStreamServerConfiguration();
 
+    private final int listenPort;
     private ServerSocket serverSocket;
     private Router router;
     private ExecutorService executor;
     private volatile boolean running;
     private int localPort = -1;
+
+    /**
+     * @param listenPort the TCP port to bind; pass the value from
+     *                   {@link DlnaUpnpServiceConfiguration#STREAM_LISTEN_PORT}
+     *                   so the renderer is reachable at a known address.
+     */
+    public AndroidStreamServer(int listenPort) {
+        this.listenPort = listenPort;
+    }
 
     @Override
     public void init(InetAddress bindAddress, Router router) throws InitializationException {
@@ -42,8 +52,7 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
             this.router = router;
             serverSocket = new ServerSocket();
             serverSocket.setReuseAddress(true);
-            // Port 0 = ephemeral; the jUPnP Router reads getPort() right after init.
-            serverSocket.bind(new InetSocketAddress(bindAddress, 0));
+            serverSocket.bind(new InetSocketAddress(bindAddress, listenPort));
             localPort = serverSocket.getLocalPort();
             executor = Executors.newCachedThreadPool();
             logger.debug("AndroidStreamServer bound on {}:{}", bindAddress, localPort);
