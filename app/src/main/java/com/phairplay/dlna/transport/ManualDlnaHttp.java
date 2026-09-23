@@ -1,6 +1,7 @@
 package com.phairplay.dlna.transport;
 
 import com.phairplay.dlna.renderer.DlnaPlayerBridge;
+import com.phairplay.util.DebugLog;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +34,7 @@ public final class ManualDlnaHttp {
     public static final String RC = "urn:schemas-upnp-org:service:RenderingControl:1";
     public static final String CM = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
-    private static final Pattern P_ACTION = Pattern.compile("<(?:u|ns\\d+):(\\w+)");
+    private static final Pattern P_ACTION = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z_][\\w]*)");
     private static final Pattern P_TAG = Pattern.compile("<([A-Za-z0-9_]+)>([^<]*)</\\1>");
 
     private static volatile String currentUri = "";
@@ -325,18 +326,36 @@ public final class ManualDlnaHttp {
         String svc = serviceOf(path);
         String actionName = extractAction(body);
         if (actionName == null) {
+            DebugLog.INSTANCE.log("SOAP", "无法解析动作 svc=" + svc + " body=" + safeBodyPreview(body));
             return null;
         }
+        String result;
         switch (svc) {
             case "AVTransport":
-                return handleAvtAction(actionName, body);
+                result = handleAvtAction(actionName, body);
+                break;
             case "RenderingControl":
-                return handleRcAction(actionName, body);
+                result = handleRcAction(actionName, body);
+                break;
             case "ConnectionManager":
-                return handleCmAction(actionName, body);
+                result = handleCmAction(actionName, body);
+                break;
             default:
-                return null;
+                result = null;
+                break;
         }
+        if (result == null) {
+            DebugLog.INSTANCE.log("SOAP", "未知动作 " + actionName + " svc=" + svc);
+        }
+        return result;
+    }
+
+    private static String safeBodyPreview(String body) {
+        if (body == null) {
+            return "null";
+        }
+        String s = body.trim();
+        return s.length() > 160 ? s.substring(0, 160) : s;
     }
 
     private static String handleAvtAction(String action, String body) {
@@ -562,7 +581,16 @@ public final class ManualDlnaHttp {
             return null;
         }
         Matcher m = P_ACTION.matcher(body);
-        return m.find() ? m.group(1) : null;
+        while (m.find()) {
+            String action = m.group(2);
+            // Skip SOAP envelope scaffolding (prefix may be s / soap / SOAP-ENV).
+            if ("Envelope".equals(action) || "Body".equals(action)
+                    || "Header".equals(action) || "Fault".equals(action)) {
+                continue;
+            }
+            return action;
+        }
+        return null;
     }
 
     private static String tag(String body, String name) {
