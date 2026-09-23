@@ -54,7 +54,7 @@ public final class GenaNotifier {
                     + "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n"
                     + "<e:property>\n"
                     + "<LastChange>&lt;Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/AVT/\"&gt;&lt;InstanceID val=\"0\"&gt;&lt;TransportState val=\""
-                    + state + "\"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
+                    + state + "\"/&gt;&lt;AVTransportURI&gt;&lt;/AVTransportURI&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
                     + "</e:property>\n"
                     + "</e:propertyset>\n";
             Socket sock = new Socket();
