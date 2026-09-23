@@ -4,6 +4,8 @@ import java.net.DatagramPacket;
 import java.net.MulticastSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.SocketAddress;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
@@ -52,7 +54,21 @@ public final class ManualSsdp {
             socket = new MulticastSocket(null);
             socket.setReuseAddress(true);
             socket.bind(new InetSocketAddress(PORT));
-            socket.joinGroup(InetAddress.getByName(GROUP));
+            NetworkInterface ni = wifiInterface();
+            if (ni != null) {
+                // Specify the interface explicitly: with multiple network
+                // interfaces (WiFi + cellular + hotspot + virtual) the
+                // default joinGroup() binds to the system's default route,
+                // which may not be the WiFi interface, so M-SEARCH never
+                // reaches this socket. joinGroup() signatures changed across
+                // API levels (the old InetAddress overload was removed in
+                // API 35), so call it reflectively for compatibility.
+                joinGroup(socket, GROUP, ni);
+                DebugLog.INSTANCE.log("SSDP", "加入组播组 via 接口 " + ni.getName());
+            } else {
+                joinGroup(socket, GROUP, null);
+                DebugLog.INSTANCE.log("SSDP", "加入组播组 (默认接口)");
+            }
         } catch (Exception e) {
             running = false;
             socket = null;
@@ -88,6 +104,79 @@ public final class ManualSsdp {
             }
             socket = null;
         }
+    }
+
+    /**
+     * Best-effort pick of the WiFi interface (name contains "wlan"/"wifi").
+     * Falls back to the first up, non-loopback interface.
+     */
+    private static NetworkInterface wifiInterface() {
+        try {
+            java.util.Enumeration<NetworkInterface> ifs =
+                    NetworkInterface.getNetworkInterfaces();
+            if (ifs == null) {
+                return null;
+            }
+            NetworkInterface fallback = null;
+            while (ifs.hasMoreElements()) {
+                NetworkInterface ni = ifs.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) {
+                    continue;
+                }
+                String name = ni.getName().toLowerCase();
+                if (name.contains("wlan") || name.contains("wifi")) {
+                    return ni;
+                }
+                if (fallback == null) {
+                    fallback = ni;
+                }
+            }
+            return fallback;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Joins the multicast group, working across API levels: the old
+     * joinGroup(InetAddress[, NetworkInterface]) overloads were removed in
+     * API 35, while the SocketAddress overload only exists from API 31.
+     */
+    private static void joinGroup(MulticastSocket socket, String group, NetworkInterface ni)
+            throws Exception {
+        InetAddress groupAddr = InetAddress.getByName(group);
+        if (ni == null) {
+            try {
+                java.lang.reflect.Method m = MulticastSocket.class.getMethod(
+                        "joinGroup", InetAddress.class);
+                m.invoke(socket, groupAddr);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+            try {
+                java.lang.reflect.Method m = MulticastSocket.class.getMethod(
+                        "joinGroup", SocketAddress.class, NetworkInterface.class);
+                m.invoke(socket, new InetSocketAddress(groupAddr, 0), null);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+            throw new RuntimeException("No usable MulticastSocket.joinGroup on this device");
+        }
+        try {
+            java.lang.reflect.Method m = MulticastSocket.class.getMethod(
+                    "joinGroup", InetAddress.class, NetworkInterface.class);
+            m.invoke(socket, groupAddr, ni);
+            return;
+        } catch (NoSuchMethodException ignored) {
+        }
+        try {
+            java.lang.reflect.Method m = MulticastSocket.class.getMethod(
+                    "joinGroup", SocketAddress.class, NetworkInterface.class);
+            m.invoke(socket, new InetSocketAddress(groupAddr, 0), ni);
+            return;
+        } catch (NoSuchMethodException ignored) {
+        }
+        throw new RuntimeException("No usable MulticastSocket.joinGroup on this device");
     }
 
     private void broadcastAlive() {
