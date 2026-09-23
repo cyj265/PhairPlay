@@ -28,7 +28,10 @@ import java.util.regex.Pattern;
  */
 public final class ManualDlnaHttp {
 
-    public static final String UDN = "uuid-phairplay-dlna-renderer";
+    // Standard UUID format: Windows / libupnp reject UDNs that are not a
+    // valid UUID (the old "uuid-phairplay-dlna-renderer" was silently dropped
+    // by Windows Play To and VLC after the full discovery handshake).
+    public static final String UDN = "6f61c845-1dd2-11b2-8f7b-001185123456";
     public static final String BASE = "/upnp/dev/" + UDN;
     public static final String AVT = "urn:schemas-upnp-org:service:AVTransport:1";
     public static final String RC = "urn:schemas-upnp-org:service:RenderingControl:1";

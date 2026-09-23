@@ -30,10 +30,11 @@ public final class ManualSsdp {
     public static final String GROUP = "239.255.255.250";
     public static final int PORT = 1900;
     public static final String DEVICE_TYPE = "urn:schemas-upnp-org:device:MediaRenderer:1";
-    public static final String UDN_FULL = "uuid:uuid-phairplay-dlna-renderer";
+    // Standard UUID format — Windows/VLC drop non-UUID UDNs.
+    public static final String UDN_FULL = "uuid:6f61c845-1dd2-11b2-8f7b-001185123456";
     public static final String USN = UDN_FULL + "::" + DEVICE_TYPE;
     public static final String DESC_PATH =
-            "/upnp/dev/uuid-phairplay-dlna-renderer/desc";
+            "/upnp/dev/6f61c845-1dd2-11b2-8f7b-001185123456/desc";
 
     private static final long ALIVE_INTERVAL_SECONDS = 30;
 
