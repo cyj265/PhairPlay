@@ -98,7 +98,7 @@ public class AndroidUpnpStream extends UpnpStream {
             // jUPnP's event machinery (Windows Play To reports an "unexpected
             // device error" when the AVTransport subscribe does not complete).
             if (("SUBSCRIBE".equals(request.method) || "UNSUBSCRIBE".equals(request.method))
-                    && ManualDlnaHttp.isAction(reqPath)) {
+                    && ManualDlnaHttp.isService(reqPath)) {
                 String sid = "uuid:" + java.util.UUID.randomUUID().toString();
                 String resp = "HTTP/1.1 200 OK\r\n"
                         + "SID: " + sid + "\r\n"
