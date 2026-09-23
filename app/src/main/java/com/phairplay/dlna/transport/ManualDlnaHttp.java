@@ -42,7 +42,7 @@ public final class ManualDlnaHttp {
     private static final Pattern P_TAG_NS = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z0-9_]+)>([^<]*)</[A-Za-z_][\\w.-]*:\\2>");
 
     private static volatile String currentUri = "";
-    private static volatile String transportState = "NO_MEDIA_PRESENT"; // NO_MEDIA_PRESENT/STOPPED/PLAYING/PAUSED_PLAYBACK
+    private static volatile String transportState = "STOPPED"; // NO_MEDIA_PRESENT/STOPPED/PLAYING/PAUSED_PLAYBACK — Windows PlayTo 只认 STOPPED 为就绪
     private static volatile long positionSeconds = 0;
     private static volatile int volume = 50;
 
@@ -607,6 +607,11 @@ public final class ManualDlnaHttp {
             + "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>501</errorCode>"
             + "<errorDescription>Action Failed</errorDescription></UPnPError></detail>"
             + "</s:Fault>";
+    }
+
+    /** Public action-name extractor for logging (null when unparseable). */
+    public static String actionNameOf(String body) {
+        return extractAction(body);
     }
 
     private static String extractAction(String body) {

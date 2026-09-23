@@ -83,14 +83,15 @@ public class AndroidUpnpStream extends UpnpStream {
             }
             if ("POST".equals(request.method) && ManualDlnaHttp.isAction(reqPath)) {
                 String body = new String(request.body, "UTF-8");
+                String actionName = ManualDlnaHttp.actionNameOf(body);
                 String respBody = ManualDlnaHttp.handleAction(reqPath, body);
                 if (respBody != null) {
-                    DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP OK");
+                    DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP OK 动作=" + actionName);
                     writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(respBody));
                     return;
                 }
                 // Unknown action -> SOAP fault (500 with fault body)
-                DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP fault (未知动作)");
+                DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP fault (未知动作) action=" + actionName);
                 writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(ManualDlnaHttp.faultBody()));
                 return;
             }
