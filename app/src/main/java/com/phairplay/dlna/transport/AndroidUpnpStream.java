@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import com.phairplay.util.DebugLog;
 import org.jupnp.model.message.Connection;
 import org.jupnp.model.message.StreamRequestMessage;
 import org.jupnp.model.message.StreamResponseMessage;
@@ -67,12 +68,14 @@ public class AndroidUpnpStream extends UpnpStream {
             String reqPath = request.uri != null ? request.uri.getPath() : "";
             if ("GET".equals(request.method)) {
                 if (ManualDlnaHttp.isDeviceDesc(reqPath)) {
+                    DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 200 设备描述");
                     writeXml(socket.getOutputStream(), ManualDlnaHttp.deviceDescriptorXml());
                     return;
                 }
                 if (ManualDlnaHttp.isScpd(reqPath)) {
                     String scpd = ManualDlnaHttp.scpdXml(reqPath);
                     if (scpd != null) {
+                        DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 200 SCPD");
                         writeXml(socket.getOutputStream(), scpd);
                         return;
                     }
@@ -82,13 +85,16 @@ public class AndroidUpnpStream extends UpnpStream {
                 String body = new String(request.body, "UTF-8");
                 String respBody = ManualDlnaHttp.handleAction(reqPath, body);
                 if (respBody != null) {
+                    DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP OK");
                     writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(respBody));
                     return;
                 }
                 // Unknown action -> SOAP fault (500 with fault body)
+                DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP fault (未知动作)");
                 writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(ManualDlnaHttp.faultBody()));
                 return;
             }
+            DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");
 
             StreamRequestMessage requestMessage = new StreamRequestMessage(
                     UpnpRequest.Method.getByHttpName(request.method),

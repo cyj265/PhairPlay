@@ -58,6 +58,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
+    private lateinit var rowDebugInfo: View
     private lateinit var rowForceHighRes: View
     private lateinit var textVersionValue: TextView
     private lateinit var rowReset: LinearLayout
@@ -97,6 +98,7 @@ class SettingsFragment : Fragment() {
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
+        rowDebugInfo        = view.findViewById(R.id.row_debug_info)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         textVersionValue    = view.findViewById(R.id.text_version_value)
         rowReset            = view.findViewById(R.id.row_reset)
@@ -200,6 +202,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
 
         rowReset.setOnClickListener { resetSettings() }
+        rowDebugInfo.setOnClickListener { showDebugInfoDialog() }
     }
 
     private fun setToggleListener(row: View, onChanged: (Boolean) -> Unit) {
@@ -301,5 +304,31 @@ class SettingsFragment : Fragment() {
             populateUI(defaults)
             Logger.i("Settings reset to defaults")
         }
+    }
+
+    /** Shows the in-app DLNA/SSDP diagnostics dialog (debugging aid). */
+    private fun showDebugInfoDialog() {
+        val text = android.widget.TextView(requireContext()).apply {
+            text = com.phairplay.util.DebugLog.dump()
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(24, 24, 24, 24)
+            setTextIsSelectable(true)
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("调试信息")
+            .setView(text)
+            .setPositiveButton("复制", { _, _ ->
+                val clipboard = requireContext()
+                    .getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                clipboard.setPrimaryClip(
+                    android.content.ClipData.newPlainText(
+                        "PhairPlay debug", com.phairplay.util.DebugLog.dump()
+                    )
+                )
+            })
+            .setNegativeButton("关闭", null)
+            .show()
     }
 }

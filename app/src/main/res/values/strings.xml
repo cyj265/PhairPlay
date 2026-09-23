@@ -94,6 +94,8 @@
     <string name="setting_debug_overlay_subtitle">Show live FPS, queue and drop stats while streaming</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>
     <string name="setting_force_high_res_subtitle">Sharper mirroring; uses more CPU. Off = 1080p</string>
+    <string name="setting_debug_info">调试信息</string>
+    <string name="setting_debug_info_subtitle">SSDP / HTTP 事件与网络接口状态</string>
     <string name="setting_version">Version</string>
     <string name="setting_reset_defaults">Reset to defaults</string>
 

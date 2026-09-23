@@ -15,6 +15,7 @@ import com.phairplay.dlna.renderer.DlnaPlayerBridge
 import com.phairplay.dlna.renderer.DlnaPlayerControl
 import com.phairplay.dlna.renderer.DlnaRendererStateMachine
 import com.phairplay.service.ProtocolState
+import com.phairplay.util.DebugLog
 import com.phairplay.util.Logger
 import org.jupnp.UpnpService
 import org.jupnp.UpnpServiceConfiguration
@@ -181,8 +182,10 @@ class DlnaReceiver(
                 val devCount = service.registry.localDevices.size
                 val resCount = service.registry.resources.size
                 val sample = service.registry.resources.firstOrNull()?.pathQuery
-                lastDiagnostic = "dev=$devCount res=$resCount $sample"
-                Logger.i("DLNA registry diag: $lastDiagnostic")
+                val diag = "dev=$devCount res=$resCount $sample"
+                lastDiagnostic = diag
+                DebugLog.registryDiag = diag
+                Logger.i("DLNA registry diag: $diag")
             } catch (t: Throwable) {
                 Logger.w("DLNA diag failed: ${t.message}")
             }
@@ -200,6 +203,8 @@ class DlnaReceiver(
                 "${t.javaClass.simpleName}: ${t.message}" +
                     (where?.let { " @ $it" } ?: "")
             )
+            DebugLog.lastError = "${t.javaClass.simpleName}: ${t.message} @ ${where ?: "?"}"
+            DebugLog.log("DLNA", "启动失败: ${t.javaClass.simpleName}: ${t.message}")
             releaseResources()
             started = false
             DlnaPlayerBridge.setControl(null)
