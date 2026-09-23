@@ -61,6 +61,35 @@ public class AndroidUpnpStream extends UpnpStream {
 
             logger.trace("Processing HTTP request: {} {}", request.method, request.uri);
 
+            // Manual DLNA layer: answer descriptor / SCPD / SOAP requests
+            // directly, bypassing jUPnP's registry resource matching which
+            // returns 404 on device (despite a healthy registry).
+            String reqPath = request.uri != null ? request.uri.getPath() : "";
+            if ("GET".equals(request.method)) {
+                if (ManualDlnaHttp.isDeviceDesc(reqPath)) {
+                    writeXml(socket.getOutputStream(), ManualDlnaHttp.deviceDescriptorXml());
+                    return;
+                }
+                if (ManualDlnaHttp.isScpd(reqPath)) {
+                    String scpd = ManualDlnaHttp.scpdXml(reqPath);
+                    if (scpd != null) {
+                        writeXml(socket.getOutputStream(), scpd);
+                        return;
+                    }
+                }
+            }
+            if ("POST".equals(request.method) && ManualDlnaHttp.isAction(reqPath)) {
+                String body = new String(request.body, "UTF-8");
+                String respBody = ManualDlnaHttp.handleAction(reqPath, body);
+                if (respBody != null) {
+                    writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(respBody));
+                    return;
+                }
+                // Unknown action -> SOAP fault (500 with fault body)
+                writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(ManualDlnaHttp.faultBody()));
+                return;
+            }
+
             StreamRequestMessage requestMessage = new StreamRequestMessage(
                     UpnpRequest.Method.getByHttpName(request.method),
                     request.uri);
@@ -157,6 +186,22 @@ public class AndroidUpnpStream extends UpnpStream {
         head.append("Connection: close\r\n");
         head.append("\r\n");
         os.write(head.toString().getBytes("UTF-8"));
+        os.flush();
+    }
+
+    /** Writes a 200 response with an XML body (device descriptor / SCPD / SOAP). */
+    private void writeXml(OutputStream os, String xml) throws IOException {
+        byte[] body = xml.getBytes("UTF-8");
+        StringBuilder head = new StringBuilder();
+        head.append("HTTP/1.1 200 OK\r\n");
+        head.append("Content-Type: text/xml; charset=\"utf-8\"\r\n");
+        head.append("Content-Length: ").append(body.length).append("\r\n");
+        head.append("Connection: close\r\n");
+        head.append("Server: PhairPlay/1.0 UPnP/1.0\r\n");
+        head.append("EXT:\r\n");
+        head.append("\r\n");
+        os.write(head.toString().getBytes("UTF-8"));
+        os.write(body);
         os.flush();
     }
 

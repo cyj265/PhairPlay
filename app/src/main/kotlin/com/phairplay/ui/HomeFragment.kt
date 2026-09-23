@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.phairplay.R
+import com.phairplay.dlna.DlnaReceiver
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.Protocol
 import com.phairplay.service.ProtocolState
@@ -266,7 +267,8 @@ class HomeFragment : Fragment() {
         if (card === cardDlna && state == ProtocolState.ADVERTISING) {
             val ip = NetworkUtils.getLocalIpv4()
             if (!ip.isNullOrBlank()) {
-                detail.text = "http://$ip:8899"
+                val diag = DlnaReceiver.lastDiagnostic
+                detail.text = if (diag != null) "http://$ip:8899 · $diag" else "http://$ip:8899"
             }
         }
     }

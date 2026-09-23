@@ -159,6 +159,17 @@ class DlnaReceiver(
             service.startup()
             upnpService = service
             service.registry.addDevice(createRendererDevice())
+            // Diagnostics: how many devices/resources actually landed in the
+            // registry, and the first resource path. Helps debug 404 on desc.
+            try {
+                val devCount = service.registry.localDevices.size
+                val resCount = service.registry.resources.size
+                val sample = service.registry.resources.firstOrNull()?.pathQuery
+                lastDiagnostic = "dev=$devCount res=$resCount $sample"
+                Logger.i("DLNA registry diag: $lastDiagnostic")
+            } catch (t: Throwable) {
+                Logger.w("DLNA diag failed: ${t.message}")
+            }
             Logger.i("DLNA renderer advertising as: $displayName")
             report(ProtocolState.ADVERTISING)
         } catch (t: Throwable) {
@@ -346,6 +357,10 @@ class DlnaReceiver(
     companion object {
         @Volatile
         private var crashGuardInstalled = false
+
+        /** Last registry diagnostics, shown on the DLNA card for debugging. */
+        @Volatile
+        var lastDiagnostic: String? = null
 
         /**
          * Installs a default uncaught-exception handler that intercepts crashes
