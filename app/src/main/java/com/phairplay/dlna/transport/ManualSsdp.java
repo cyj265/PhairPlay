@@ -233,7 +233,8 @@ public final class ManualSsdp {
         boolean match = "ssdp:all".equals(stTrim)
                 || DEVICE_TYPE.equals(stTrim)
                 || UDN_FULL.equals(stTrim)
-                || USN.equals(stTrim);
+                || USN.equals(stTrim)
+                || "upnp:rootdevice".equals(stTrim);
         DebugLog.INSTANCE.setLastSearchAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.setLastSearchFrom(target.getHostAddress() + ":" + port);
         DebugLog.INSTANCE.setLastSearchSt(stTrim);
@@ -243,13 +244,31 @@ public final class ManualSsdp {
         }
         DebugLog.INSTANCE.setLastResponseAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port);
+        // The response ST/USN must echo what the requester asked for
+        // (Windows "Play To" searches upnp:rootdevice and validates the
+        // response ST against its request).
+        String respSt;
+        String respUsn;
+        if ("ssdp:all".equals(stTrim)) {
+            respSt = DEVICE_TYPE;
+            respUsn = USN;
+        } else if ("upnp:rootdevice".equals(stTrim)) {
+            respSt = "upnp:rootdevice";
+            respUsn = UDN_FULL + "::upnp:rootdevice";
+        } else if (UDN_FULL.equals(stTrim)) {
+            respSt = UDN_FULL;
+            respUsn = UDN_FULL;
+        } else {
+            respSt = DEVICE_TYPE;
+            respUsn = USN;
+        }
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "EXT:\r\n"
                 + "LOCATION: " + location + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
-                + "ST: " + DEVICE_TYPE + "\r\n"
-                + "USN: " + USN + "\r\n\r\n";
+                + "ST: " + respSt + "\r\n"
+                + "USN: " + respUsn + "\r\n\r\n";
         send(resp, target.getHostAddress(), port);
     }
 
