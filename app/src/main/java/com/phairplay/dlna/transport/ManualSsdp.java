@@ -10,6 +10,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import com.phairplay.util.DebugLog;
+
 /**
  * Hand-rolled SSDP layer for the DLNA renderer: broadcasts NOTIFY ssdp:alive
  * announcements and answers M-SEARCH discovery requests, completely bypassing
@@ -54,8 +56,14 @@ public final class ManualSsdp {
         } catch (Exception e) {
             running = false;
             socket = null;
+            DebugLog.INSTANCE.setSsdpStatus("启动失败: " + e.getMessage());
+            DebugLog.INSTANCE.setLastError(e.getClass().getSimpleName() + ": " + e.getMessage());
+            DebugLog.INSTANCE.log("SSDP", "bind :1900 失败: " + e);
             return;
         }
+        DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ")");
+        DebugLog.INSTANCE.setSsdpLocation(location);
+        DebugLog.INSTANCE.log("SSDP", "启动成功, location=" + location);
         listener = new Thread(this::listenLoop, "phairplay-ssdp");
         listener.setDaemon(true);
         listener.start();
@@ -83,6 +91,8 @@ public final class ManualSsdp {
     }
 
     private void broadcastAlive() {
+        DebugLog.INSTANCE.setLastNotifyAt(DebugLog.INSTANCE.now());
+        DebugLog.INSTANCE.log("SSDP", "广播 NOTIFY alive -> 239.255.255.250:1900");
         String deviceNotify = "NOTIFY * HTTP/1.1\r\n"
                 + "HOST: " + GROUP + ":" + PORT + "\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
@@ -135,9 +145,15 @@ public final class ManualSsdp {
                 || DEVICE_TYPE.equals(stTrim)
                 || UDN_FULL.equals(stTrim)
                 || USN.equals(stTrim);
+        DebugLog.INSTANCE.setLastSearchAt(DebugLog.INSTANCE.now());
+        DebugLog.INSTANCE.setLastSearchFrom(target.getHostAddress() + ":" + port);
+        DebugLog.INSTANCE.setLastSearchSt(stTrim);
         if (!match) {
+            DebugLog.INSTANCE.log("SSDP", "收到 M-SEARCH ST=" + stTrim + " 来自 " + target.getHostAddress() + "（不匹配，忽略）");
             return;
         }
+        DebugLog.INSTANCE.setLastResponseAt(DebugLog.INSTANCE.now());
+        DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port);
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "EXT:\r\n"

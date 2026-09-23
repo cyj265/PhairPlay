@@ -129,19 +129,44 @@ object NetworkUtils {
      * network interface, or null if unavailable. Used to show the DLNA
      * renderer's address (http://ip:8080) on the home screen so it can be
      * reached manually without SSDP discovery.
+     *
+     * WiFi (wlan*) interfaces are preferred. Hotspot / cellular / virtual
+     * interfaces are skipped because their addresses are not reachable from
+     * the cast source on the LAN (a phone in hotspot mode reports e.g.
+     * 192.168.49.1, which the computer on the home WiFi cannot reach).
      */
     fun getLocalIpv4(): String? {
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
                 ?: return null
+            var fallback: String? = null
             for (ni in interfaces) {
                 if (ni.isLoopback || !ni.isUp) continue
+                val name = ni.name.lowercase()
+                // Skip hotspot, cellular, virtual and other non-LAN interfaces.
+                if (name.contains("softap") || name.startsWith("ap")
+                    || name.contains("rmnet") || name.contains("ccmni")
+                    || name.contains("wwan") || name.contains("tun")
+                    || name.contains("ppp") || name.contains("bluetooth")
+                    || name.contains("usb") || name.contains("v4-radio")
+                    || name.contains("dummy") || name.contains("sit")
+                    || name.contains("ip6tnl") || name.contains("wpan")
+                ) {
+                    continue
+                }
                 for (addr in ni.inetAddresses) {
                     if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        return addr.hostAddress
+                        val ip = addr.hostAddress
+                        if (name.contains("wlan") || name.contains("wifi")) {
+                            return ip
+                        }
+                        if (fallback == null) {
+                            fallback = ip
+                        }
                     }
                 }
             }
+            return fallback
         } catch (e: Exception) {
             Timber.w(e, "getLocalIpv4 failed")
         }
