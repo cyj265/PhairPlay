@@ -459,8 +459,9 @@ public final class ManualDlnaHttp {
                         + "<CurrentSpeed>1</CurrentSpeed>");
             }
             case "GetPositionInfo": {
+                boolean hasMedia = !currentUri.isEmpty();
                 return avtResponse("GetPositionInfoResponse",
-                    "<Track>1</Track>"
+                    "<Track>" + (hasMedia ? "1" : "0") + "</Track>"
                         + "<TrackDuration>00:00:00</TrackDuration>"
                         + "<TrackMetaData></TrackMetaData>"
                         + "<TrackURI>" + xmlEscape(currentUri) + "</TrackURI>"
@@ -470,8 +471,9 @@ public final class ManualDlnaHttp {
                         + "<AbsCount>0</AbsCount>");
             }
             case "GetMediaInfo": {
+                boolean hasMedia = !currentUri.isEmpty();
                 return avtResponse("GetMediaInfoResponse",
-                    "<NrTracks>1</NrTracks>"
+                    "<NrTracks>" + (hasMedia ? "1" : "0") + "</NrTracks>"
                         + "<MediaDuration>00:00:00</MediaDuration>"
                         + "<CurrentURI>" + xmlEscape(currentUri) + "</CurrentURI>"
                         + "<CurrentURIMetaData></CurrentURIMetaData>"
@@ -483,7 +485,7 @@ public final class ManualDlnaHttp {
             }
             case "GetDeviceCapabilities": {
                 return avtResponse("GetDeviceCapabilitiesResponse",
-                    "<PlayMedia>NONE</PlayMedia>"
+                    "<PlayMedia>video/*,audio/*</PlayMedia>"
                         + "<RecMedia>NOT_IMPLEMENTED</RecMedia>"
                         + "<RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>");
             }
