@@ -262,14 +262,8 @@ class HomeFragment : Fragment() {
             detail.text = lastDlnaError
         }
 
-        // While advertising, show the fixed renderer address so the box can be
-        // reached manually (http://ip:8899) without SSDP discovery.
-        if (card === cardDlna && state == ProtocolState.ADVERTISING) {
-            val ip = NetworkUtils.getLocalIpv4()
-            if (!ip.isNullOrBlank()) {
-                val diag = DlnaReceiver.lastDiagnostic
-                detail.text = if (diag != null) "http://$ip:8899 · $diag" else "http://$ip:8899"
-            }
-        }
+        // DLNA card behaves like the other protocol cards while advertising:
+        // green dot + "广播中" + "等待投屏设备..." — no address line on the home
+        // screen (the full diagnostic lives in Settings → 调试信息).
     }
 }
