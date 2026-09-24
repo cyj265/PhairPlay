@@ -64,7 +64,8 @@
             android:textSize="14sp" />
     </LinearLayout>
 
-    <!-- Detail line: sender name when connected, hint when idle, full error when DLNA failed -->
+    <!-- Detail line: sender name when connected, hint when idle, full error when DLNA failed.
+         maxLines=2 keeps all four cards the same height so rows stay aligned. -->
     <TextView
         android:id="@+id/text_protocol_detail"
         android:layout_width="match_parent"
@@ -72,6 +73,7 @@
         android:textColor="@color/text_tertiary"
         android:textSize="12sp"
         android:minLines="2"
-        android:maxLines="5" />
+        android:maxLines="2"
+        android:ellipsize="end" />
 
 </LinearLayout>
