@@ -93,7 +93,6 @@ public final class ManualDlnaHttp {
             + "    <modelName>PhairPlay</modelName>\n"
             + "    <modelNumber>1.0</modelNumber>\n"
             + "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
-            + "    <dlna:X_DLNACAP>av-upload,av-download</dlna:X_DLNACAP>\n"
             + "    <UDN>uuid:" + UDN + "</UDN>\n"
             + "    <serviceList>\n"
             + serviceEntry(AVT, "AVTransport")
@@ -460,21 +459,29 @@ public final class ManualDlnaHttp {
             }
             case "GetPositionInfo": {
                 boolean hasMedia = !currentUri.isEmpty();
+                // Match the response shape used by Macast (a Windows Play-To
+                // compatible renderer): with no media, duration/position are
+                // empty strings and the counters are INT32_MAX (invalid),
+                // NOT "00:00:00"/0. Windows stalls the cast when it sees
+                // a zeroed position on an idle renderer.
+                String dur = hasMedia ? "00:00:00" : "";
+                String pos = hasMedia ? formatDuration(positionSeconds) : "";
+                String cnt = hasMedia ? "0" : "2147483647";
                 return avtResponse("GetPositionInfoResponse",
                     "<Track>" + (hasMedia ? "1" : "0") + "</Track>"
-                        + "<TrackDuration>00:00:00</TrackDuration>"
+                        + "<TrackDuration>" + dur + "</TrackDuration>"
                         + "<TrackMetaData></TrackMetaData>"
                         + "<TrackURI>" + xmlEscape(currentUri) + "</TrackURI>"
-                        + "<RelTime>" + formatDuration(positionSeconds) + "</RelTime>"
-                        + "<AbsTime>00:00:00</AbsTime>"
-                        + "<RelCount>0</RelCount>"
-                        + "<AbsCount>0</AbsCount>");
+                        + "<RelTime>" + pos + "</RelTime>"
+                        + "<AbsTime>" + pos + "</AbsTime>"
+                        + "<RelCount>" + cnt + "</RelCount>"
+                        + "<AbsCount>" + cnt + "</AbsCount>");
             }
             case "GetMediaInfo": {
                 boolean hasMedia = !currentUri.isEmpty();
                 return avtResponse("GetMediaInfoResponse",
                     "<NrTracks>" + (hasMedia ? "1" : "0") + "</NrTracks>"
-                        + "<MediaDuration>00:00:00</MediaDuration>"
+                        + "<MediaDuration>" + (hasMedia ? "00:00:00" : "") + "</MediaDuration>"
                         + "<CurrentURI>" + xmlEscape(currentUri) + "</CurrentURI>"
                         + "<CurrentURIMetaData></CurrentURIMetaData>"
                         + "<NextURI></NextURI>"
@@ -484,8 +491,11 @@ public final class ManualDlnaHttp {
                         + "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>");
             }
             case "GetDeviceCapabilities": {
+                // Macast leaves PlayMedia empty on a renderer (no source role);
+                // a wildcard "video/*,audio/*" here is not a valid DLNA value
+                // and can make Windows reject the device.
                 return avtResponse("GetDeviceCapabilitiesResponse",
-                    "<PlayMedia>video/*,audio/*</PlayMedia>"
+                    "<PlayMedia></PlayMedia>"
                         + "<RecMedia>NOT_IMPLEMENTED</RecMedia>"
                         + "<RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>");
             }

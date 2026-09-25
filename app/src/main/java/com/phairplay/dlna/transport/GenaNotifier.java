@@ -50,18 +50,27 @@ public final class GenaNotifier {
             String host = u.getHost();
             int port = u.getPort() > 0 ? u.getPort() : 80;
             String state = ManualDlnaHttp.getTransportState();
-            // Per UPnP AVT 1.0, LastChange must NOT carry an empty
-            // AVTransportURI element when no media is present — Windows parses
-            // the event strictly and an empty element can trigger an
-            // "unexpected device error". Include it only while media is set.
+            // Match the initial event payload of Macast (a Windows Play-To
+            // compatible renderer): besides TransportState it carries
+            // TransportStatus, CurrentMediaDuration, CurrentTrackDuration,
+            // CurrentTrack and NumberOfTracks. Windows appears to use this
+            // richer event when deciding whether the renderer is idle/ready.
             String uri = ManualDlnaHttp.getCurrentUri();
             String avt = (uri != null && !uri.isEmpty())
                     ? "<AVTransportURI>" + escapeXml(uri) + "</AVTransportURI>" : "";
+            String status = "OK";
+            String dur = (uri != null && !uri.isEmpty()) ? "00:00:00" : "";
+            String track = (uri != null && !uri.isEmpty()) ? "1" : "0";
             String body = "<?xml version=\"1.0\"?>\n"
                     + "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n"
                     + "<e:property>\n"
                     + "<LastChange>&lt;Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/AVT/\"&gt;&lt;InstanceID val=\"0\"&gt;&lt;TransportState val=\""
-                    + state + "\"/&gt;" + avt + "&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
+                    + state + "\"/&gt;&lt;TransportStatus val=\"" + status
+                    + "\"/&gt;&lt;CurrentMediaDuration val=\"" + dur
+                    + "\"/&gt;&lt;CurrentTrackDuration val=\"" + dur
+                    + "\"/&gt;&lt;CurrentTrack val=\"" + track
+                    + "\"/&gt;&lt;NumberOfTracks val=\"" + track
+                    + "\"/&gt;" + avt + "&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
                     + "</e:property>\n"
                     + "</e:propertyset>\n";
             Socket sock = new Socket();
