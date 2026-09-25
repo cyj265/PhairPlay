@@ -90,6 +90,15 @@ class MainActivity : AppCompatActivity() {
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
+
+            // Foreground resume after a background-initiated cast: if DLNA is
+            // already CONNECTED (the cast started while this Activity was
+            // stopped — onStop paused playback and dropped the collectors),
+            // immediately restore the full-screen player and resume playback.
+            if (service?.dlnaState?.value == ProtocolState.CONNECTED) {
+                service?.resumeDlnaPlayback()
+                showDlnaPlayer()
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {

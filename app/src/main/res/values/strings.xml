@@ -37,6 +37,10 @@
     <string name="protocol_detail_waiting">Waiting for sender…</string>
     <!-- %1$s = sender display name -->
     <string name="protocol_detail_connected">Streaming from %1$s</string>
+    <!-- Home cards: no sender name is exposed for DLNA (and the fragment has
+         none for AirPlay either), so show a placeholder-free variant instead
+         of a raw %1$s. -->
+    <string name="home_protocol_detail_connected">正在接收投屏</string>
     <string name="protocol_detail_error">Check Wi-Fi settings</string>
 
     <!-- ── Service states (header badge) ───────────────────────── -->
