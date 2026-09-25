@@ -50,11 +50,18 @@ public final class GenaNotifier {
             String host = u.getHost();
             int port = u.getPort() > 0 ? u.getPort() : 80;
             String state = ManualDlnaHttp.getTransportState();
+            // Per UPnP AVT 1.0, LastChange must NOT carry an empty
+            // AVTransportURI element when no media is present — Windows parses
+            // the event strictly and an empty element can trigger an
+            // "unexpected device error". Include it only while media is set.
+            String uri = ManualDlnaHttp.getCurrentUri();
+            String avt = (uri != null && !uri.isEmpty())
+                    ? "<AVTransportURI>" + escapeXml(uri) + "</AVTransportURI>" : "";
             String body = "<?xml version=\"1.0\"?>\n"
                     + "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n"
                     + "<e:property>\n"
                     + "<LastChange>&lt;Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/AVT/\"&gt;&lt;InstanceID val=\"0\"&gt;&lt;TransportState val=\""
-                    + state + "\"/&gt;&lt;AVTransportURI&gt;&lt;/AVTransportURI&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
+                    + state + "\"/&gt;" + avt + "&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n"
                     + "</e:property>\n"
                     + "</e:propertyset>\n";
             Socket sock = new Socket();
@@ -76,5 +83,9 @@ public final class GenaNotifier {
         } catch (Throwable t) {
             DebugLog.INSTANCE.log("SOAP", "事件推送失败 " + t.getMessage());
         }
+    }
+
+    private static String escapeXml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 }

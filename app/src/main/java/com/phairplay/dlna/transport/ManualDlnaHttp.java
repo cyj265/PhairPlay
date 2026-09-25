@@ -576,6 +576,11 @@ public final class ManualDlnaHttp {
 
     // ─────────────────────────────── helpers ───────────────────────────────
 
+    /** Current media URI (empty when idle). Exposed for the GENA notifier. */
+    public static String getCurrentUri() {
+        return currentUri;
+    }
+
     private static String avtResponse(String action, String inner) {
         return soapBody(action, AVT, inner);
     }
