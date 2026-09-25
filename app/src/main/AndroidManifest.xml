@@ -101,7 +101,14 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:theme="@style/Theme.PhairPlay.Fullscreen">
 
-            <!-- Makes the app launchable from the TV home screen -->
+            <!-- Icon for standard launchers (phones, and modified TV boxes whose
+                 launcher ignores LEANBACK_LAUNCHER — N1's modified ROM showed no
+                 icon for it). -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Icon for Android TV (Leanback) home screens -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
