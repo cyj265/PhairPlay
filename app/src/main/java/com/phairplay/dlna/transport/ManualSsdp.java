@@ -235,7 +235,11 @@ public final class ManualSsdp {
                 || DEVICE_TYPE.equals(stTrim)
                 || UDN_FULL.equals(stTrim)
                 || USN.equals(stTrim)
-                || "upnp:rootdevice".equals(stTrim);
+                || "upnp:rootdevice".equals(stTrim)
+                // Windows Play-To also probes this well-known DLNA DMR UUID;
+                // answering it makes the renderer show up as a DMR in
+                // Windows' dedicated search pass.
+                || "uuid:020000000000-dmr".equals(stTrim);
         DebugLog.INSTANCE.setLastSearchAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.setLastSearchFrom(target.getHostAddress() + ":" + port);
         DebugLog.INSTANCE.setLastSearchSt(stTrim);
@@ -259,6 +263,10 @@ public final class ManualSsdp {
         } else if (UDN_FULL.equals(stTrim)) {
             respSt = UDN_FULL;
             respUsn = UDN_FULL;
+        } else if ("uuid:020000000000-dmr".equals(stTrim)) {
+            // Echo the Windows DMR probe type; pair our real UDN with it.
+            respSt = "uuid:020000000000-dmr";
+            respUsn = UDN_FULL + "::uuid:020000000000-dmr";
         } else {
             respSt = DEVICE_TYPE;
             respUsn = USN;
