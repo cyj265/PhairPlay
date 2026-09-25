@@ -142,6 +142,9 @@ object NetworkUtils {
             var fallback: String? = null
             for (ni in interfaces) {
                 if (ni.isLoopback || !ni.isUp) continue
+                // Skip virtual and point-to-point adapters too (some TV ROMs
+                // create them; their addresses must never be advertised).
+                if (ni.isVirtual || ni.isPointToPoint) continue
                 val name = ni.name.lowercase()
                 // Skip hotspot, cellular, virtual and other non-LAN interfaces.
                 if (name.contains("softap") || name.startsWith("ap")

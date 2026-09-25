@@ -29,7 +29,7 @@ android {
         minSdk = 25           // Lowest common denominator (Fire TV)
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0.44"
+        versionName = "1.0.45"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
