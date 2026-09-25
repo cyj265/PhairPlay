@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
@@ -50,6 +51,7 @@ import timber.log.Timber
  * HOW: D-pad left/right navigation between nav panel and content area.
  * The nav panel items switch fragments. PhairPlayService is started on app launch.
  */
+@OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity : AppCompatActivity() {
 
     // UI references
@@ -439,6 +441,13 @@ class MainActivity : AppCompatActivity() {
     fun showDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
         pv.post {
+            // DLNA owns the overlay: hide the AirPlay/photo screens (their debug
+            // HUD would otherwise show through) and surface only the player.
+            streamingScreen.visibility = View.GONE
+            photoScreen.visibility = View.GONE
+            nowPlayingScreen.visibility = View.GONE
+            pinScreen.visibility = View.GONE
+
             pv.player = service?.dlnaPlayer
             pv.visibility = View.VISIBLE
             pv.bringToFront()
@@ -454,8 +463,47 @@ class MainActivity : AppCompatActivity() {
         pv.post {
             pv.player = null
             pv.visibility = View.GONE
+            // Let the AirPlay overlay logic re-own visibility of its screens.
+            streamingScreen.visibility = View.VISIBLE
+            photoScreen.visibility = View.GONE
+            nowPlayingScreen.visibility = View.GONE
+            pinScreen.visibility = View.GONE
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    // ─── Remote control (D-pad) support for DLNA full-screen playback ─────
+    // On a TV, the sender is remote-controlled: D-pad + OK. The PlayerView
+    // controller is touch-oriented, so we surface it on any D-pad press and
+    // hand focus to it; media keys (play/pause/ff/rew) are handled by
+    // PlayerView itself.
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val pv = dlnaPlayerView
+        if (pv != null && pv.visibility == View.VISIBLE) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER -> {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        // Always surface the controller on a D-pad press (it
+                        // auto-hides after the timeout; re-showing is a no-op
+                        // while visible). Its buttons are focusable, so the
+                        // remote's D-pad then navigates play/pause/seek.
+                        pv.showController()
+                        return true
+                    }
+                }
+                else -> {
+                    // Media keys and everything else: let PlayerView/ExoPlayer
+                    // handle them.
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
 }
