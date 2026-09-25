@@ -219,12 +219,6 @@
     </LinearLayout>
     </ScrollView>
 
-    <!-- DLNA video playback surface — stacked above the scroll content, hidden
-         until a phone app starts casting; shown while DLNA is playing. -->
-    <SurfaceView
-        android:id="@+id/surface_dlna"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone" />
+
 
 </FrameLayout>

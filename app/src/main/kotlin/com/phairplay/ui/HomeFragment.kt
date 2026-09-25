@@ -68,7 +68,6 @@ class HomeFragment : Fragment() {
     private lateinit var cardMiracast: View
     private lateinit var cardCast: View
     private lateinit var cardDlna: View
-    private lateinit var surfaceDlna: android.view.SurfaceView
 
     /** Most recent DLNA startup error message, re-applied after card redraws. */
     private var lastDlnaError: String? = null
@@ -112,7 +111,6 @@ class HomeFragment : Fragment() {
         cardMiracast     = view.findViewById(R.id.card_miracast)
         cardCast         = view.findViewById(R.id.card_cast)
         cardDlna         = view.findViewById(R.id.card_dlna)
-        surfaceDlna      = view.findViewById(R.id.surface_dlna)
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
@@ -187,7 +185,6 @@ class HomeFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             svc.dlnaState.collectLatest { state ->
                 updateProtocolCard(cardDlna, state)
-                updateDlnaPlaybackSurface(state)
             }
         }
         viewLifecycleOwner.lifecycleScope.launch {
@@ -197,24 +194,6 @@ class HomeFragment : Fragment() {
                     cardDlna.findViewById<TextView>(R.id.text_protocol_detail)?.text = error
                 }
             }
-        }
-    }
-
-    /**
-     * Shows/hides the full-screen DLNA video surface.
-     *
-     * While a phone video app is casting (CONNECTED), the SurfaceView is made
-     * visible and handed to the DLNA player; as soon as the cast ends or the
-     * protocol stops, the surface is hidden and detached so the home UI returns.
-     */
-    private fun updateDlnaPlaybackSurface(state: ProtocolState) {
-        val svc = service ?: return
-        if (state == ProtocolState.CONNECTED) {
-            surfaceDlna.visibility = View.VISIBLE
-            svc.attachDlnaSurface(surfaceDlna)
-        } else {
-            surfaceDlna.visibility = View.GONE
-            svc.detachDlnaSurface()
         }
     }
 

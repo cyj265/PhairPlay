@@ -11,8 +11,10 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
 import com.phairplay.dlna.renderer.DlnaAudioRenderingControl
 import com.phairplay.dlna.renderer.DlnaNoMediaPresent
 import com.phairplay.dlna.renderer.DlnaPlayerBridge
@@ -145,7 +147,15 @@ class DlnaReceiver(
                 .setConnectTimeoutMs(10_000)
                 .setReadTimeoutMs(20_000)
 
-            val exoPlayer = ExoPlayer.Builder(context)
+            // Renderers with decoder fallback: some DLNA senders (5KPlayer)
+            // produce H.264 High@5.0 streams whose format is *reported* as
+            // supported by the hardware MediaCodec yet fails at decode time
+            // (ERROR_CODE_DECODING_FAILED). Enabling fallback lets ExoPlayer
+            // retry the same stream with the software decoder automatically.
+            val renderersFactory = DefaultRenderersFactory(context)
+                .setEnableDecoderFallback(true)
+
+            val exoPlayer = ExoPlayer.Builder(context, renderersFactory)
                 .setMediaSourceFactory(
                     DefaultMediaSourceFactory(context).setDataSourceFactory(httpFactory)
                 )
@@ -183,6 +193,21 @@ class DlnaReceiver(
                             Logger.e("DLNA playback error: $msg", error)
                             DebugLog.log("DLNA", msg)
                             onError(msg)
+                            // Transient failures (Surface recreation across a
+                            // background/foreground switch, momentary network
+                            // stalls) recover with a single retry.
+                            val uri = currentUri
+                            if (uri != null) {
+                                mainHandler.postDelayed({
+                                    if (started && currentUri == uri) {
+                                        player?.let { p ->
+                                            p.setMediaItem(MediaItem.fromUri(uri))
+                                            p.prepare()
+                                            p.play()
+                                        }
+                                    }
+                                }, 1500)
+                            }
                         }
                     })
                 }
@@ -295,9 +320,15 @@ class DlnaReceiver(
     fun attachSurface(surfaceView: SurfaceView) {
         mainHandler.post {
             val p = player?.takeIf { !it.isReleased } ?: return@post
-            // SurfaceView visibility flips GONE->VISIBLE at the same moment as
-            // this call, so its Surface may not exist yet. Wait for the holder
-            // callback instead of binding a stale/zero-size Surface.
+            // PlayerView path: it manages the Surface lifecycle (including
+            // surface recreation across background/foreground) and renders the
+            // built-in controller. This is the full-screen DLNA playback UI.
+            if (surfaceView is PlayerView) {
+                surfaceView.player = p
+                return@post
+            }
+            // Legacy bare-SurfaceView path: wait for the holder callback so we
+            // never bind a stale/zero-size Surface.
             val holder = surfaceView.holder
             if (holder.surface.isValid) {
                 p.setVideoSurface(holder.surface)
@@ -322,7 +353,23 @@ class DlnaReceiver(
     @OptIn(UnstableApi::class)
     fun detachSurface() {
         mainHandler.post {
-            player?.takeIf { !it.isReleased }?.clearVideoSurface()
+            val p = player?.takeIf { !it.isReleased } ?: return@post
+            p.clearVideoSurface()
+        }
+    }
+
+    /** Pauses the DLNA player when the app goes to the background so the
+     *  MediaCodec renderer never writes into a destroyed Surface. */
+    fun pausePlaybackFromUi() {
+        mainHandler.post {
+            player?.takeIf { started && !it.isReleased }?.pause()
+        }
+    }
+
+    /** Resumes the DLNA player when the app returns to the foreground. */
+    fun resumePlaybackFromUi() {
+        mainHandler.post {
+            player?.takeIf { started && !it.isReleased && currentUri != null }?.play()
         }
     }
 
