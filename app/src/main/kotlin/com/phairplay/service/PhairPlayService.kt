@@ -388,6 +388,16 @@ class PhairPlayService : Service() {
         dlnaReceiver?.detachSurface()
     }
 
+    /** Pauses the DLNA player when the app goes to the background. */
+    fun pauseDlnaPlayback() {
+        dlnaReceiver?.pausePlaybackFromUi()
+    }
+
+    /** Resumes the DLNA player when the app returns to the foreground. */
+    fun resumeDlnaPlayback() {
+        dlnaReceiver?.resumePlaybackFromUi()
+    }
+
     private fun stopAllReceiversInternal() {
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }

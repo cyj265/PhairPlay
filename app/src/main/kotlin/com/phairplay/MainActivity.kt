@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.ui.PlayerView
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
@@ -94,6 +95,10 @@ class MainActivity : AppCompatActivity() {
     // Currently selected nav item index (0 = Home, 1 = Settings)
     private var selectedNavIndex = 0
 
+    /** Full-screen DLNA playback view (inside streaming_container so it covers
+     *  the nav panel). PlayerView provides the controller and Surface lifecycle. */
+    private var dlnaPlayerView: PlayerView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -120,10 +125,15 @@ class MainActivity : AppCompatActivity() {
         // Bind so we can observe StateFlows and supply the video Surface
         val intent = Intent(this, PhairPlayService::class.java)
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        service?.resumeDlnaPlayback()
     }
 
     override fun onStop() {
         super.onStop()
+        // Pause DLNA playback before the Surface is destroyed so the MediaCodec
+        // renderer never writes into a dead Surface (avoids DECODING_FAILED on
+        // background/foreground switches).
+        service?.pauseDlnaPlayback()
         // Clear surface reference before unbinding to avoid holding a dead Surface
         service?.setVideoSurfaceProvider { null }
         if (isBound) {
@@ -169,6 +179,21 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.addView(photoScreen)
         streamingContainer.addView(nowPlayingScreen)
         streamingContainer.addView(pinScreen)
+
+        // Full-screen DLNA playback: a PlayerView with built-in controller,
+        // keep-screen-on, and automatic Surface lifecycle management.
+        dlnaPlayerView = PlayerView(this).apply {
+            useController = true
+            setKeepScreenOn(true)
+            visibility = View.GONE
+        }
+        streamingContainer.addView(
+            dlnaPlayerView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
@@ -369,6 +394,15 @@ class MainActivity : AppCompatActivity() {
                 updateOverlay()
             }
         }
+        lifecycleScope.launch {
+            svc.dlnaState.collectLatest { state ->
+                if (state == ProtocolState.CONNECTED) {
+                    showDlnaPlayer()
+                } else {
+                    hideDlnaPlayer()
+                }
+            }
+        }
     }
 
     private fun updateOverlay() {
@@ -397,4 +431,31 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
     }
+
+
+    // ─── DLNA full-screen playback UI ─────────────────────────────────────
+
+    /** Shows the full-screen DLNA PlayerView and binds the active player. */
+    fun showDlnaPlayer() {
+        val pv = dlnaPlayerView ?: return
+        pv.post {
+            pv.player = service?.dlnaPlayer
+            pv.visibility = View.VISIBLE
+            pv.bringToFront()
+            streamingContainer.visibility = View.VISIBLE
+            streamingContainer.bringToFront()
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    /** Hides the full-screen DLNA PlayerView and releases the player binding. */
+    fun hideDlnaPlayer() {
+        val pv = dlnaPlayerView ?: return
+        pv.post {
+            pv.player = null
+            pv.visibility = View.GONE
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
 }
