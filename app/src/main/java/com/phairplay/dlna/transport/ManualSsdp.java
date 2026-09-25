@@ -55,6 +55,13 @@ public final class ManualSsdp {
             socket = new MulticastSocket(null);
             socket.setReuseAddress(true);
             socket.bind(new InetSocketAddress(PORT));
+            // Force TTL=4: the default is 1 which is fine for a single LAN hop,
+            // but some TV ROMs lower it further, silently killing SSDP
+            // multicast before it leaves the box.
+            try {
+                socket.setTimeToLive(4);
+            } catch (Exception ignored) {
+            }
             // Join the multicast group on EVERY up, non-loopback interface.
             // On a TV box that may be wired (eth0) plus WiFi, joining only one
             // interface means M-SEARCH from a sender on another path never
