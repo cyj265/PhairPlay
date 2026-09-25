@@ -4,11 +4,15 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.PlaybackException
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.phairplay.dlna.renderer.DlnaAudioRenderingControl
 import com.phairplay.dlna.renderer.DlnaNoMediaPresent
 import com.phairplay.dlna.renderer.DlnaPlayerBridge
@@ -132,27 +136,56 @@ class DlnaReceiver(
                 Logger.i("Manual SSDP start failed: ${t.message}")
             }
 
-            val exoPlayer = ExoPlayer.Builder(context).build().also { p ->
-                p.addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        when (playbackState) {
-                            Player.STATE_READY -> if (currentUri != null) {
-                                report(ProtocolState.CONNECTED)
+            // HttpDataSource tuned for DLNA senders: browser-style UA (some
+            // senders like 5KPlayer behave differently for non-browser clients),
+            // cross-protocol redirects, and generous timeouts.
+            val httpFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent("Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(20_000)
+
+            val exoPlayer = ExoPlayer.Builder(context)
+                .setMediaSourceFactory(
+                    DefaultMediaSourceFactory(context).setDataSourceFactory(httpFactory)
+                )
+                .build()
+                .also { p ->
+                    p.addListener(object : Player.Listener {
+                        override fun onPlaybackStateChanged(playbackState: Int) {
+                            val stateName = when (playbackState) {
+                                Player.STATE_IDLE -> "IDLE"
+                                Player.STATE_BUFFERING -> "BUFFERING"
+                                Player.STATE_READY -> "READY"
+                                Player.STATE_ENDED -> "ENDED"
+                                else -> "UNKNOWN"
                             }
-                            Player.STATE_ENDED -> {
-                                // The stream finished naturally — return to idle.
-                                if (currentUri != null) {
-                                    clearPlayback()
-                                    report(ProtocolState.ADVERTISING)
+                            Logger.d("DLNA player state: $stateName uri=${currentUri}")
+                            when (playbackState) {
+                                Player.STATE_READY -> if (currentUri != null) {
+                                    report(ProtocolState.CONNECTED)
+                                }
+                                Player.STATE_ENDED -> {
+                                    // The stream finished naturally — return to idle.
+                                    if (currentUri != null) {
+                                        clearPlayback()
+                                        report(ProtocolState.ADVERTISING)
+                                    }
+                                }
+                                else -> {
+                                    // STATE_IDLE / STATE_BUFFERING: transient, no UI change needed.
                                 }
                             }
-                            else -> {
-                                // STATE_IDLE / STATE_BUFFERING: transient, no UI change needed.
-                            }
                         }
-                    }
-                })
-            }
+
+                        override fun onPlayerError(error: PlaybackException) {
+                            val msg = "DLNA播放失败: ${error.errorCodeName ?: error.errorCode} ${error.message}"
+                            Logger.e("DLNA playback error: $msg", error)
+                            DebugLog.log("DLNA", msg)
+                            onError(msg)
+                        }
+                    })
+                }
             player = exoPlayer
 
             // Build the UPnP stack in-process instead of binding the stock
@@ -261,7 +294,27 @@ class DlnaReceiver(
     @OptIn(UnstableApi::class)
     fun attachSurface(surfaceView: SurfaceView) {
         mainHandler.post {
-            player?.takeIf { !it.isReleased }?.setVideoSurfaceView(surfaceView)
+            val p = player?.takeIf { !it.isReleased } ?: return@post
+            // SurfaceView visibility flips GONE->VISIBLE at the same moment as
+            // this call, so its Surface may not exist yet. Wait for the holder
+            // callback instead of binding a stale/zero-size Surface.
+            val holder = surfaceView.holder
+            if (holder.surface.isValid) {
+                p.setVideoSurface(holder.surface)
+            } else {
+                var cb: SurfaceHolder.Callback? = null
+                cb = object : SurfaceHolder.Callback {
+                    override fun surfaceCreated(h: SurfaceHolder) {
+                        p.setVideoSurface(h.surface)
+                    }
+                    override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) {
+                    }
+                    override fun surfaceDestroyed(h: SurfaceHolder) {
+                        p.clearVideoSurface()
+                    }
+                }
+                holder.addCallback(cb)
+            }
         }
     }
 
@@ -281,6 +334,7 @@ class DlnaReceiver(
             if (!started) return@post
             currentUri = uri
             Logger.i("DLNA playback start: $uri")
+            DebugLog.log("DLNA", "开始播放: $uri")
             player?.let { p ->
                 p.setMediaItem(MediaItem.fromUri(uri))
                 p.volume = (DlnaAudioRenderingControl.getVolumeValue() / 100f)
