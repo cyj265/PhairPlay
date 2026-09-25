@@ -62,6 +62,8 @@ class MainActivity : AppCompatActivity() {
     // UI references
     private lateinit var navItemHome: TextView
     private lateinit var navItemSettings: TextView
+    private lateinit var navPanel: android.view.View
+    private lateinit var navDivider: android.view.View
     private lateinit var contentContainer: FrameLayout
     private lateinit var streamingContainer: FrameLayout
 
@@ -190,6 +192,8 @@ class MainActivity : AppCompatActivity() {
     private fun bindViews() {
         navItemHome       = findViewById(R.id.nav_item_home)
         navItemSettings   = findViewById(R.id.nav_item_settings)
+        navPanel          = findViewById(R.id.nav_panel)
+        navDivider        = findViewById(R.id.nav_divider)
         contentContainer  = findViewById(R.id.content_container)
         streamingContainer = findViewById(R.id.streaming_container)
     }
@@ -495,6 +499,11 @@ class MainActivity : AppCompatActivity() {
             photoScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE
+            // Belt-and-braces fullscreen: force-hide the nav panel so the
+            // sidebar can never show through during playback, regardless of
+            // overlay sizing behaviour.
+            navPanel.visibility = View.GONE
+            navDivider.visibility = View.GONE
 
             pv.player = service?.dlnaPlayer
             pv.visibility = View.VISIBLE
@@ -528,6 +537,9 @@ class MainActivity : AppCompatActivity() {
             pv.visibility = View.GONE
             dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
             dlnaDebugView?.visibility = View.GONE
+            // Restore the nav panel once playback ends.
+            navPanel.visibility = View.VISIBLE
+            navDivider.visibility = View.VISIBLE
             // Let the AirPlay overlay logic re-own visibility of its screens.
             streamingScreen.visibility = View.VISIBLE
             photoScreen.visibility = View.GONE
