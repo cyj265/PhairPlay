@@ -62,8 +62,6 @@ class MainActivity : AppCompatActivity() {
     // UI references
     private lateinit var navItemHome: TextView
     private lateinit var navItemSettings: TextView
-    private lateinit var navPanel: android.view.View
-    private lateinit var navDivider: android.view.View
     private lateinit var contentContainer: FrameLayout
     private lateinit var streamingContainer: FrameLayout
 
@@ -192,8 +190,6 @@ class MainActivity : AppCompatActivity() {
     private fun bindViews() {
         navItemHome       = findViewById(R.id.nav_item_home)
         navItemSettings   = findViewById(R.id.nav_item_settings)
-        navPanel          = findViewById(R.id.nav_panel)
-        navDivider        = findViewById(R.id.nav_divider)
         contentContainer  = findViewById(R.id.content_container)
         streamingContainer = findViewById(R.id.streaming_container)
     }
@@ -489,42 +485,39 @@ class MainActivity : AppCompatActivity() {
 
     // ─── DLNA full-screen playback UI ─────────────────────────────────────
 
-    /** Shows the full-screen DLNA PlayerView and binds the active player. */
+    /**
+     * Shows the full-screen DLNA PlayerView and binds the active player.
+     * Mirrors the AirPlay [showStreamingScreen] pattern exactly: run directly
+     * on the main thread (no view.post), toggle the shared streaming_container
+     * and bring it to front — that is what reliably covers the nav panel.
+     */
     fun showDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
-        pv.post {
-            // DLNA owns the overlay: hide the AirPlay/photo screens (their debug
-            // HUD would otherwise show through) and surface only the player.
-            streamingScreen.visibility = View.GONE
-            photoScreen.visibility = View.GONE
-            nowPlayingScreen.visibility = View.GONE
-            pinScreen.visibility = View.GONE
-            // Belt-and-braces fullscreen: force-hide the nav panel so the
-            // sidebar can never show through during playback, regardless of
-            // overlay sizing behaviour.
-            navPanel.visibility = View.GONE
-            navDivider.visibility = View.GONE
+        // DLNA owns the overlay: hide the AirPlay/photo screens (their debug
+        // HUD would otherwise show through) and surface only the player.
+        streamingScreen.visibility = View.GONE
+        photoScreen.visibility = View.GONE
+        nowPlayingScreen.visibility = View.GONE
+        pinScreen.visibility = View.GONE
 
-            pv.player = service?.dlnaPlayer
-            pv.visibility = View.VISIBLE
-            pv.bringToFront()
-            streamingContainer.visibility = View.VISIBLE
-            streamingContainer.bringToFront()
-            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        pv.player = service?.dlnaPlayer
+        pv.visibility = View.VISIBLE
+        streamingContainer.visibility = View.VISIBLE
+        streamingContainer.bringToFront()
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-            // DLNA debug HUD honours the Settings → "Debug overlay" switch:
-            // on → show live DLNA playback info; off → hidden.
-            lifecycleScope.launch {
-                val show = SettingsRepository(this@MainActivity)
-                    .settingsFlow.first().showDebugOverlay
-                dlnaDebugView?.visibility = if (show) View.VISIBLE else View.GONE
-                if (show) {
-                    updateDlnaDebugText()
-                    dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
-                    dlnaDebugHandler.post(dlnaDebugTick)
-                } else {
-                    dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
-                }
+        // DLNA debug HUD honours the Settings → "Debug overlay" switch:
+        // on → show live DLNA playback info; off → hidden.
+        lifecycleScope.launch {
+            val show = SettingsRepository(this@MainActivity)
+                .settingsFlow.first().showDebugOverlay
+            dlnaDebugView?.visibility = if (show) View.VISIBLE else View.GONE
+            if (show) {
+                updateDlnaDebugText()
+                dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
+                dlnaDebugHandler.post(dlnaDebugTick)
+            } else {
+                dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
             }
         }
     }
@@ -532,21 +525,16 @@ class MainActivity : AppCompatActivity() {
     /** Hides the full-screen DLNA PlayerView and releases the player binding. */
     fun hideDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
-        pv.post {
-            pv.player = null
-            pv.visibility = View.GONE
-            dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
-            dlnaDebugView?.visibility = View.GONE
-            // Restore the nav panel once playback ends.
-            navPanel.visibility = View.VISIBLE
-            navDivider.visibility = View.VISIBLE
-            // Let the AirPlay overlay logic re-own visibility of its screens.
-            streamingScreen.visibility = View.VISIBLE
-            photoScreen.visibility = View.GONE
-            nowPlayingScreen.visibility = View.GONE
-            pinScreen.visibility = View.GONE
-            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        pv.player = null
+        pv.visibility = View.GONE
+        dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
+        dlnaDebugView?.visibility = View.GONE
+        // Let the AirPlay overlay logic re-own visibility of its screens.
+        streamingScreen.visibility = View.VISIBLE
+        photoScreen.visibility = View.GONE
+        nowPlayingScreen.visibility = View.GONE
+        pinScreen.visibility = View.GONE
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     /** Refreshes the DLNA debug HUD with live playback info from ExoPlayer. */
