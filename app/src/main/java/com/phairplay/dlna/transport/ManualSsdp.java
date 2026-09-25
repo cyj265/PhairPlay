@@ -55,18 +55,31 @@ public final class ManualSsdp {
             socket = new MulticastSocket(null);
             socket.setReuseAddress(true);
             socket.bind(new InetSocketAddress(PORT));
-            NetworkInterface ni = wifiInterface();
-            if (ni != null) {
-                // Specify the interface explicitly: with multiple network
-                // interfaces (WiFi + cellular + hotspot + virtual) the
-                // default joinGroup() binds to the system's default route,
-                // which may not be the WiFi interface, so M-SEARCH never
-                // reaches this socket. joinGroup() signatures changed across
-                // API levels (the old InetAddress overload was removed in
-                // API 35), so call it reflectively for compatibility.
-                joinGroup(socket, GROUP, ni);
-                DebugLog.INSTANCE.log("SSDP", "加入组播组 via 接口 " + ni.getName());
-            } else {
+            // Join the multicast group on EVERY up, non-loopback interface.
+            // On a TV box that may be wired (eth0) plus WiFi, joining only one
+            // interface means M-SEARCH from a sender on another path never
+            // reaches this socket — the box advertises (green card) but is
+            // invisible to searchers. joinGroup() signatures changed across
+            // API levels, so call it reflectively for compatibility.
+            java.util.Enumeration<NetworkInterface> ifs =
+                    NetworkInterface.getNetworkInterfaces();
+            boolean joinedAny = false;
+            if (ifs != null) {
+                while (ifs.hasMoreElements()) {
+                    NetworkInterface ni = ifs.nextElement();
+                    if (!ni.isUp() || ni.isLoopback()) {
+                        continue;
+                    }
+                    try {
+                        joinGroup(socket, GROUP, ni);
+                        DebugLog.INSTANCE.log("SSDP", "加入组播组 via 接口 " + ni.getName());
+                        joinedAny = true;
+                    } catch (Exception ignored) {
+                        DebugLog.INSTANCE.log("SSDP", "接口 " + ni.getName() + " 加入组播组失败（跳过）");
+                    }
+                }
+            }
+            if (!joinedAny) {
                 joinGroup(socket, GROUP, null);
                 DebugLog.INSTANCE.log("SSDP", "加入组播组 (默认接口)");
             }
