@@ -7,7 +7,9 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -17,11 +19,13 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
+import com.phairplay.settings.SettingsRepository
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.NowPlayingScreen
@@ -30,6 +34,7 @@ import com.phairplay.ui.PinScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -100,6 +105,18 @@ class MainActivity : AppCompatActivity() {
     /** Full-screen DLNA playback view (inside streaming_container so it covers
      *  the nav panel). PlayerView provides the controller and Surface lifecycle. */
     private var dlnaPlayerView: PlayerView? = null
+
+    /** DLNA debug HUD (Settings → "Debug overlay"), drawn ABOVE the DLNA
+     *  Surface (plain View above the Surface layer) so it is never clipped. */
+    private var dlnaDebugView: TextView? = null
+
+    private val dlnaDebugHandler = Handler(Looper.getMainLooper())
+    private val dlnaDebugTick = object : Runnable {
+        override fun run() {
+            updateDlnaDebugText()
+            dlnaDebugHandler.postDelayed(this, 500)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -195,6 +212,28 @@ class MainActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
+        )
+
+        // DLNA debug HUD — added AFTER the PlayerView so it sits above its
+        // Surface layer and is never clipped by it.
+        dlnaDebugView = TextView(this).apply {
+            setTextColor(android.graphics.Color.parseColor("#FF00FF66"))
+            setBackgroundColor(android.graphics.Color.parseColor("#A6000000"))
+            textSize = 13f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(24, 16, 24, 16)
+            visibility = View.GONE
+        }
+        streamingContainer.addView(
+            dlnaDebugView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                topMargin = 48
+                leftMargin = 48
+            }
         )
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
@@ -454,6 +493,21 @@ class MainActivity : AppCompatActivity() {
             streamingContainer.visibility = View.VISIBLE
             streamingContainer.bringToFront()
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+            // DLNA debug HUD honours the Settings → "Debug overlay" switch:
+            // on → show live DLNA playback info; off → hidden.
+            lifecycleScope.launch {
+                val show = SettingsRepository(this@MainActivity)
+                    .settingsFlow.first().showDebugOverlay
+                dlnaDebugView?.visibility = if (show) View.VISIBLE else View.GONE
+                if (show) {
+                    updateDlnaDebugText()
+                    dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
+                    dlnaDebugHandler.post(dlnaDebugTick)
+                } else {
+                    dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
+                }
+            }
         }
     }
 
@@ -463,6 +517,8 @@ class MainActivity : AppCompatActivity() {
         pv.post {
             pv.player = null
             pv.visibility = View.GONE
+            dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
+            dlnaDebugView?.visibility = View.GONE
             // Let the AirPlay overlay logic re-own visibility of its screens.
             streamingScreen.visibility = View.VISIBLE
             photoScreen.visibility = View.GONE
@@ -470,6 +526,36 @@ class MainActivity : AppCompatActivity() {
             pinScreen.visibility = View.GONE
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    /** Refreshes the DLNA debug HUD with live playback info from ExoPlayer. */
+    private fun updateDlnaDebugText() {
+        val pv = dlnaPlayerView ?: return
+        val debug = dlnaDebugView ?: return
+        if (pv.visibility != View.VISIBLE) return
+        val player = service?.dlnaPlayer ?: run {
+            debug.text = "PhairPlay · DLNA\nno player"
+            return
+        }
+        val state = when (player.playbackState) {
+            Player.STATE_IDLE -> "IDLE"
+            Player.STATE_BUFFERING -> "BUFFERING"
+            Player.STATE_READY -> "READY"
+            Player.STATE_ENDED -> "ENDED"
+            else -> "?"
+        }
+        val playing = if (player.isPlaying) "▶" else "⏸"
+        val pos = player.currentPosition / 1000
+        val dur = player.duration.takeIf { it > 0 }?.div(1000) ?: -1L
+        val size = if (androidx.media3.common.util.UnstableApi::class.isInstance(player)) {
+            runCatching { player.videoSize }.getOrNull()?.let { "${it.width}x${it.height}" } ?: "—"
+        } else "—"
+        val uri = runCatching {
+            player.currentMediaItem?.localConfiguration?.uri?.toString()?.substringAfter("//") ?: "—"
+        }.getOrNull() ?: "—"
+        debug.text = "PhairPlay · DLNA\n" +
+            "$playing $state  ${pos}s/${if (dur > 0) "${dur}s" else "∞"}\n" +
+            "$size  $uri"
     }
 
     // ─── Remote control (D-pad) support for DLNA full-screen playback ─────
