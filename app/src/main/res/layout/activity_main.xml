@@ -106,7 +106,10 @@
     <!-- ── Full-screen streaming overlay (GONE when idle) ─────────────── -->
     <!-- Constrained to all four parents edges with 0dp: in a ConstraintLayout
          an unconstrained match_parent does NOT reliably fill the parent, which
-         let the nav panel show through during DLNA playback. -->
+         let the nav panel show through during DLNA playback.
+         Black background: the video Surface only covers the video rectangle
+         (letterboxed); without an opaque container background the underlying
+         app UI (nav panel etc.) showed through the letterbox margins. -->
     <FrameLayout
         android:id="@+id/streaming_container"
         android:layout_width="0dp"
@@ -115,6 +118,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
+        android:background="@android:color/black"
         android:visibility="gone" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
