@@ -133,6 +133,13 @@ class DlnaReceiver(
                 if (!ip.isNullOrBlank()) {
                     manualSsdp = ManualSsdp().apply { start(ip) }
                     Logger.i("Manual SSDP started on $ip:1900")
+                } else {
+                    // Do NOT stay silent here: a blank debug card on the box
+                    // is exactly this case. Surface the reason so a remote
+                    // helper can report it back instead of "nothing at all".
+                    DebugLog.setSsdpStatus("未启动: 未获取到局域网IP")
+                    DebugLog.log("SSDP", "未获取到局域网IP，Manual SSDP 未启动")
+                    Logger.w("Manual SSDP skipped: no LAN IPv4 found")
                 }
             } catch (t: Throwable) {
                 Logger.i("Manual SSDP start failed: ${t.message}")
