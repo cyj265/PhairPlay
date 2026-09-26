@@ -130,10 +130,17 @@ object NetworkUtils {
      * renderer's address (http://ip:8080) on the home screen so it can be
      * reached manually without SSDP discovery.
      *
-     * WiFi (wlan*) interfaces are preferred. Hotspot / cellular / virtual
-     * interfaces are skipped because their addresses are not reachable from
-     * the cast source on the LAN (a phone in hotspot mode reports e.g.
-     * 192.168.49.1, which the computer on the home WiFi cannot reach).
+     * WiFi (wlan*) / Ethernet (eth*, en*) interfaces are preferred. Hotspot /
+     * cellular / tunnel interfaces are skipped because their addresses are not
+     * reachable from the cast source on the LAN.
+     *
+     * NOTE: we deliberately do NOT filter on NetworkInterface.isVirtual() /
+     * isPointToPoint(). Many TV-box ROMs (N1 官改系, Amlogic/RK boxes) mark
+     * their real Wi-Fi/Ethernet interfaces as virtual (bridge/aggregated
+     * adapters such as br0, mac80211 vif, etc.). Filtering them out returns
+     * null here, which silently stops the whole SSDP service and leaves the
+     * DLNA debug card completely blank. Interface-name blacklisting is the
+     * reliable way to exclude hotspot/cellular/tunnel adapters.
      */
     fun getLocalIpv4(): String? {
         try {
@@ -142,11 +149,9 @@ object NetworkUtils {
             var fallback: String? = null
             for (ni in interfaces) {
                 if (ni.isLoopback || !ni.isUp) continue
-                // Skip virtual and point-to-point adapters too (some TV ROMs
-                // create them; their addresses must never be advertised).
-                if (ni.isVirtual || ni.isPointToPoint) continue
                 val name = ni.name.lowercase()
-                // Skip hotspot, cellular, virtual and other non-LAN interfaces.
+                // Skip hotspot, cellular, tunnel and other non-LAN interfaces
+                // by NAME only (not by isVirtual()/isPointToPoint() — see above).
                 if (name.contains("softap") || name.startsWith("ap")
                     || name.contains("rmnet") || name.contains("ccmni")
                     || name.contains("wwan") || name.contains("tun")
@@ -160,7 +165,9 @@ object NetworkUtils {
                 for (addr in ni.inetAddresses) {
                     if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
                         val ip = addr.hostAddress
-                        if (name.contains("wlan") || name.contains("wifi")) {
+                        if (name.contains("wlan") || name.contains("wifi")
+                            || name.contains("eth") || name.contains("en")
+                        ) {
                             return ip
                         }
                         if (fallback == null) {
