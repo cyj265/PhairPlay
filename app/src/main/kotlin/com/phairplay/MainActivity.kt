@@ -529,11 +529,16 @@ class MainActivity : AppCompatActivity() {
         pv.visibility = View.GONE
         dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
         dlnaDebugView?.visibility = View.GONE
-        // Let the AirPlay overlay logic re-own visibility of its screens.
-        streamingScreen.visibility = View.VISIBLE
+        // DLNA ended: tear down the whole full-screen overlay, exactly like
+        // hideStreamingScreen does. Leaving streamingContainer visible with
+        // the (black, no-video) AirPlay streamingScreen on top is what caused
+        // the "computer ended cast -> phone goes black until you re-enter the
+        // app" symptom: the PlayerView was hidden but the black Surface stayed.
+        streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
+        streamingContainer.visibility = View.GONE
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
