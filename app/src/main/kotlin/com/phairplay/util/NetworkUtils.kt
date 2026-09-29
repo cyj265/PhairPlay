@@ -143,6 +143,19 @@ object NetworkUtils {
      * reliable way to exclude hotspot/cellular/tunnel adapters.
      */
     fun getLocalIpv4(): String? {
+        // 1) Preferred: the egress IPv4 the OS would actually use to send a
+        //    packet off-box. That is the address reachable from other devices on
+        //    the LAN, so it is what MUST go into the SSDP LOCATION. On a
+        //    Ethernet-wired TV box this returns the eth* address even when wlan*
+        //    is also "up", preventing the classic bug where a Wi-Fi IP
+        //    (unreachable from the Ethernet subnet) was advertised and the
+        //    renderer stayed invisible to senders such as a phone's DLNA cast.
+        val egress = egressIpv4()
+        if (!egress.isNullOrBlank()) {
+            return egress
+        }
+
+        // 2) Fallback: name-based scan (legacy behaviour) — prefer wlan/wifi/eth/en.
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
                 ?: return null
@@ -151,7 +164,7 @@ object NetworkUtils {
                 if (ni.isLoopback || !ni.isUp) continue
                 val name = ni.name.lowercase()
                 // Skip hotspot, cellular, tunnel and other non-LAN interfaces
-                // by NAME only (not by isVirtual()/isPointToPoint() — see above).
+                // by NAME only (not by isVirtual()/isPointToPoint()).
                 if (name.contains("softap") || name.startsWith("ap")
                     || name.contains("rmnet") || name.contains("ccmni")
                     || name.contains("wwan") || name.contains("tun")
@@ -181,6 +194,38 @@ object NetworkUtils {
             Timber.w(e, "getLocalIpv4 failed")
         }
         return null
+    }
+
+    /**
+     * Returns the local IPv4 the OS would route through to reach the Internet,
+     * by opening a UDP socket and "connecting" it to a public address. No packet
+     * is actually transmitted — connect() just binds the local end to the egress
+     * interface's address. Returns null when the egress interface is a
+     * tunnel/VPN (not reachable from LAN senders) or cannot be determined.
+     */
+    private fun egressIpv4(): String? {
+        return try {
+            val s = java.net.DatagramSocket()
+            s.connect(java.net.InetAddress.getByName("8.8.8.8"), 80)
+            val addr = s.localAddress as? java.net.Inet4Address
+            s.close()
+            if (addr == null || addr.isLoopbackAddress) return null
+            val host = addr.hostAddress ?: return null
+            if (host == "0.0.0.0") return null
+            // Reject tunnel / VPN / virtual egress — not reachable from LAN senders.
+            val ni = NetworkInterface.getByInetAddress(addr)
+            if (ni != null) {
+                val n = ni.name.lowercase()
+                if (n.contains("tun") || n.contains("ppp") || n.contains("rmnet")
+                    || n.contains("ccmni") || n.contains("vpn") || n.contains("dummy")
+                ) {
+                    return null
+                }
+            }
+            host
+        } catch (e: Exception) {
+            null
+        }
     }
 
     // Constants
