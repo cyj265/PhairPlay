@@ -107,8 +107,8 @@ class SettingsRepository(private val context: Context) {
     private fun Preferences.toAppSettings(): AppSettings = AppSettings(
         displayName        = this[Keys.DISPLAY_NAME]            ?: "",
         airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
-        miracastEnabled    = this[Keys.MIRACAST_ENABLED]        ?: true,
-        castEnabled        = this[Keys.CAST_ENABLED]            ?: true,
+        miracastEnabled    = this[Keys.MIRACAST_ENABLED]        ?: false,
+        castEnabled        = this[Keys.CAST_ENABLED]            ?: false,
         dlnaEnabled        = this[Keys.DLNA_ENABLED]            ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,

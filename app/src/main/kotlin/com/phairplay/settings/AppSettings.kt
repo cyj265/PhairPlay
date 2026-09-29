@@ -40,14 +40,14 @@ data class AppSettings(
      * Whether the Miracast (Wi-Fi Display) receiver is enabled.
      * When false: Wi-Fi P2P service advertisement is stopped.
      */
-    val miracastEnabled: Boolean = true,
+    val miracastEnabled: Boolean = false,
 
     /**
      * Whether the Google Cast receiver is enabled.
      * On Fire TV (no Google Play Services), this is ignored.
      * When false: Cast SDK is not initialized.
      */
-    val castEnabled: Boolean = true,
+    val castEnabled: Boolean = false,
 
     /**
      * Whether the DLNA/UPnP MediaRenderer receiver is enabled.
