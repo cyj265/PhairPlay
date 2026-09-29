@@ -29,7 +29,7 @@ android {
         minSdk = 25           // Lowest common denominator (Fire TV)
         targetSdk = 35
         versionCode = 4
-        versionName = "1.0.49"
+        versionName = "1.0.50"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
@@ -68,24 +68,23 @@ android {
         }
     }
 
-    // Release signing: credentials are injected via environment variables in CI.
-    // Set KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD to enable.
-    // Local builds without these vars produce unsigned release APKs (fine for dev/test).
-    val keystorePath = System.getenv("KEYSTORE_PATH")
-    if (keystorePath != null) {
-        signingConfigs {
-            create("release") {
-                storeFile = file(keystorePath)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
-            }
+    // Unified signing: ONE committed keystore signs ALL builds (debug + release),
+    // on every machine and in CI, so any APK can cover-install over any other.
+    // Personal sideloaded app — keystore + password are intentionally in-repo.
+    // Env vars (KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD) may override.
+    signingConfigs {
+        create("phairplay") {
+            storeFile = file("phairplay-signing.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "phairplay-sign"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "phairplay"
+            keyPassword = System.getenv("KEY_PASSWORD") ?: "phairplay-sign"
         }
     }
 
     buildTypes {
         debug {
             isDebuggable = true
+            signingConfig = signingConfigs.getByName("phairplay")
         }
         release {
             isMinifyEnabled = true
@@ -94,7 +93,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.findByName("release")
+            signingConfig = signingConfigs.getByName("phairplay")
         }
     }
 
