@@ -25,4 +25,13 @@ public interface DlnaPlayerControl {
 
     /** Seek to a position in seconds. */
     void seekTo(long positionSeconds);
+
+    /** Current playback position in seconds (0 when unknown/idle). */
+    long getPositionSeconds();
+
+    /** Total media duration in seconds (0 when unknown). */
+    long getDurationSeconds();
+
+    /** Apply volume as a percentage 0-100 to the live player. */
+    void setVolumePercent(int percent);
 }

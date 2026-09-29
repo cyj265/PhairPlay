@@ -17,8 +17,16 @@ public final class GenaNotifier {
 
     private static volatile String callbackUrl;
     private static volatile String sid;
+    /** GENA event SEQ: starts at 0 after each (re-)subscription, then increments. */
+    private static final java.util.concurrent.atomic.AtomicInteger seq =
+            new java.util.concurrent.atomic.AtomicInteger(0);
 
     private GenaNotifier() {
+    }
+
+    /** SID handed out for the current subscription (null when none). */
+    public static String currentSid() {
+        return sid;
     }
 
     /** Remember the subscriber and push the initial LastChange shortly after. */
@@ -27,6 +35,7 @@ public final class GenaNotifier {
             callbackUrl = callback;
         }
         sid = newSid;
+        seq.set(0);
         Thread t = new Thread(() -> {
             try {
                 Thread.sleep(150);
@@ -83,7 +92,7 @@ public final class GenaNotifier {
                     + "NT: upnp:event\r\n"
                     + "NTS: upnp:propchange\r\n"
                     + "SID: " + s + "\r\n"
-                    + "SEQ: 0\r\n"
+                    + "SEQ: " + seq.getAndIncrement() + "\r\n"
                     + "CONTENT-LENGTH: " + body.getBytes("UTF-8").length + "\r\n\r\n";
             os.write((head + body).getBytes("UTF-8"));
             os.flush();

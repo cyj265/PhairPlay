@@ -127,6 +127,12 @@ public final class ManualSsdp {
 
     public synchronized void stop() {
         running = false;
+        // Tell control points we're gone; without byebye they keep the device
+        // cached for max-age (30 min) as a ghost entry that fails to cast.
+        try {
+            broadcastByebye();
+        } catch (Exception ignored) {
+        }
         if (notifier != null) {
             notifier.shutdownNow();
             notifier = null;
@@ -137,37 +143,6 @@ public final class ManualSsdp {
             } catch (Exception ignored) {
             }
             socket = null;
-        }
-    }
-
-    /**
-     * Best-effort pick of the WiFi interface (name contains "wlan"/"wifi").
-     * Falls back to the first up, non-loopback interface.
-     */
-    private static NetworkInterface wifiInterface() {
-        try {
-            java.util.Enumeration<NetworkInterface> ifs =
-                    NetworkInterface.getNetworkInterfaces();
-            if (ifs == null) {
-                return null;
-            }
-            NetworkInterface fallback = null;
-            while (ifs.hasMoreElements()) {
-                NetworkInterface ni = ifs.nextElement();
-                if (!ni.isUp() || ni.isLoopback()) {
-                    continue;
-                }
-                String name = ni.getName().toLowerCase();
-                if (name.contains("wlan") || name.contains("wifi")) {
-                    return ni;
-                }
-                if (fallback == null) {
-                    fallback = ni;
-                }
-            }
-            return fallback;
-        } catch (Exception e) {
-            return null;
         }
     }
 
@@ -216,25 +191,34 @@ public final class ManualSsdp {
     private void broadcastAlive() {
         DebugLog.INSTANCE.setLastNotifyAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.log("SSDP", "广播 NOTIFY alive -> 239.255.255.250:1900");
-        String deviceNotify = "NOTIFY * HTTP/1.1\r\n"
-                + "HOST: " + GROUP + ":" + PORT + "\r\n"
-                + "CACHE-CONTROL: max-age=1800\r\n"
-                + "LOCATION: " + location + "\r\n"
-                + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
-                + "NT: " + DEVICE_TYPE + "\r\n"
-                + "NTS: ssdp:alive\r\n"
-                + "USN: " + USN + "\r\n\r\n";
-        send(deviceNotify, GROUP, PORT);
+        // rootdevice announcement: some control points build their device tree
+        // exclusively from NT: upnp:rootdevice and ignore service-level NTs.
+        send(notify("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice"), GROUP, PORT);
+        send(notify(DEVICE_TYPE, USN), GROUP, PORT);
+        send(notify(UDN_FULL, UDN_FULL), GROUP, PORT);
+    }
 
-        String uuidNotify = "NOTIFY * HTTP/1.1\r\n"
+    private void broadcastByebye() {
+        String bye = "NTS: ssdp:byebye";
+        send(notify("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", bye), GROUP, PORT);
+        send(notify(DEVICE_TYPE, USN, bye), GROUP, PORT);
+        send(notify(UDN_FULL, UDN_FULL, bye), GROUP, PORT);
+    }
+
+    /** Builds an ssdp:alive NOTIFY for the given NT/USN pair. */
+    private String notify(String nt, String usn) {
+        return notify(nt, usn, "NTS: ssdp:alive");
+    }
+
+    private String notify(String nt, String usn, String ntsHeader) {
+        return "NOTIFY * HTTP/1.1\r\n"
                 + "HOST: " + GROUP + ":" + PORT + "\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "LOCATION: " + location + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
-                + "NT: " + UDN_FULL + "\r\n"
-                + "NTS: ssdp:alive\r\n"
-                + "USN: " + UDN_FULL + "\r\n\r\n";
-        send(uuidNotify, GROUP, PORT);
+                + "NT: " + nt + "\r\n"
+                + ntsHeader + "\r\n"
+                + "USN: " + usn + "\r\n\r\n";
     }
 
     private void listenLoop() {
@@ -285,12 +269,19 @@ public final class ManualSsdp {
         // The response ST/USN must echo what the requester asked for
         // (Windows "Play To" searches upnp:rootdevice and validates the
         // response ST against its request).
+        if ("ssdp:all".equals(stTrim)) {
+            // Per spec, ssdp:all must be answered once per matching resource:
+            // rootdevice + UUID + MediaRenderer. Control points that build
+            // their tree strictly from rootdevice responses find nothing
+            // when only the service type is answered.
+            sendSearchResponse("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", target, port);
+            sendSearchResponse(UDN_FULL, UDN_FULL, target, port);
+            sendSearchResponse(DEVICE_TYPE, USN, target, port);
+            return;
+        }
         String respSt;
         String respUsn;
-        if ("ssdp:all".equals(stTrim)) {
-            respSt = DEVICE_TYPE;
-            respUsn = USN;
-        } else if ("upnp:rootdevice".equals(stTrim)) {
+        if ("upnp:rootdevice".equals(stTrim)) {
             respSt = "upnp:rootdevice";
             respUsn = UDN_FULL + "::upnp:rootdevice";
         } else if (UDN_FULL.equals(stTrim)) {
@@ -300,17 +291,24 @@ public final class ManualSsdp {
             // Echo the Windows DMR probe type; pair our real UDN with it.
             respSt = "uuid:020000000000-dmr";
             respUsn = UDN_FULL + "::uuid:020000000000-dmr";
+        } else if (USN.equals(stTrim)) {
+            respSt = DEVICE_TYPE;
+            respUsn = USN;
         } else {
             respSt = DEVICE_TYPE;
             respUsn = USN;
         }
+        sendSearchResponse(respSt, respUsn, target, port);
+    }
+
+    private void sendSearchResponse(String st, String usn, InetAddress target, int port) {
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "EXT:\r\n"
                 + "LOCATION: " + location + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
-                + "ST: " + respSt + "\r\n"
-                + "USN: " + respUsn + "\r\n\r\n";
+                + "ST: " + st + "\r\n"
+                + "USN: " + usn + "\r\n\r\n";
         send(resp, target.getHostAddress(), port);
     }
 

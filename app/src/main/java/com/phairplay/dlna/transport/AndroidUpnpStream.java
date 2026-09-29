@@ -102,6 +102,32 @@ public class AndroidUpnpStream extends UpnpStream {
             // device error" when the AVTransport subscribe does not complete).
             if (("SUBSCRIBE".equals(request.method) || "UNSUBSCRIBE".equals(request.method))
                     && ManualDlnaHttp.isService(reqPath)) {
+                if ("UNSUBSCRIBE".equals(request.method)) {
+                    // Never mint a new SID or re-push events on unsubscribe.
+                    String resp = "HTTP/1.1 200 OK\r\nSERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                            + "CONTENT-LENGTH: 0\r\n\r\n";
+                    DebugLog.INSTANCE.log("HTTP", "UNSUBSCRIBE " + reqPath + " -> 200");
+                    socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                    socket.getOutputStream().flush();
+                    return;
+                }
+                // GENA renewal: a SUBSCRIBE carrying the current SID must be
+                // answered with the SAME SID and must NOT restart eventing
+                // (a fresh SID + re-sent SEQ 0 makes control points drop the
+                // subscription and abort long casts).
+                String existingSid = headerValue(request, "SID");
+                if (existingSid != null && !existingSid.isEmpty()
+                        && existingSid.equals(GenaNotifier.currentSid())) {
+                    String resp = "HTTP/1.1 200 OK\r\n"
+                            + "SID: " + existingSid + "\r\n"
+                            + "TIMEOUT: Second-1800\r\n"
+                            + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                            + "CONTENT-LENGTH: 0\r\n\r\n";
+                    DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + reqPath + " -> 200 续订 sid=" + existingSid);
+                    socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                    socket.getOutputStream().flush();
+                    return;
+                }
                 String sid = "uuid:" + java.util.UUID.randomUUID().toString();
                 String resp = "HTTP/1.1 200 OK\r\n"
                         + "SID: " + sid + "\r\n"
@@ -236,6 +262,20 @@ public class AndroidUpnpStream extends UpnpStream {
         head.append("\r\n");
         os.write(head.toString().getBytes("UTF-8"));
         os.flush();
+    }
+
+    /** Case-insensitive single header lookup (headers are stored as received). */
+    private static String headerValue(HttpRequest request, String name) {
+        if (request.headers == null) {
+            return null;
+        }
+        for (Map.Entry<String, List<String>> e : request.headers.entrySet()) {
+            if (name.equalsIgnoreCase(e.getKey())) {
+                List<String> vals = e.getValue();
+                return (vals == null || vals.isEmpty()) ? null : vals.get(0);
+            }
+        }
+        return null;
     }
 
     /** Writes a 200 response with an XML body (device descriptor / SCPD / SOAP). */

@@ -27,6 +27,7 @@ import org.jupnp.UpnpService
 import org.jupnp.UpnpServiceConfiguration
 import org.jupnp.UpnpServiceImpl
 import com.phairplay.dlna.transport.DlnaUpnpServiceConfiguration
+import com.phairplay.dlna.transport.ManualDlnaHttp
 import com.phairplay.dlna.transport.ManualSsdp
 import com.phairplay.util.NetworkUtils
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
@@ -105,6 +106,10 @@ class DlnaReceiver(
     @Volatile
     private var currentUri: String? = null
 
+    /** Retry counter for playback errors, reset on new media and on READY. */
+    @Volatile
+    private var retryCount = 0
+
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var manualSsdp: ManualSsdp? = null
@@ -180,12 +185,16 @@ class DlnaReceiver(
                             Logger.d("DLNA player state: $stateName uri=${currentUri}")
                             when (playbackState) {
                                 Player.STATE_READY -> if (currentUri != null) {
+                                    retryCount = 0
                                     report(ProtocolState.CONNECTED)
                                 }
                                 Player.STATE_ENDED -> {
                                     // The stream finished naturally — return to idle.
                                     if (currentUri != null) {
                                         clearPlayback()
+                                        // Let the control point see STOPPED instead
+                                        // of a stuck PLAYING after the media ends.
+                                        ManualDlnaHttp.notifyPlaybackEnded()
                                         report(ProtocolState.ADVERTISING)
                                     }
                                 }
@@ -200,11 +209,16 @@ class DlnaReceiver(
                             Logger.e("DLNA playback error: $msg", error)
                             DebugLog.log("DLNA", msg)
                             onError(msg)
+                            // Reflect STOPPED immediately so the control point's
+                            // UI doesn't stay stuck on PLAYING while we retry.
+                            ManualDlnaHttp.notifyPlaybackEnded()
                             // Transient failures (Surface recreation across a
                             // background/foreground switch, momentary network
-                            // stalls) recover with a single retry.
+                            // stalls) recover with a single retry — capped so a
+                            // dead URL can't retry forever.
                             val uri = currentUri
-                            if (uri != null) {
+                            if (uri != null && retryCount < 2) {
+                                retryCount++
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
                                         player?.let { p ->
@@ -387,6 +401,7 @@ class DlnaReceiver(
         mainHandler.post {
             if (!started) return@post
             currentUri = uri
+            retryCount = 0
             Logger.i("DLNA playback start: $uri")
             DebugLog.log("DLNA", "开始播放: $uri")
             player?.let { p ->
@@ -428,6 +443,42 @@ class DlnaReceiver(
         mainHandler.post {
             player?.takeIf { started && !it.isReleased }?.seekTo(positionSeconds * 1000L)
         }
+    }
+
+    override fun getPositionSeconds(): Long =
+        queryPlayerLong { it.currentPosition.coerceAtLeast(0L) / 1000L }
+
+    override fun getDurationSeconds(): Long =
+        queryPlayerLong { it.duration.takeIf { d -> d > 0L }?.div(1000L) ?: 0L }
+
+    override fun setVolumePercent(percent: Int) {
+        mainHandler.post {
+            player?.takeIf { started && !it.isReleased }?.volume = percent.coerceIn(0, 100) / 100f
+        }
+    }
+
+    /**
+     * Reads a value off the player. ExoPlayer is main-thread-only; SOAP
+     * threads block briefly (200 ms cap) on a main-thread round-trip.
+     */
+    private fun queryPlayerLong(query: (ExoPlayer) -> Long): Long {
+        val p = player ?: return 0L
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return if (p.isReleased) 0L else query(p)
+        }
+        var out = 0L
+        val latch = java.util.concurrent.CountDownLatch(1)
+        mainHandler.post {
+            val cur = player
+            out = if (cur != null && !cur.isReleased) query(cur) else 0L
+            latch.countDown()
+        }
+        try {
+            latch.await(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        return out
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────
