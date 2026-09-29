@@ -90,6 +90,19 @@ public final class ManualSsdp {
                 joinGroup(socket, GROUP, null);
                 DebugLog.INSTANCE.log("SSDP", "加入组播组 (默认接口)");
             }
+            // Pin the outgoing multicast interface to the NIC that owns `ip`, so
+            // the NOTIFY alive broadcasts egress on the LAN-reachable interface
+            // (Ethernet on a wired box) instead of a stale/default one. This is
+            // what makes the renderer show up for senders on the same subnet as
+            // the wired interface.
+            try {
+                NetworkInterface outNi = NetworkInterface.getByInetAddress(InetAddress.getByName(ip));
+                if (outNi != null) {
+                    socket.setNetworkInterface(outNi);
+                    DebugLog.INSTANCE.log("SSDP", "组播出口接口=" + outNi.getName());
+                }
+            } catch (Exception ignored) {
+            }
         } catch (Exception e) {
             running = false;
             socket = null;
