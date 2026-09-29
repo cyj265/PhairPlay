@@ -47,6 +47,11 @@ public class DlnaAudioRenderingControl extends AbstractAudioRenderingControl {
         return (int) volume;
     }
 
+    /** Update volume from the manual SOAP layer so both states stay in sync. */
+    public static void setVolumeValue(int v) {
+        volume = v;
+    }
+
     @Override
     protected Channel[] getCurrentChannels() {
         return new Channel[]{Channel.Master};

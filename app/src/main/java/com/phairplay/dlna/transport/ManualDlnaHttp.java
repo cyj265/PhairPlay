@@ -466,8 +466,26 @@ public final class ManualDlnaHttp {
                 // empty strings and the counters are INT32_MAX (invalid),
                 // NOT "00:00:00"/0. Windows stalls the cast when it sees
                 // a zeroed position on an idle renderer.
-                String dur = hasMedia ? "00:00:00" : "";
-                String pos = hasMedia ? formatDuration(positionSeconds) : "";
+                String dur;
+                String pos;
+                if (hasMedia) {
+                    // Live values from the player so the control point's
+                    // progress bar actually advances; fall back to the last
+                    // seek target while buffering.
+                    com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+                    long p = pc != null ? pc.getPositionSeconds() : -1;
+                    long d = pc != null ? pc.getDurationSeconds() : -1;
+                    if (p >= 0) {
+                        positionSeconds = p;
+                        pos = formatDuration(p);
+                    } else {
+                        pos = formatDuration(positionSeconds);
+                    }
+                    dur = d > 0 ? formatDuration(d) : "00:00:00";
+                } else {
+                    dur = "";
+                    pos = "";
+                }
                 String cnt = hasMedia ? "0" : "2147483647";
                 return avtResponse("GetPositionInfoResponse",
                     "<Track>" + (hasMedia ? "1" : "0") + "</Track>"
@@ -481,9 +499,19 @@ public final class ManualDlnaHttp {
             }
             case "GetMediaInfo": {
                 boolean hasMedia = !currentUri.isEmpty();
+                String mediaDur = "00:00:00";
+                if (hasMedia) {
+                    com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+                    long d = pc != null ? pc.getDurationSeconds() : -1;
+                    if (d > 0) {
+                        mediaDur = formatDuration(d);
+                    }
+                } else {
+                    mediaDur = "";
+                }
                 return avtResponse("GetMediaInfoResponse",
                     "<NrTracks>" + (hasMedia ? "1" : "0") + "</NrTracks>"
-                        + "<MediaDuration>" + (hasMedia ? "00:00:00" : "") + "</MediaDuration>"
+                        + "<MediaDuration>" + mediaDur + "</MediaDuration>"
                         + "<CurrentURI>" + xmlEscape(currentUri) + "</CurrentURI>"
                         + "<CurrentURIMetaData></CurrentURIMetaData>"
                         + "<NextURI></NextURI>"
@@ -533,6 +561,17 @@ public final class ManualDlnaHttp {
                             volume = 100;
                         }
                     } catch (NumberFormatException ignored) {
+                    }
+                }
+                // Keep the jUPnP-side volume state and the live player in sync,
+                // otherwise a remote SetVolume is silently ignored (the player
+                // only ever read DlnaAudioRenderingControl's separate state).
+                com.phairplay.dlna.renderer.DlnaAudioRenderingControl.setVolumeValue(volume);
+                com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+                if (pc != null) {
+                    try {
+                        pc.setVolumePercent(volume);
+                    } catch (Throwable ignored) {
                     }
                 }
                 return rcResponse("SetVolumeResponse", "");
@@ -631,6 +670,14 @@ public final class ManualDlnaHttp {
         return extractAction(body);
     }
 
+    /** Called by the player bridge when playback ends or errors out, so
+     *  control points see STOPPED instead of a stuck PLAYING state. */
+    public static void notifyPlaybackEnded() {
+        transportState = "STOPPED";
+        positionSeconds = 0;
+        GenaNotifier.push();
+    }
+
     private static String extractAction(String body) {
         if (body == null) {
             return null;
@@ -656,7 +703,7 @@ public final class ManualDlnaHttp {
         while (m.find()) {
             if (name.equals(m.group(1))) {
                 String v = m.group(2);
-                return v == null ? "" : v;
+                return v == null ? "" : xmlUnescape(v);
             }
         }
         // Some control points namespace the arguments, e.g. <u:CurrentURI>.
@@ -664,10 +711,18 @@ public final class ManualDlnaHttp {
         while (pm.find()) {
             if (name.equals(pm.group(2))) {
                 String v = pm.group(3);
-                return v == null ? "" : v;
+                return v == null ? "" : xmlUnescape(v);
             }
         }
         return null;
+    }
+
+    /** SOAP argument values arrive XML-escaped; without unescaping, any URL
+     *  containing "&amp;" (query params!) is stored broken and never plays. */
+    private static String xmlUnescape(String s) {
+        return s.replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", "\"").replace("&apos;", "'")
+            .replace("&amp;", "&");
     }
 
     private static String xmlEscape(String s) {
@@ -678,14 +733,14 @@ public final class ManualDlnaHttp {
             .replace("\"", "&quot;");
     }
 
-    /** Parses "HH:MM:SS" or "seconds" into seconds. */
+    /** Parses "HH:MM:SS", "HH:MM:SS.fractions" or plain seconds into seconds. */
     private static long parseDuration(String s) {
         String[] parts = s.split(":");
         if (parts.length == 3) {
             try {
-                return Long.parseLong(parts[0]) * 3600
-                    + Long.parseLong(parts[1]) * 60
-                    + Long.parseLong(parts[2]);
+                return Long.parseLong(parts[0].trim()) * 3600
+                    + Long.parseLong(parts[1].trim()) * 60
+                    + parseSecondsField(parts[2]);
             } catch (NumberFormatException e) {
                 return 0;
             }
@@ -695,6 +750,16 @@ public final class ManualDlnaHttp {
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    /** Seconds field may carry a fractional part ("45.678") — UPnP targets do. */
+    private static long parseSecondsField(String sec) {
+        String t = sec.trim();
+        int dot = t.indexOf('.');
+        if (dot >= 0) {
+            t = t.substring(0, dot);
+        }
+        return Long.parseLong(t);
     }
 
     private static String formatDuration(long seconds) {
