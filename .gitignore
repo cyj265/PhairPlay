@@ -27,6 +27,9 @@ out/
 *.keystore
 keystore.properties
 release.properties
+# Exception: PhairPlay unified signing keystore (personal sideloaded app,
+# committed on purpose so local + CI builds all share one signature).
+!app/phairplay-signing.jks
 release.env
 .release.env
 
