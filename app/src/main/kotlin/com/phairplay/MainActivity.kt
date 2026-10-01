@@ -185,7 +185,7 @@ class MainActivity : AppCompatActivity() {
         // presses Stop (home screen / notification action), on an explicit ACTION_STOP,
         // or when the system finally decides the process is no longer wanted.
         if (isFinishing) {
-            val connected = service?.activeConnection
+            val connected = service?.activeConnection?.value
             if (connected != null) {
                 // An active sender is still streaming: keep the service alive so the
                 // session isn't dropped mid-playback, and let it end on its own.
