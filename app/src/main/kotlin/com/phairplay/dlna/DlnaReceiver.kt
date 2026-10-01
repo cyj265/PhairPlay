@@ -1,6 +1,11 @@
 package com.phairplay.dlna
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
@@ -113,6 +118,8 @@ class DlnaReceiver(
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var manualSsdp: ManualSsdp? = null
+    /** Set while waiting for the box to be handed a LAN IPv4 (see [waitForIpAndStartSsdp]). */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     /** Registers the UPnP renderer and starts advertising. Must be called on the main thread. */
     fun start() {
@@ -142,9 +149,15 @@ class DlnaReceiver(
                     // Do NOT stay silent here: a blank debug card on the box
                     // is exactly this case. Surface the reason so a remote
                     // helper can report it back instead of "nothing at all".
-                    DebugLog.ssdpStatus = "未启动: 未获取到局域网IP"
-                    DebugLog.log("SSDP", "未获取到局域网IP，Manual SSDP 未启动")
-                    Logger.w("Manual SSDP skipped: no LAN IPv4 found")
+                    DebugLog.ssdpStatus = "等待局域网IP下发…"
+                    DebugLog.log("SSDP", "未获取到局域网IP，Manual SSDP 暂未启动（等待联网）")
+                    Logger.w("Manual SSDP skipped: no LAN IPv4 found — waiting for the box to get an address")
+                    // The box may still be booting / re-connecting: DHCP had not
+                    // handed out an address at start() time. Without this wait
+                    // the SSDP layer stays dead until the user restarts the app,
+                    // i.e. the phone never sees the device on a freshly booted
+                    // N1/box. Watch for the address and start then.
+                    waitForIpAndStartSsdp()
                 }
             } catch (t: Throwable) {
                 Logger.i("Manual SSDP start failed: ${t.message}")
@@ -302,6 +315,18 @@ class DlnaReceiver(
 
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
+        // Drop the pending "wait for IP" watcher first: it fires once and
+        // checks `started`, so leaving it registered can only resurrect a
+        // socket after this receiver has been torn down.
+        networkCallback?.let { cb ->
+            try {
+                (context.applicationContext
+                    .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                    .unregisterNetworkCallback(cb)
+            } catch (ignored: Exception) {
+            }
+        }
+        networkCallback = null
         try {
             manualSsdp?.stop()
         } catch (t: Throwable) {

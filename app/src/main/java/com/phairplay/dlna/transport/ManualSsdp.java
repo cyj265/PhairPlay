@@ -1,13 +1,19 @@
 package com.phairplay.dlna.transport;
 
 import java.net.DatagramPacket;
-import java.net.MulticastSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.MulticastSocket;
 import java.net.NetworkInterface;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -24,6 +30,14 @@ import com.phairplay.util.DebugLog;
  * multicast. The jUPnP registry lookup that broke for HTTP (404 on desc) could
  * equally break its SSDP responses; a manual layer makes discovery independent
  * of jUPnP's runtime state.
+ *
+ * <p>MULTI-HOME (Phicomm N1 / TV boxes): a box such as an N1 can be wired
+ * (eth0) while the phone sits on the Wi-Fi subnet, or sit behind two routers.
+ * One multicast socket pinned to a single interface answers M-SEARCH only for
+ * senders on that interface's subnet — the box shows a healthy status card yet
+ * stays invisible in the phone's cast list. This implementation therefore runs
+ * one listening socket per IPv4 interface and answers with the LOCATION that
+ * belongs to the subnet the requesting control point actually sits on.
  */
 public final class ManualSsdp {
 
@@ -38,111 +52,148 @@ public final class ManualSsdp {
 
     private static final long ALIVE_INTERVAL_SECONDS = 30;
 
-    private volatile boolean running;
-    private MulticastSocket socket;
-    private ScheduledExecutorService notifier;
-    private Thread listener;
-    private volatile String location = "";
+    /**
+     * One advertised LAN face: a local IPv4, the interface it lives on, and the
+     * multicast socket listening on that interface.
+     */
+    private static final class Face {
+        final InetAddress ip;
+        final NetworkInterface ni;
+        final MulticastSocket sock;
+        final int prefixLen;
 
-    /** Binds UDP :1900, joins the multicast group and starts advertising. */
+        Face(InetAddress ip, NetworkInterface ni, MulticastSocket sock, int prefixLen) {
+            this.ip = ip;
+            this.ni = ni;
+            this.sock = sock;
+            this.prefixLen = prefixLen;
+        }
+
+        /** LOCATION advertised on this face — the renderer's HTTP control URL. */
+        String location(int httpPort) {
+            return "http://" + ip.getHostAddress() + ":" + httpPort + DESC_PATH;
+        }
+
+        String label() {
+            return (ni == null ? "default" : ni.getName()) + "/" + ip.getHostAddress()
+                    + (prefixLen > 0 ? "/" + prefixLen : "");
+        }
+    }
+
+    private volatile boolean running;
+    /** Every LAN face we advertise on; mutated while starting and stopping only. */
+    private final List<Face> faces = new CopyOnWriteArrayList<Face>();
+    private ScheduledExecutorService notifier;
+    private volatile String location = "";
+    /** Port the DLNA HTTP control server listens on (must match AndroidStreamServer). */
+    private volatile int httpPort = 8899;
+
+    /** Joins the multicast group on every LAN face and starts advertising. */
     public synchronized void start(String ip) {
         if (running) {
             return;
         }
         running = true;
-        location = "http://" + ip + ":8899" + DESC_PATH;
+        location = "http://" + ip + ":" + httpPort + DESC_PATH;
         try {
-            socket = new MulticastSocket(null);
-            socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(PORT));
-            // Force TTL=4: the default is 1 which is fine for a single LAN hop,
-            // but some TV ROMs lower it further, silently killing SSDP
-            // multicast before it leaves the box.
-            try {
-                socket.setTimeToLive(4);
-            } catch (Exception ignored) {
-            }
-            // Join the multicast group on EVERY up, non-loopback interface.
-            // On a TV box that may be wired (eth0) plus WiFi, joining only one
-            // interface means M-SEARCH from a sender on another path never
-            // reaches this socket — the box advertises (green card) but is
-            // invisible to searchers. joinGroup() signatures changed across
-            // API levels, so call it reflectively for compatibility.
-            java.util.Enumeration<NetworkInterface> ifs =
-                    NetworkInterface.getNetworkInterfaces();
-            boolean joinedAny = false;
+            List<Face> built = new ArrayList<Face>();
+            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
             if (ifs != null) {
                 while (ifs.hasMoreElements()) {
                     NetworkInterface ni = ifs.nextElement();
                     if (!ni.isUp() || ni.isLoopback()) {
                         continue;
                     }
-                    try {
-                        joinGroup(socket, GROUP, ni);
-                        DebugLog.INSTANCE.log("SSDP", "加入组播组 via 接口 " + ni.getName());
-                        joinedAny = true;
-                    } catch (Exception ignored) {
-                        DebugLog.INSTANCE.log("SSDP", "接口 " + ni.getName() + " 加入组播组失败（跳过）");
+                    Inet4Address addr = firstIPv4(ni);
+                    if (addr == null) {
+                        continue;
                     }
+                    MulticastSocket sock = new MulticastSocket(null);
+                    sock.setReuseAddress(true);
+                    try {
+                        // A spec-ish SSDP originator binds :1900. When the port is
+                        // already taken (e.g. another SSDP client on the box) fall
+                        // back to an ephemeral port — a socket that joined the group
+                        // still receives every packet addressed to the multicast
+                        // group, so discovery keeps working.
+                        sock.bind(new InetSocketAddress(PORT));
+                    } catch (SocketException busy) {
+                        sock = new MulticastSocket(null);
+                        sock.setReuseAddress(true);
+                        sock.bind(new InetSocketAddress(0));
+                        DebugLog.INSTANCE.log("SSDP",
+                                ":1900 已被占用，改用临时端口（组播监听不受影响）");
+                    }
+                    try {
+                        sock.setTimeToLive(4);
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        joinGroup(sock, GROUP, ni);
+                        sock.setNetworkInterface(ni);
+                    } catch (Exception e) {
+                        DebugLog.INSTANCE.log("SSDP", "接口 " + ni.getName()
+                                + " 加入组播组失败: " + e.getClass().getSimpleName() + "（跳过该面）");
+                        try {
+                            sock.close();
+                        } catch (Exception ignored) {
+                        }
+                        continue;
+                    }
+                    Face f = new Face(addr, ni, sock, prefixOf(ni, addr));
+                    built.add(f);
+                    DebugLog.INSTANCE.log("SSDP", "监听面 " + f.label());
                 }
             }
-            if (!joinedAny) {
-                joinGroup(socket, GROUP, null);
-                DebugLog.INSTANCE.log("SSDP", "加入组播组 (默认接口)");
-            }
-            // Pin the outgoing multicast interface to the NIC that owns `ip`, so
-            // the NOTIFY alive broadcasts egress on the LAN-reachable interface
-            // (Ethernet on a wired box) instead of a stale/default one. This is
-            // what makes the renderer show up for senders on the same subnet as
-            // the wired interface.
-            try {
-                NetworkInterface outNi = NetworkInterface.getByInetAddress(InetAddress.getByName(ip));
-                if (outNi != null) {
-                    socket.setNetworkInterface(outNi);
-                    DebugLog.INSTANCE.log("SSDP", "组播出口接口=" + outNi.getName());
+            if (built.isEmpty()) {
+                // Last resort: a single default-interface socket (best effort).
+                MulticastSocket sock = new MulticastSocket(null);
+                sock.setReuseAddress(true);
+                try {
+                    sock.bind(new InetSocketAddress(PORT));
+                } catch (SocketException busy) {
+                    sock.bind(new InetSocketAddress(0));
                 }
-            } catch (Exception ignored) {
+                joinGroup(sock, GROUP, null);
+                built.add(new Face(InetAddress.getByName(ip), null, sock, 24));
             }
+            faces.clear();
+            faces.addAll(built);
         } catch (Exception e) {
             running = false;
-            socket = null;
+            closeAll();
             DebugLog.INSTANCE.setSsdpStatus("启动失败: " + e.getMessage());
             DebugLog.INSTANCE.setLastError(e.getClass().getSimpleName() + ": " + e.getMessage());
             DebugLog.INSTANCE.log("SSDP", "bind :1900 失败: " + e);
             return;
         }
-        // Diagnostics: dump every up / non-loopback interface so a remote helper can tell
-        // immediately whether the LAN IP used for LOCATION is the one the phone can reach.
-        StringBuilder ifaceDump = new StringBuilder("LAN接口: ");
-        try {
-            java.util.Enumeration<NetworkInterface> dumps = NetworkInterface.getNetworkInterfaces();
-            while (dumps != null && dumps.hasMoreElements()) {
-                NetworkInterface n = dumps.nextElement();
-                if (!n.isUp() || n.isLoopback()) continue;
-                java.util.List<String> ips = new java.util.ArrayList<>();
-                for (java.net.InetAddress a : java.util.Collections.list(n.getInetAddresses())) {
-                    if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress()) {
-                        ips.add(a.getHostAddress());
-                    }
-                }
-                ifaceDump.append(n.getName()).append(ips.isEmpty() ? "(无IPv4)" : ips)
-                        .append(" ");
-            }
-        } catch (Exception ignored) {
+        StringBuilder ifaceDump = new StringBuilder("LAN面: ");
+        for (Face f : faces) {
+            ifaceDump.append(f.label()).append(" ");
         }
-        DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ")");
+        DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ", 面数=" + faces.size() + ")");
         DebugLog.INSTANCE.log("SSDP", ifaceDump.toString());
         DebugLog.INSTANCE.setSsdpLocation(location);
         DebugLog.INSTANCE.log("SSDP", "启动成功, location=" + location);
-        listener = new Thread(this::listenLoop, "phairplay-ssdp");
-        listener.setDaemon(true);
-        listener.start();
-        // Announce immediately (and once more after 1s for devices that missed
-        // the first packet), then periodically re-announce.
+
+        for (final Face f : faces) {
+            Thread t = new Thread(new Runnable() {
+                public void run() {
+                    listenLoop(f);
+                }
+            }, "phairplay-ssdp");
+            t.setDaemon(true);
+            t.start();
+        }
+        // Announce on every face (each with its own reachable LOCATION) so a
+        // sender on any subnet sees a valid control URL, then re-announce.
         broadcastAlive();
         notifier = Executors.newSingleThreadScheduledExecutor();
-        notifier.scheduleAtFixedRate(
-                this::broadcastAlive, 1, ALIVE_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        notifier.scheduleAtFixedRate(new Runnable() {
+            public void run() {
+                broadcastAlive();
+            }
+        }, 1, ALIVE_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
     public synchronized void stop() {
@@ -157,13 +208,45 @@ public final class ManualSsdp {
             notifier.shutdownNow();
             notifier = null;
         }
-        if (socket != null) {
+        closeAll();
+    }
+
+    private void closeAll() {
+        for (Face f : faces) {
             try {
-                socket.close();
+                f.sock.close();
             } catch (Exception ignored) {
             }
-            socket = null;
         }
+        faces.clear();
+    }
+
+    /** First usable LAN IPv4 on an interface (link-local and loopback skipped). */
+    private static Inet4Address firstIPv4(NetworkInterface ni) {
+        try {
+            for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                if (ia.getAddress() instanceof Inet4Address
+                        && !ia.getAddress().isLoopbackAddress()
+                        && !((Inet4Address) ia.getAddress()).isLinkLocalAddress()) {
+                    return (Inet4Address) ia.getAddress();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private static int prefixOf(NetworkInterface ni, InetAddress addr) {
+        try {
+            for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                if (ia.getAddress().equals(addr)) {
+                    int len = ia.getNetworkPrefixLength();
+                    return (len >= 0 && len <= 32) ? len : 24;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return 24;
     }
 
     /**
@@ -210,27 +293,32 @@ public final class ManualSsdp {
 
     private void broadcastAlive() {
         DebugLog.INSTANCE.setLastNotifyAt(DebugLog.INSTANCE.now());
-        DebugLog.INSTANCE.log("SSDP", "广播 NOTIFY alive -> 239.255.255.250:1900");
-        // rootdevice announcement: some control points build their device tree
-        // exclusively from NT: upnp:rootdevice and ignore service-level NTs.
-        send(notify("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice"), GROUP, PORT);
-        send(notify(DEVICE_TYPE, USN), GROUP, PORT);
-        send(notify(UDN_FULL, UDN_FULL), GROUP, PORT);
+        for (Face f : faces) {
+            final String loc = f.location(httpPort);
+            // rootdevice announcement: some control points build their device tree
+            // exclusively from NT: upnp:rootdevice and ignore service-level NTs.
+            send(f, notify(loc, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice"));
+            send(f, notify(loc, DEVICE_TYPE, USN));
+            send(f, notify(loc, UDN_FULL, UDN_FULL));
+        }
     }
 
     private void broadcastByebye() {
-        String bye = "NTS: ssdp:byebye";
-        send(notify("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", bye), GROUP, PORT);
-        send(notify(DEVICE_TYPE, USN, bye), GROUP, PORT);
-        send(notify(UDN_FULL, UDN_FULL, bye), GROUP, PORT);
+        for (Face f : faces) {
+            final String loc = f.location(httpPort);
+            String bye = "NTS: ssdp:byebye";
+            send(f, notify(loc, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", bye));
+            send(f, notify(loc, DEVICE_TYPE, USN, bye));
+            send(f, notify(loc, UDN_FULL, UDN_FULL, bye));
+        }
     }
 
-    /** Builds an ssdp:alive NOTIFY for the given NT/USN pair. */
-    private String notify(String nt, String usn) {
-        return notify(nt, usn, "NTS: ssdp:alive");
+    /** Builds an ssdp NOTIFY for the given NT/USN pair. */
+    private String notify(String loc, String nt, String usn) {
+        return notify(loc, nt, usn, "NTS: ssdp:alive");
     }
 
-    private String notify(String nt, String usn, String ntsHeader) {
+    private String notify(String loc, String nt, String usn, String ntsHeader) {
         return "NOTIFY * HTTP/1.1\r\n"
                 + "HOST: " + GROUP + ":" + PORT + "\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
@@ -239,7 +327,7 @@ public final class ManualSsdp {
                 // Several phone cast stacks (Xiaomi / Huawei / CMCC loaders) drop a
                 // device whose SSDP packet lacks it, i.e. the TV is simply not listed.
                 + "X-User-Agent: redsonic\r\n"
-                + "LOCATION: " + location + "\r\n"
+                + "LOCATION: " + loc + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
                 + "NT: " + nt + "\r\n"
                 + ntsHeader + "\r\n"
@@ -258,15 +346,15 @@ public final class ManualSsdp {
         }
     }
 
-    private void listenLoop() {
+    private void listenLoop(final Face face) {
         byte[] buf = new byte[4096];
         while (running) {
             try {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
-                socket.receive(p);
+                face.sock.receive(p);
                 String data = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
                 if (data.startsWith("M-SEARCH")) {
-                    respondToSearch(data, p.getAddress(), p.getPort());
+                    respondToSearch(data, p.getAddress(), p.getPort(), face);
                 }
             } catch (SocketException e) {
                 // Socket closed while stopping — exit quietly.
@@ -293,7 +381,7 @@ public final class ManualSsdp {
         }
     }
 
-    private void respondToSearch(String data, InetAddress target, int port) {
+    private void respondToSearch(String data, InetAddress target, int port, Face from) {
         String st = header(data, "ST");
         if (st == null) {
             return;
@@ -315,8 +403,16 @@ public final class ManualSsdp {
             DebugLog.INSTANCE.log("SSDP", "收到 M-SEARCH ST=" + stTrim + " 来自 " + target.getHostAddress() + "（不匹配，忽略）");
             return;
         }
+        // Answer through the face the requester can actually reach: on a
+        // dual-homed box a LOCATION pointing into another subnet is
+        // unreachable, and the sender silently drops the device.
+        Face best = bestFaceFor(target);
+        if (best != null) {
+            from = best;
+        }
         DebugLog.INSTANCE.setLastResponseAt(DebugLog.INSTANCE.now());
-        DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port);
+        DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port
+                + " (面=" + from.label() + ", LOCATION=" + from.location(httpPort) + ")");
         // The response ST/USN must echo what the requester asked for
         // (Windows "Play To" searches upnp:rootdevice and validates the
         // response ST against its request).
@@ -325,9 +421,9 @@ public final class ManualSsdp {
             // rootdevice + UUID + MediaRenderer. Control points that build
             // their tree strictly from rootdevice responses find nothing
             // when only the service type is answered.
-            sendSearchResponse("upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", target, port);
-            sendSearchResponse(UDN_FULL, UDN_FULL, target, port);
-            sendSearchResponse(DEVICE_TYPE, USN, target, port);
+            sendSearchResponse(from, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", target, port);
+            sendSearchResponse(from, UDN_FULL, UDN_FULL, target, port);
+            sendSearchResponse(from, DEVICE_TYPE, USN, target, port);
             return;
         }
         String respSt;
@@ -349,21 +445,57 @@ public final class ManualSsdp {
             respSt = DEVICE_TYPE;
             respUsn = USN;
         }
-        sendSearchResponse(respSt, respUsn, target, port);
+        sendSearchResponse(from, respSt, respUsn, target, port);
     }
 
-    private void sendSearchResponse(String st, String usn, InetAddress target, int port) {
+    /** The face whose subnet contains `target`, or null when nothing matches. */
+    private Face bestFaceFor(InetAddress target) {
+        Face hit = null;
+        for (Face f : faces) {
+            if (sameSubnet(f, target)) {
+                hit = f;
+            }
+        }
+        return hit;
+    }
+
+    private static boolean sameSubnet(Face f, InetAddress other) {
+        try {
+            if (!(other instanceof Inet4Address) || !(f.ip instanceof Inet4Address)) {
+                return false;
+            }
+            int bits = f.prefixLen;
+            if (bits <= 0 || bits > 30) {
+                bits = 24;
+            }
+            if (bits >= 32) {
+                return f.ip.equals(other);
+            }
+            int mask = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF;
+            return ((ipv4ToInt((Inet4Address) f.ip) ^ ipv4ToInt((Inet4Address) other)) & mask) == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static int ipv4ToInt(Inet4Address a) {
+        byte[] b = a.getAddress();
+        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16)
+                | ((b[2] & 0xFF) << 8) | (b[3] & 0xFF);
+    }
+
+    private void sendSearchResponse(Face f, String st, String usn, InetAddress target, int port) {
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "DATE: " + httpDate() + "\r\n"
                 + "EXT:\r\n"
                 // DLNA CORE profile header — required by several phone cast stacks.
                 + "X-User-Agent: redsonic\r\n"
-                + "LOCATION: " + location + "\r\n"
+                + "LOCATION: " + f.location(httpPort) + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
                 + "ST: " + st + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
-        send(resp, target.getHostAddress(), port);
+        send(f, resp, target.getHostAddress(), port);
     }
 
     private static String header(String data, String name) {
@@ -377,11 +509,16 @@ public final class ManualSsdp {
         return null;
     }
 
-    private void send(String msg, String host, int port) {
+    private void send(Face f, String msg) {
+        send(f, msg, GROUP, PORT);
+    }
+
+    private void send(Face f, String msg, String host, int port) {
         try {
             byte[] b = msg.getBytes(StandardCharsets.UTF_8);
-            DatagramPacket p = new DatagramPacket(b, b.length, InetAddress.getByName(host), port);
-            socket.send(p);
+            DatagramPacket p = new DatagramPacket(
+                    b, b.length, InetAddress.getByName(host), port);
+            f.sock.send(p);
         } catch (Exception ignored) {
         }
     }
