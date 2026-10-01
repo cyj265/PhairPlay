@@ -69,8 +69,14 @@ data class AppSettings(
     /**
      * Whether PhairPlayService starts automatically on device boot.
      * Requires the RECEIVE_BOOT_COMPLETED permission to be effective.
+     *
+     * Defaults to TRUE on purpose: PhairPlay is a receiver — the moment the user
+     * installs the APK on the TV box and backs out, the service must already be
+     * advertising over mDNS/SSDP. With the old `false` default the box stayed
+     * silent until the app was launched again (or a reboot happened), which to
+     * the phone user looks exactly like "the TV cannot be found in the cast menu".
      */
-    val startOnBoot: Boolean = false,
+    val startOnBoot: Boolean = true,
 
     // ─── Developer / Debug ─────────────────────────────────────────────────
     /**

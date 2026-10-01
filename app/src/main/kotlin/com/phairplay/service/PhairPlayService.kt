@@ -125,8 +125,13 @@ class PhairPlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Promote to foreground immediately with a persistent notification
-        startForeground(NOTIFICATION_ID, buildNotification(isRunning = false))
+        // Promote to foreground immediately with a persistent notification.
+        // On Android 14+ the manifest declares foregroundServiceType="connectedDevice",
+        // which the system enforces: without NEARBY_WIFI_DEVICES / ACCESS_FINE_LOCATION
+        // a plain startForeground() throws SecurityException and the whole receiver
+        // (mDNS + SSDP) never comes up. Retry without the type so the box still gets
+        // visible on the LAN instead of failing silently.
+        startForegroundSafely(isRunning = false)
 
         when (intent?.action) {
             ACTION_START   -> serviceScope.launch { startReceivers() }
@@ -142,14 +147,18 @@ class PhairPlayService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     /**
-     * The app was swiped away from recents. Cleanly stop all receivers (which closes the RTSP
-     * connection so an active mirror ends on the sender too) and stop the service — don't let
-     * START_STICKY silently resurrect it as a zombie that keeps advertising/streaming invisibly.
+     * The app was swiped away from recents ( Android TV launcher "close app" gesture ).
+     *
+     * Legacy behaviour stopped every receiver here, which meant a phone on the same
+     * Wi-Fi could no longer find the box — the reported "cast device not found" symptom,
+     * reproducible by simply installing the APK and closing the app. A receiver app is
+     * supposed to keep advertising; so we now only park the playback surfaces and let the
+     * foreground service (START_STICKY / startOnBoot) keep the receivers alive.
+     * The explicit Stop button and ACTION_STOP remain the only ways to go silent.
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Logger.i("App task removed — stopping receivers + service")
-        stopReceivers()
-        stopSelf()
+        Logger.i("App task removed — parking playback, keeping receivers advertised")
+        pauseDlnaPlayback()
         super.onTaskRemoved(rootIntent)
     }
 
@@ -418,6 +427,32 @@ class PhairPlayService : Service() {
     }
 
     // ─── Notification ────────────────────────────────────────────────────────
+
+    /**
+     * Promotes the service to the foreground, degrading gracefully on Android 14+.
+     *
+     * The manifest declares `foregroundServiceType="connectedDevice"`. From Android 14
+     * (API 34) the system enforces that type: if the app does not hold
+     * NEARBY_WIFI_DEVICES (or ACCESS_FINE_LOCATION) the call to [Service.startForeground]
+     * throws SecurityException. An unhandled failure there meant the AirPlay/DLNA
+     * receivers never started — the box was simply absent from every phone's cast menu.
+     * Retrying without the type keeps the receiver alive even when the permission is denied.
+     */
+    private fun startForegroundSafely(isRunning: Boolean) {
+        val notification = buildNotification(isRunning)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val withType = runCatching {
+                startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            }
+            if (withType.isSuccess) return
+            Logger.w("connectedDevice foreground type rejected — retrying without type: ${withType.exceptionOrNull()?.message}")
+            runCatching { startForeground(NOTIFICATION_ID, notification) }
+                .onFailure { e -> Logger.e("Unable to promote PhairPlayService to foreground", e) }
+            return
+        }
+        runCatching { startForeground(NOTIFICATION_ID, notification) }
+            .onFailure { e -> Logger.e("Unable to promote PhairPlayService to foreground", e) }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

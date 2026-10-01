@@ -79,10 +79,18 @@ object ServiceController {
      */
     private fun startForegroundServiceCompat(context: Context, intent: Intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
+            // startForegroundService() can still be rejected (background start restrictions,
+            // permission declines on Android 14+). Fall back to a plain startService so the
+            // receivers come up instead of the whole discovery stack being skipped silently.
+            val started = runCatching { context.startForegroundService(intent) }
+            if (started.isSuccess) return
+            Logger.w("startForegroundService rejected — ${started.exceptionOrNull()?.message} — retrying via startService")
+            runCatching { context.startService(intent) }
+                .onFailure { e -> Logger.e("Unable to start PhairPlayService", e) }
+            return
         }
+        runCatching { context.startService(intent) }
+            .onFailure { e -> Logger.e("Unable to start PhairPlayService", e) }
     }
 
     /**

@@ -111,7 +111,27 @@ public final class ManualSsdp {
             DebugLog.INSTANCE.log("SSDP", "bind :1900 失败: " + e);
             return;
         }
+        // Diagnostics: dump every up / non-loopback interface so a remote helper can tell
+        // immediately whether the LAN IP used for LOCATION is the one the phone can reach.
+        StringBuilder ifaceDump = new StringBuilder("LAN接口: ");
+        try {
+            java.util.Enumeration<NetworkInterface> dumps = NetworkInterface.getNetworkInterfaces();
+            while (dumps != null && dumps.hasMoreElements()) {
+                NetworkInterface n = dumps.nextElement();
+                if (!n.isUp() || n.isLoopback()) continue;
+                java.util.List<String> ips = new java.util.ArrayList<>();
+                for (java.net.InetAddress a : java.util.Collections.list(n.getInetAddresses())) {
+                    if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress()) {
+                        ips.add(a.getHostAddress());
+                    }
+                }
+                ifaceDump.append(n.getName()).append(ips.isEmpty() ? "(无IPv4)" : ips)
+                        .append(" ");
+            }
+        } catch (Exception ignored) {
+        }
         DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ")");
+        DebugLog.INSTANCE.log("SSDP", ifaceDump.toString());
         DebugLog.INSTANCE.setSsdpLocation(location);
         DebugLog.INSTANCE.log("SSDP", "启动成功, location=" + location);
         listener = new Thread(this::listenLoop, "phairplay-ssdp");
@@ -214,11 +234,28 @@ public final class ManualSsdp {
         return "NOTIFY * HTTP/1.1\r\n"
                 + "HOST: " + GROUP + ":" + PORT + "\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
+                + "DATE: " + httpDate() + "\r\n"
+                // DLNA CORE profile: control points identify renderers by this header.
+                // Several phone cast stacks (Xiaomi / Huawei / CMCC loaders) drop a
+                // device whose SSDP packet lacks it, i.e. the TV is simply not listed.
+                + "X-User-Agent: redsonic\r\n"
                 + "LOCATION: " + location + "\r\n"
-                + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
                 + "NT: " + nt + "\r\n"
                 + ntsHeader + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
+    }
+
+    /** HTTP date header value in the format required by UPnP 1.1 (GMT, RFC 1123). */
+    private static String httpDate() {
+        try {
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(
+                    "EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US);
+            sdf.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
+            return sdf.format(new java.util.Date());
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private void listenLoop() {
@@ -234,11 +271,25 @@ public final class ManualSsdp {
             } catch (SocketException e) {
                 // Socket closed while stopping — exit quietly.
                 if (running) {
-                    Thread.yield();
+                    // The socket can reject receive() repeatedly; spinning here pinned a
+                    // CPU core and starved the mDNS/HTTP threads, which made the box
+                    // look "found but dead" (or invisible again) on the phone.
+                    pauseBeforeRetry();
                 }
             } catch (Exception e) {
-                // Keep the listener alive no matter what.
+                // Keep the listener alive no matter what, but never busy-spin.
+                DebugLog.INSTANCE.log("SSDP", "监听异常: " + e.getClass().getSimpleName());
+                pauseBeforeRetry();
             }
+        }
+    }
+
+    /** Backs off the receive loop so a failing socket can never burn a CPU core. */
+    private static void pauseBeforeRetry() {
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -304,9 +355,12 @@ public final class ManualSsdp {
     private void sendSearchResponse(String st, String usn, InetAddress target, int port) {
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
+                + "DATE: " + httpDate() + "\r\n"
                 + "EXT:\r\n"
+                // DLNA CORE profile header — required by several phone cast stacks.
+                + "X-User-Agent: redsonic\r\n"
                 + "LOCATION: " + location + "\r\n"
-                + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
                 + "ST: " + st + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
         send(resp, target.getHostAddress(), port);
