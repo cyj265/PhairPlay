@@ -290,11 +290,13 @@ class PhairPlayService : Service() {
 
     private val ipWatcher = object : ConnectivityManager.NetworkCallback() {
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
-            val ip = linkProperties.inetAddresses?.firstOrNull { addr ->
-                addr is java.net.Inet4Address
-                        && !addr.isLoopbackAddress
-                        && !addr.isLinkLocalAddress
-            }?.hostAddress
+            val addresses = linkProperties.linkAddresses
+            val ip = addresses?.firstOrNull { ia ->
+                val a = ia.address
+                a is java.net.Inet4Address
+                        && !a.isLoopbackAddress
+                        && !a.isLinkLocalAddress
+            }?.address?.hostAddress
             if (ip.isNullOrBlank()) return
             synchronized(ipRestartGuard) {
                 if (watchedIp == ip) return
@@ -513,7 +515,11 @@ class PhairPlayService : Service() {
         val notification = buildNotification(isRunning)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val withType = runCatching {
-                startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                )
             }
             if (withType.isSuccess) return
             Logger.w("connectedDevice foreground type rejected — retrying without type: ${withType.exceptionOrNull()?.message}")

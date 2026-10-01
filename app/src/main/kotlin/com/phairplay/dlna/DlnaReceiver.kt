@@ -313,6 +313,65 @@ class DlnaReceiver(
         report(ProtocolState.DISABLED)
     }
 
+    /**
+     * Waits for the box to be handed a LAN IPv4, then starts Manual SSDP.
+     *
+     * On a freshly booted TV box, [start] runs before DHCP answers, and the old
+     * code left SSDP dead until the user restarted the app — the phone never saw
+     * the device. The callback re-reads the address through the same selection
+     * rules as the normal path, so the LOCATION stays on an interface the sender
+     * can actually reach.
+     */
+    private fun waitForIpAndStartSsdp() {
+        try {
+            val cm = context.applicationContext
+                .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                    val addresses = lp.linkAddresses
+                    val ip = addresses?.firstOrNull { ia ->
+                        val a = ia.address
+                        a is java.net.Inet4Address
+                                && !a.isLoopbackAddress
+                                && !a.isLinkLocalAddress
+                    }?.address?.hostAddress
+                    if (ip.isNullOrBlank()) return
+                    try {
+                        cm.unregisterNetworkCallback(this)
+                    } catch (ignored: Exception) {
+                    }
+                    networkCallback = null
+                    mainHandler.post {
+                        if (!started) return@post
+                        val fresh = NetworkUtils.getLocalIpv4()
+                        if (fresh.isNullOrBlank()) return@post
+                        try {
+                            manualSsdp = ManualSsdp().apply { start(fresh) }
+                            Logger.i("Manual SSDP started on $fresh:1900（IP 就绪后补启动）")
+                            DebugLog.ssdpStatus = "运行中 (端口 1900)"
+                        } catch (t: Throwable) {
+                            Logger.i("Manual SSDP 补启动失败: ${t.message}")
+                            DebugLog.ssdpStatus = "未启动: ${t.message}"
+                        }
+                    }
+                }
+            }
+            networkCallback = callback
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .build(),
+                callback
+            )
+            DebugLog.log("SSDP", "已监听局域网IP下发")
+        } catch (e: Exception) {
+            Logger.w("等待局域网IP失败: ${e.message}")
+            DebugLog.ssdpStatus = "未启动: 未获取到局域网IP"
+        }
+    }
+
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
         // Drop the pending "wait for IP" watcher first: it fires once and
