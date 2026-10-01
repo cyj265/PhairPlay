@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -146,6 +147,10 @@ class MainActivity : AppCompatActivity() {
 
         // Android 13+ requires an explicit runtime grant for POST_NOTIFICATIONS
         requestNotificationPermission()
+        // Android 14+ requires NEARBY_WIFI_DEVICES, otherwise the connectedDevice
+        // foreground service can never start and the receiver stays completely
+        // invisible to phones (no mDNS/SSDP advertisement at all).
+        requestNearbyWifiPermission()
     }
 
     override fun onStart() {
@@ -172,14 +177,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // A user-initiated exit (Back out of the app) should end any active mirror — closing the
-        // service stops the receiver, which drops the RTSP connection so the sender stops mirroring
-        // too. isFinishing distinguishes a real exit from a config-change recreation (where the
-        // service must keep running). Backgrounding via Home goes through onStop only (no destroy),
-        // so the receiver keeps advertising for a quick return.
+        // Receivers are NO LONGER torn down when the user backs out of the app.
+        //
+        // WHY: "install the APK, back out, then try to cast from the phone" was the
+        // exact report that made the TV invisible in the phone's cast picker. Stopping
+        // the service here killed mDNS + SSDP. The service now only stops when the user
+        // presses Stop (home screen / notification action), on an explicit ACTION_STOP,
+        // or when the system finally decides the process is no longer wanted.
         if (isFinishing) {
-            Timber.d("MainActivity finishing — stopping service so mirroring doesn't linger")
-            ServiceController.stop(this)
+            val connected = service?.activeConnection
+            if (connected != null) {
+                // An active sender is still streaming: keep the service alive so the
+                // session isn't dropped mid-playback, and let it end on its own.
+                Timber.d("MainActivity finishing — sender '${connected.senderName}' still connected, keeping service running")
+            } else {
+                Timber.d("MainActivity finishing — leaving PhairPlayService running so the box stays discoverable")
+            }
         } else {
             Timber.d("MainActivity destroyed (recreation) — leaving service running")
         }
@@ -393,20 +406,41 @@ class MainActivity : AppCompatActivity() {
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
-                    this, android.Manifest.permission.POST_NOTIFICATIONS
+                    this, Manifest.permission.POST_NOTIFICATIONS
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
                 ActivityCompat.requestPermissions(
                     this,
-                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
                     PERMISSION_REQUEST_NOTIFICATIONS
                 )
             }
         }
     }
 
+    /**
+     * Android 14+ (API 34) requires NEARBY_WIFI_DEVICES for the `connectedDevice`
+     * foreground service type that hosts the mDNS/SSDP receivers. Without it the
+     * service start fails and the TV disappears from the phone's cast list.
+     * On Android 10–13 the equivalent requirement is silently covered by
+     * NEARBY_WIFI_DEVICES being granted with the manifest declaration.
+     */
+    private fun requestNearbyWifiPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED
+        ) return
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES),
+            PERMISSION_REQUEST_NEARBY_WIFI
+        )
+    }
+
     companion object {
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
+        private const val PERMISSION_REQUEST_NEARBY_WIFI = 1002
     }
 
     // ─── Streaming overlay ────────────────────────────────────────────────────

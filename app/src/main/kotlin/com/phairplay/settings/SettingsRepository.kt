@@ -111,7 +111,7 @@ class SettingsRepository(private val context: Context) {
         castEnabled        = this[Keys.CAST_ENABLED]            ?: false,
         dlnaEnabled        = this[Keys.DLNA_ENABLED]            ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
-        startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
+        startOnBoot        = this[Keys.START_ON_BOOT]           ?: true,
         showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true

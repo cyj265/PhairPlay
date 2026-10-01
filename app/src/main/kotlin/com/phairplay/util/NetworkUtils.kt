@@ -213,6 +213,11 @@ object NetworkUtils {
             val host = addr.hostAddress ?: return null
             if (host == "0.0.0.0") return null
             // Reject tunnel / VPN / virtual egress — not reachable from LAN senders.
+            // A link-local (169.254.x.x) or carrier-grade-NAT (100.64.x.x) egress is
+            // useless for SSDP: the phone on the LAN cannot reach it, so the renderer
+            // would advertise an unreachable LOCATION and stay invisible. Fall through
+            // to the name-based scan, which at least picks the real LAN adapter.
+            if (isNonRoutable(host)) return null
             val ni = NetworkInterface.getByInetAddress(addr)
             if (ni != null) {
                 val n = ni.name.lowercase()
@@ -227,6 +232,25 @@ object NetworkUtils {
             null
         }
     }
+
+    /**
+     * True for IPv4 ranges that can never be a LAN address the phone can reach:
+     * link-local (APIPA) and carrier-grade NAT.
+     */
+    private fun isNonRoutable(host: String): Boolean =
+        host.startsWith("169.254.") ||
+            host.startsWith("100.64.")  || host.startsWith("100.65.") ||
+            host.startsWith("100.66.")  || host.startsWith("100.67.") ||
+            host.startsWith("100.68.")  || host.startsWith("100.69.") ||
+            host.startsWith("100.70.")  || host.startsWith("100.71.") ||
+            host.startsWith("100.72.")  || host.startsWith("100.73.") ||
+            host.startsWith("100.74.")  || host.startsWith("100.75.") ||
+            host.startsWith("100.76.")  || host.startsWith("100.77.") ||
+            host.startsWith("100.78.")  || host.startsWith("100.79.") ||
+            host.startsWith("100.80.")  || host.startsWith("100.81.") ||
+            host.startsWith("100.82.")  || host.startsWith("100.83.") ||
+            host.startsWith("100.84.")  || host.startsWith("100.85.") ||
+            host.startsWith("100.86.")  || host.startsWith("100.87.")
 
     // Constants
     private const val DEFAULT_DEVICE_NAME = "PhairPlay"
