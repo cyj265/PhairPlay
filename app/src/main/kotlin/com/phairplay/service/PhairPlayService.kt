@@ -7,6 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -25,6 +30,7 @@ import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.util.Logger
+import com.phairplay.util.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -206,6 +212,10 @@ class PhairPlayService : Service() {
         val settings = settingsRepository.settingsFlow.first()
         Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
 
+        // Watch the LAN address first: every receiver captures the IP at start
+        // time, so a subnet change must rebuild them on the new address.
+        ensureLocalIpWatcher()
+
         _serviceState.value = ServiceState.Running
         updateNotification(isRunning = true)
 
@@ -238,6 +248,67 @@ class PhairPlayService : Service() {
         stopAllReceiversInternal()
         kotlinx.coroutines.delay(500) // brief pause to ensure ports are released
         startReceivers()
+    }
+
+    // ─── Local-IP self healing ───────────────────────────────────────────────
+
+    /** Last LAN IPv4 the receivers were (re)started with. */
+    private var watchedIp: String? = null
+    private var ipWatcherRegistered = false
+    private val ipRestartGuard = Any()
+    private var ipRestarting = false
+
+    /**
+     * Watches the box's LAN IPv4 and rebuilds the receivers when it changes.
+     *
+     * A TV box — notably a Phicomm N1 after a router change, a Wi-Fi reconnect
+     * or a DHCP renewal — can change its address while the app keeps running.
+     * Every receiver snapshots the IP at start time (SSDP LOCATION, mDNS
+     * records, the DLNA/RTSP control URLs), so a stale IP leaves the phone
+     * either not seeing the device at all or seeing a dead entry that times
+     * out on connect. Rebuilding on change makes the receiver follow the box
+     * instead of stranding the sender on the previous address.
+     */
+    private fun ensureLocalIpWatcher() {
+        if (ipWatcherRegistered) return
+        ipWatcherRegistered = true
+        try {
+            watchedIp = NetworkUtils.getLocalIpv4()
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .build()
+            cm.registerNetworkCallback(request, ipWatcher)
+            Logger.i("本地IP变化监听已注册（当前 $watchedIp）：IP 变更后自动重建接收链路")
+        } catch (e: Exception) {
+            Logger.w("本地IP变化监听注册失败: ${e.message}")
+            ipWatcherRegistered = false
+        }
+    }
+
+    private val ipWatcher = object : ConnectivityManager.NetworkCallback() {
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            val ip = linkProperties.inetAddresses?.firstOrNull { addr ->
+                addr is java.net.Inet4Address
+                        && !addr.isLoopbackAddress
+                        && !addr.isLinkLocalAddress
+            }?.hostAddress
+            if (ip.isNullOrBlank()) return
+            synchronized(ipRestartGuard) {
+                if (watchedIp == ip) return
+                watchedIp = ip
+                if (ipRestarting) return
+                ipRestarting = true
+            }
+            Logger.i("本地IPv4 变化 -> $ip，重建接收链路（旧的发现记录指向已失效地址）")
+            serviceScope.launch {
+                kotlinx.coroutines.delay(300)
+                synchronized(ipRestartGuard) { ipRestarting = false }
+                restartReceivers()
+            }
+        }
     }
 
     // ─── Individual Protocol Starters ────────────────────────────────────────
