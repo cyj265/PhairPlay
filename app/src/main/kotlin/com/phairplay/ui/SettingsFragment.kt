@@ -308,20 +308,26 @@ class SettingsFragment : Fragment() {
 
     /** Shows the in-app DLNA/SSDP diagnostics dialog (debugging aid). */
     private fun showDebugInfoDialog() {
-        val text = android.widget.TextView(requireContext()).apply {
-            text = com.phairplay.util.DebugLog.dump()
+        val context = requireContext()
+        val text = android.widget.TextView(context).apply {
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
             setPadding(24, 24, 24, 24)
-            setTextIsSelectable(true)
+            // TV themes resolve the default TextView color to the same light tone
+            // as the dialog panel — white text on a white panel renders as a blank
+            // box (observed on a Sony TV over an N1 box). Pin both colors so the
+            // diagnostics are readable regardless of theme.
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF111111.toInt())
         }
-        AlertDialog.Builder(requireContext())
+        val scroll = android.widget.ScrollView(context).apply { addView(text) }
+        val dialog = AlertDialog.Builder(context)
             .setTitle("调试信息")
-            .setView(text)
+            .setView(scroll)
             .setPositiveButton("复制", { _, _ ->
-                val clipboard = requireContext()
-                    .getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                    as android.content.ClipboardManager
+                val clipboard = context.getSystemService(
+                    android.content.Context.CLIPBOARD_SERVICE
+                ) as android.content.ClipboardManager
                 clipboard.setPrimaryClip(
                     android.content.ClipData.newPlainText(
                         "PhairPlay debug", com.phairplay.util.DebugLog.dump()
@@ -330,5 +336,16 @@ class SettingsFragment : Fragment() {
             })
             .setNegativeButton("关闭", null)
             .show()
+        // Refresh while shown: dump() is a snapshot, and the probe counters are
+        // only meaningful after the sender has been searching for a while —
+        // forcing a close/reopen roundtrip on a TV remote is tedious.
+        val refresh = object : Runnable {
+            override fun run() {
+                if (!dialog.isShowing) return
+                text.text = com.phairplay.util.DebugLog.dump()
+                text.postDelayed(this, 2000)
+            }
+        }
+        text.post(refresh)
     }
 }
