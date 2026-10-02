@@ -154,6 +154,14 @@ class DlnaReceiver(
     @Volatile
     private var decoderCooldownUntilMs = 0L
 
+    /** Current backoff, doubled on every consecutive failure. */
+    @Volatile
+    private var decoderCooldownMs = DECODER_COOLDOWN_MS
+
+    /** Consecutive cooldowns since the last picture that actually appeared. */
+    @Volatile
+    private var consecutiveCooldowns = 0
+
     private fun decoderCooldownActive(): Boolean =
         System.currentTimeMillis() < decoderCooldownUntilMs
 
@@ -206,20 +214,53 @@ class DlnaReceiver(
      * holding a surface it may never see again.
      */
     private fun enterDecoderCooldown(reason: String) {
-        decoderCooldownUntilMs = System.currentTimeMillis() + DECODER_COOLDOWN_MS
+        // Back off harder on each consecutive failure. The field log shows eight
+        // attempts in twenty seconds, every one failing identically: this HAL
+        // needs longer than a couple of seconds to hand the instance back, and a
+        // fixed 8 s just guarantees a slow loop instead of a real pause. Doubling
+        // up to [DECODER_COOLDOWN_MAX_MS] turns that loop into a couple of
+        // patient retries — and the box gets its decoder back for much longer,
+        // which is the whole point of cooling down at all.
+        val backoff = (decoderCooldownMs * 2).coerceAtMost(DECODER_COOLDOWN_MAX_MS)
+        decoderCooldownMs = backoff
+        consecutiveCooldowns++
+        decoderCooldownUntilMs = System.currentTimeMillis() + backoff
         mainHandler.removeCallbacks(stallWatchdog)
         mainHandler.removeCallbacks(firstPictureWatchdog)
+        // Deliberately NOT calling clearVideoSurface() here.
+        //
+        // PlayerView sets the player's video surface exactly once, when
+        // showDlnaPlayer() assigns `pv.player = p`. Detaching the surface
+        // therefore leaves the player permanently without an output, while the
+        // TextureView stays available — so the UI probe keeps reporting "surface
+        // ready", the item starts, fails the same way, and the loop repeats. The
+        // field log shows exactly eight attempts in twenty seconds, every one of
+        // them "视频轨: 0x0 + DecoderInitializationException" on a surface the
+        // probe had just declared ready.
+        //
+        // `stop()` is what actually returns the hardware decoder; the surface
+        // itself is not a scarce resource, and keeping it attached is what lets
+        // the next attempt succeed.
         player?.let { p ->
             runCatching { p.stop() }
-            runCatching { p.clearVideoSurface() }
             runCatching { p.clearMediaItems() }
         }
         currentUri = null
         DebugLog.log(
             "DLNA",
-            "$reason → 交还硬解槽并冷却 ${DECODER_COOLDOWN_MS / 1000}s，" +
-                "期间不抢占解码器（否则会拖垮盒子上的其他播放器）"
+            "$reason → 交还硬解槽并冷却 ${backoff / 1000}s" +
+                "（第 $consecutiveCooldowns 次，连续失败会继续加长；" +
+                "期间不抢占解码器，否则会拖垮盒子上的其他播放器）"
         )
+    }
+
+    /** Cleared whenever an item actually reaches a picture. */
+    private fun notePlaybackHealthy() {
+        if (consecutiveCooldowns != 0) {
+            DebugLog.log("DLNA", "画面恢复正常 → 硬解冷却策略重置")
+        }
+        decoderCooldownMs = DECODER_COOLDOWN_MS
+        consecutiveCooldowns = 0
     }
 
     /**
@@ -545,6 +586,9 @@ class DlnaReceiver(
                         override fun onRenderedFirstFrame() {
                             mainHandler.removeCallbacks(stallWatchdog)
                             mainHandler.removeCallbacks(firstPictureWatchdog)
+                            // The box can hand its decoder back: reset the backoff so
+                            // the next hiccup starts from the short delay again.
+                            notePlaybackHealthy()
                             DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
                         }
 
@@ -985,6 +1029,8 @@ class DlnaReceiver(
         // decoder slot again is impossible: the box may be running something
         // else by now, and this receiver is going away.
         decoderCooldownUntilMs = 0L
+        decoderCooldownMs = DECODER_COOLDOWN_MS
+        consecutiveCooldowns = 0
         parkedForUi = null
         mainHandler.removeCallbacks(decoderCooldownRetry)
         mainHandler.removeCallbacks(firstPictureWatchdog)
@@ -1157,6 +1203,22 @@ class DlnaReceiver(
     private fun flushPendingStart() {
         val uri = pendingStartUri ?: return
         if (!surfaceReady) return
+        // The decoder cooldown binds here too, not just in startPlayback.
+        // markSurfaceReady keeps arriving while the UI is up (the surface probe
+        // re-reports on every tick), so without this check every cooldown was
+        // cancelled one second in by the very next surface report: the field log
+        // shows eight attempts in twenty seconds, each one failing exactly like
+        // the last, which is worse than not cooling down at all.
+        if (decoderCooldownActive()) {
+            mainHandler.removeCallbacks(decoderCooldownRetry)
+            mainHandler.postDelayed(decoderCooldownRetry, COOLDOWN_RECHECK_MS.toLong())
+            DebugLog.log(
+                "DLNA",
+                "硬解冷却中 → 渲染面就绪也不起播（约 " +
+                    "${(decoderCooldownUntilMs - System.currentTimeMillis()) / 1000}s 后重试）"
+            )
+            return
+        }
         pendingStartUri = null
         mainHandler.removeCallbacks(surfaceTimeoutRunnable)
         DebugLog.log("DLNA", "前台已就绪 → 起播")
@@ -1702,6 +1764,15 @@ class DlnaReceiver(
          * breaking the rest of the system.
          */
         private const val DECODER_COOLDOWN_MS = 8_000
+
+        /**
+         * Ceiling for the doubling backoff.
+         *
+         * Long enough that the box really gets its single hardware decoder back
+         * for a while, which is the entire point: a receiver that keeps taking
+         * the slot is what breaks every other player on the device.
+         */
+        private const val DECODER_COOLDOWN_MAX_MS = 60_000
 
         /**
          * How often a Play that arrived during the cooldown re-checks it.
