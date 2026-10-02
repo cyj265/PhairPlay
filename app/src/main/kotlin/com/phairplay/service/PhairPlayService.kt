@@ -480,6 +480,14 @@ class PhairPlayService : Service() {
         dlnaReceiver?.resumePlaybackFromUi()
     }
 
+    /**
+     * Ends DLNA playback because the user closed the UI. Discovery stays up:
+     * only the media stops, and the sender is told STOPPED.
+     */
+    fun stopDlnaPlayback() {
+        dlnaReceiver?.stopPlaybackFromUi()
+    }
+
     private fun stopAllReceiversInternal() {
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }

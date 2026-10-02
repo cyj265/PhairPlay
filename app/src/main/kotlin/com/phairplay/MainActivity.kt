@@ -22,6 +22,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
+import com.phairplay.dlna.DlnaMediaMeta
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
@@ -121,10 +122,26 @@ class MainActivity : AppCompatActivity() {
      *  Surface (plain View above the Surface layer) so it is never clipped. */
     private var dlnaDebugView: TextView? = null
 
+    /** Music card for audio-only DLNA casts (see [setupDlnaMusicCard]). */
+    private var dlnaMusicView: View? = null
+
+    /** Nav-panel pill that returns to playback after Back left the player. */
+    private var resumePlaybackPill: TextView? = null
+
     private val dlnaDebugHandler = Handler(Looper.getMainLooper())
     private val dlnaDebugTick = object : Runnable {
         override fun run() {
             updateDlnaDebugText()
+            dlnaDebugHandler.postDelayed(this, 500)
+        }
+    }
+
+    /** Keeps the music card progress and the "back to playback" pill in sync
+     *  with the player (2 Hz is plenty and only touches a few views). */
+    private val dlnaUiTick = object : Runnable {
+        override fun run() {
+            updateDlnaMusicCard()
+            updateResumePill()
             dlnaDebugHandler.postDelayed(this, 500)
         }
     }
@@ -160,6 +177,9 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, PhairPlayService::class.java)
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         service?.resumeDlnaPlayback()
+        // Keep the "back to playback" affordances in sync while the UI is up
+        // (media can start, end, or go audio-only without the player showing).
+        dlnaDebugHandler.post(dlnaUiTick)
     }
 
     override fun onStop() {
@@ -170,6 +190,7 @@ class MainActivity : AppCompatActivity() {
         service?.pauseDlnaPlayback()
         // Clear surface reference before unbinding to avoid holding a dead Surface
         service?.setVideoSurfaceProvider { null }
+        dlnaDebugHandler.removeCallbacks(dlnaUiTick)
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -263,6 +284,191 @@ class MainActivity : AppCompatActivity() {
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
+
+        setupDlnaMusicCard()
+        setupResumePill()
+    }
+
+    // ─── Audio-only (music) DLNA card ────────────────────────────────────
+
+    /** Album art view of [dlnaMusicView]; loaded asynchronously when set. */
+    private var musicArtView: android.widget.ImageView? = null
+    private var musicTitleView: TextView? = null
+    private var musicArtistView: TextView? = null
+    private var musicProgressView: android.widget.ProgressBar? = null
+    private var musicTimeView: TextView? = null
+
+    /**
+     * A music player card for audio-only casts (网易云/QQ音乐 投屏音乐).
+     * Rendering an audio item into a video surface gives exactly what the user
+     * reported: a black screen with sound. The card is purely decorative — it
+     * never takes focus, so the D-pad keeps driving the (bound) player.
+     */
+    private fun setupDlnaMusicCard() {
+        val card = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0xF2101010.toInt())
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            val p = (32 * resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
+            visibility = View.GONE
+            // Must not steal the D-pad from the player underneath.
+            isFocusable = false
+            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+        musicArtView = android.widget.ImageView(this).apply {
+            val side = (220 * resources.displayMetrics.density).toInt()
+            layoutParams = android.widget.LinearLayout.LayoutParams(side, side)
+            setImageResource(android.R.drawable.ic_media_play)
+            imageTintList = android.content.res.ColorStateList.valueOf(0xFF8A8A8A.toInt())
+            val v = (16 * resources.displayMetrics.density).toInt()
+            setPadding(0, 0, 0, v)
+        }
+        musicTitleView = TextView(this).apply {
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 30f
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        musicArtistView = TextView(this).apply {
+            setTextColor(0xFFBBBBBB.toInt())
+            textSize = 20f
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            val v = (10 * resources.displayMetrics.density).toInt()
+            setPadding(0, 0, 0, v)
+        }
+        musicProgressView = android.widget.ProgressBar(
+            this, null, android.R.attr.progressBarStyleHorizontal
+        ).apply {
+            max = 1000
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                (6 * resources.displayMetrics.density).toInt()
+            ).apply { topMargin = (8 * resources.displayMetrics.density).toInt() }
+        }
+        musicTimeView = TextView(this).apply {
+            setTextColor(0xFFDDDDDD.toInt())
+            textSize = 18f
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            val v = (6 * resources.displayMetrics.density).toInt()
+            setPadding(0, v, 0, v)
+        }
+        val hint = TextView(this).apply {
+            text = "OK 播放/暂停 · ← → 快退/快进 · 菜单 设置 · 返回 回到首页"
+            setTextColor(0xFF888888.toInt())
+            textSize = 16f
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        }
+        card.addView(musicArtView)
+        card.addView(musicTitleView)
+        card.addView(musicArtistView)
+        card.addView(musicProgressView)
+        card.addView(musicTimeView)
+        card.addView(hint)
+        dlnaMusicView = card
+        streamingContainer.addView(
+            card,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply { gravity = android.view.Gravity.CENTER }
+        )
+    }
+
+    /** Shows/updates the music card for the current audio-only item. */
+    private fun updateDlnaMusicCard() {
+        val card = dlnaMusicView ?: return
+        val visible = isDlnaPlayerVisible && DlnaMediaMeta.audioOnly
+        card.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) return
+        card.bringToFront()
+        musicTitleView?.text = DlnaMediaMeta.title ?: "正在播放"
+        musicArtistView?.text = DlnaMediaMeta.artist ?: "来自 DLNA 投屏"
+        val p = dlnaPlayerView?.player
+        val pos = (p?.currentPosition ?: 0L).coerceAtLeast(0L)
+        val dur = p?.duration?.takeIf { it > 0L } ?: 0L
+        musicProgressView?.progress = if (dur > 0L) (pos * 1000L / dur).toInt() else 0
+        musicTimeView?.text = "${fmtTime(pos)} / ${if (dur > 0L) fmtTime(dur) else "--:--"}" +
+            if (p?.playWhenReady == true) "" else "  (已暂停)"
+        loadAlbumArt(DlnaMediaMeta.albumArtUri)
+    }
+
+    private fun fmtTime(ms: Long): String {
+        val total = ms / 1000L
+        return String.format("%02d:%02d", total / 60, total % 60)
+    }
+
+    /** Fetches the cover art once per URI (best effort; never blocks the UI). */
+    private fun loadAlbumArt(uri: String?) {
+        val view = musicArtView ?: return
+        if (uri.isNullOrBlank()) return
+        if (view.tag == uri) return
+        view.tag = uri
+        Thread {
+            try {
+                val conn = java.net.URL(uri).openConnection()
+                conn.connectTimeout = 5000
+                conn.readTimeout = 8000
+                val bmp = android.graphics.BitmapFactory.decodeStream(conn.getInputStream())
+                if (bmp != null) {
+                    runOnUiThread {
+                        view.setImageBitmap(bmp)
+                        view.imageTintList = null
+                    }
+                }
+            } catch (t: Throwable) {
+                // A missing/expired cover is not worth failing playback over.
+            }
+        }.start()
+    }
+
+    // ─── "Back to playback" entry point ──────────────────────────────────
+
+    /** True while an item is loaded on the DLNA renderer, regardless of UI state. */
+    private fun hasDlnaMedia(): Boolean =
+        service?.dlnaPlayer != null && DlnaMediaMeta.hasMedia
+
+    /** Re-opens full-screen playback — how a TV remote gets back after Back. */
+    fun returnToDlnaPlayback() {
+        if (hasDlnaMedia()) {
+            showDlnaPlayer()
+        } else {
+            android.widget.Toast.makeText(this, "当前没有正在播放的内容", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Pill shown in the nav panel while media plays behind the app UI. */
+    private fun setupResumePill() {
+        val panel = findViewById<android.view.ViewGroup>(R.id.nav_panel) ?: return
+        val pill = TextView(this).apply {
+            text = "▶  返回播放"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 17f
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val h = (14 * resources.displayMetrics.density).toInt()
+            setPadding(h, h, h, h)
+            setBackgroundColor(0xFF1F6FEB.toInt())
+            visibility = View.GONE
+            isFocusable = true
+            nextFocusUpId = R.id.nav_item_settings
+            setOnClickListener { returnToDlnaPlayback() }
+            setOnFocusChangeListener { _, f ->
+                setBackgroundColor(if (f) 0xFF3A8BFF.toInt() else 0xFF1F6FEB.toInt())
+            }
+        }
+        val lp = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = (16 * resources.displayMetrics.density).toInt() }
+        panel.addView(pill, lp)
+        resumePlaybackPill = pill
+    }
+
+    /** Pill visible only when media is playing but the player is not on screen. */
+    private fun updateResumePill() {
+        val pill = resumePlaybackPill ?: return
+        pill.visibility =
+            if (hasDlnaMedia() && !isDlnaPlayerVisible) View.VISIBLE else View.GONE
     }
 
     /**
@@ -273,11 +479,15 @@ class MainActivity : AppCompatActivity() {
         navItemHome.setOnClickListener {
             if (selectedNavIndex != 0) {
                 navigateTo(HomeFragment(), navItemHome)
-            } else if (service?.dlnaState?.value == ProtocolState.CONNECTED) {
-                // Already on home, and DLNA is still playing underneath (the
-                // remote pressed Back out of the player). Re-selecting Home
-                // returns to the picture; otherwise the only way back would be
-                // re-casting from the phone.
+            } else if (hasDlnaMedia()) {
+                // Already on home and DLNA still has an item loaded underneath
+                // (the remote pressed Back out of the player). Re-selecting
+                // Home returns to the picture — otherwise the only way back
+                // would be re-casting from the phone.
+                //
+                // The old check was `dlnaState == CONNECTED`, which is false
+                // the moment the sender pauses (PAUSED_PLAYBACK), so Home
+                // looked broken exactly when the user most needed to go back.
                 showDlnaPlayer()
             }
         }
@@ -527,6 +737,10 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updateDlnaMusicCard()
+        updateResumePill()
+        dlnaDebugHandler.removeCallbacks(dlnaUiTick)
+        dlnaDebugHandler.post(dlnaUiTick)
         // The remote drives this screen. Without focus the D-pad events go to
         // whatever still holds it underneath and every key looks dead.
         pv.isFocusable = true
@@ -570,6 +784,8 @@ class MainActivity : AppCompatActivity() {
         pinScreen.visibility = View.GONE
         streamingContainer.visibility = View.GONE
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        dlnaMusicView?.visibility = View.GONE
+        updateResumePill()
     }
 
     /** Refreshes the DLNA debug HUD with live playback info from ExoPlayer. */
@@ -644,6 +860,13 @@ class MainActivity : AppCompatActivity() {
                         val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                         target.requestFocus()
                         return true
+                    }
+                    // Back out of the app UI (not out of the player): leaving
+                    // must end playback too. Otherwise the box keeps sounding
+                    // an app the user closed, and re-opening PhairPlay resumes
+                    // the old item as if nothing happened.
+                    if (event.repeatCount == 0) {
+                        service?.stopDlnaPlayback()
                     }
                     return false
                 }
