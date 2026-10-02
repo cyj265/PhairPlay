@@ -221,6 +221,13 @@ class DlnaReceiver(
                             val msg = "DLNA播放失败: ${error.errorCodeName ?: error.errorCode} ${error.message}"
                             Logger.e("DLNA playback error: $msg", error)
                             DebugLog.log("DLNA", msg)
+                            // A parsing failure nearly always means the SOURCE lied, not
+                            // the player: it answered HTTP 200 with an HTML error page or
+                            // plain text. Nothing in errorCodeName says so, so probe the
+                            // URL ourselves and record what actually came back.
+                            if (error.errorCode / 1000 == 3) {
+                                currentUri?.let { probeSourceAsync(it) }
+                            }
                             onError(msg)
                             // Reflect STOPPED immediately so the control point's
                             // UI doesn't stay stuck on PLAYING while we retry.
@@ -370,6 +377,48 @@ class DlnaReceiver(
             Logger.w("等待局域网IP失败: ${e.message}")
             DebugLog.ssdpStatus = "未启动: 未获取到局域网IP"
         }
+    }
+
+    /**
+     * Records the real HTTP response behind a playback failure.
+     *
+     * `ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED` reads like a player bug, but in
+     * practice it is the far end: resolver/"parsing" services answer HTTP 200
+     * with a text error page, and live-updating relay URLs expire. One GET here
+     * turns an unactionable error into a one-line verdict - Content-Type and the
+     * first bytes of the body are enough to tell those cases apart.
+     */
+    private fun probeSourceAsync(uri: String) {
+        Thread {
+            var conn: java.net.HttpURLConnection? = null
+            try {
+                conn = java.net.URL(uri).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+                )
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+                val code = conn.responseCode
+                val type = conn.contentType ?: "(无 Content-Type)"
+                val head = try {
+                    conn.inputStream.bufferedReader().use { r ->
+                        val buf = CharArray(200)
+                        val n = r.read(buf)
+                        if (n <= 0) "(空响应体)" else String(buf, 0, n).replace('\n', ' ').replace('\r', ' ')
+                    }
+                } catch (e: Exception) {
+                    "(读取响应体失败: ${e.message})"
+                }
+                DebugLog.log("DLNA", "源探测: HTTP $code, Content-Type=$type")
+                DebugLog.log("DLNA", "源前200字节: $head")
+            } catch (e: Exception) {
+                DebugLog.log("DLNA", "源探测失败: ${e.javaClass.simpleName} ${e.message}")
+            } finally {
+                conn?.disconnect()
+            }
+        }.apply { isDaemon = true; name = "dlna-source-probe" }.start()
     }
 
     /** Releases everything owned by the receiver. Main thread only. */
