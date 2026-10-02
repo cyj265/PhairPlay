@@ -67,6 +67,23 @@ public class AndroidUpnpStream extends UpnpStream {
             // returns 404 on device (despite a healthy registry).
             String reqPath = request.uri != null ? request.uri.getPath() : "";
             if ("GET".equals(request.method)) {
+                if ("/debug".equals(reqPath)) {
+                    // Plain-text diagnostics dump, reachable from any phone
+                    // browser on the LAN (http://<box-ip>:8899/debug). A TV box
+                    // has no practical way to move a clipboard elsewhere, and a
+                    // phone camera pointed at a TV screen loses half the lines —
+                    // this path makes the counters directly fetchable.
+                    byte[] body = DebugLog.INSTANCE.dump().getBytes("UTF-8");
+                    String resp = "HTTP/1.1 200 OK\r\n"
+                            + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                            + "CONTENT-TYPE: text/plain; charset=utf-8\r\n"
+                            + "CONTENT-LENGTH: " + body.length + "\r\n"
+                            + "CACHE-CONTROL: no-store\r\n"
+                            + "\r\n";
+                    socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                    socket.getOutputStream().write(body);
+                    return;
+                }
                 if (ManualDlnaHttp.isDeviceDesc(reqPath)) {
                     DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 200 设备描述");
                     writeXml(socket.getOutputStream(), ManualDlnaHttp.deviceDescriptorXml());
