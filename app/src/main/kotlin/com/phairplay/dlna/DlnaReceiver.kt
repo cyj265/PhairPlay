@@ -116,6 +116,10 @@ class DlnaReceiver(
     @Volatile
     private var retryCount = 0
 
+    /** Consecutive decoder-init failures for the current item (see the error handler). */
+    @Volatile
+    private var consecutiveDecoderFailures = 0
+
     /**
      * A Seek that arrived before the pipeline reached READY. Senders poll and
      * re-issue Seek(≈resume position) right after Play; executing it while the
@@ -157,6 +161,9 @@ class DlnaReceiver(
             probeSourceAsync(uri)
         }
     }
+
+    /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
+    private val hevcCodecSelector = HevcCodecSelector()
 
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -206,8 +213,12 @@ class DlnaReceiver(
                 Logger.i("Manual SSDP start failed: ${t.message}")
             }
 
+            // H.265 is the format this box actually trips over (the newtv live
+            // playlists are direct H.265 TS with no H.264 variant), so the
+            // decoder choice for it is ours.
             val renderersFactory = DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(true)
+                .setMediaCodecSelector(hevcCodecSelector)
 
             val exoPlayer = ExoPlayer.Builder(context, renderersFactory)
                 .setMediaSourceFactory(
@@ -295,6 +306,20 @@ class DlnaReceiver(
                             if (error.errorCode / 1000 == 3) {
                                 currentUri?.let { probeSourceAsync(it) }
                             }
+                            // A decoder that refuses to start will refuse again on
+                            // every single Play the sender polls with — each attempt
+                            // also leaks a MediaCodec, and enough of those is what
+                            // turns "one bad channel" into "nothing plays any more".
+                            // Remember the component and stop retrying once it is clear
+                            // this is a codec problem rather than a network hiccup.
+                            val failedCodec = failingCodecName(error)
+                            if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED) {
+                                consecutiveDecoderFailures++
+                                hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                Logger.w("Decoder init failed ($failedCodec) — 连续第 $consecutiveDecoderFailures 次")
+                            } else {
+                                consecutiveDecoderFailures = 0
+                            }
                             onError(msg)
                             // Reflect STOPPED immediately so the control point's
                             // UI doesn't stay stuck on PLAYING while we retry.
@@ -304,7 +329,16 @@ class DlnaReceiver(
                             // stalls) recover with a single retry — capped so a
                             // dead URL can't retry forever.
                             val uri = currentUri
-                            if (uri != null && retryCount < 2) {
+                            // Retrying makes sense for a Surface or network blip; a
+                            // dead decoder is permanent until the sender picks a
+                            // different item, so don't burn a MediaCodec per poll.
+                            val decoderDead =
+                                error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
+                                consecutiveDecoderFailures >= 2
+                            if (decoderDead) {
+                                DebugLog.log("DLNA", "${hevcCodecSelector.describeAvailable()} → 放弃自动重试")
+                            }
+                            if (uri != null && retryCount < 2 && !decoderDead) {
                                 retryCount++
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
@@ -684,6 +718,7 @@ class DlnaReceiver(
 
             currentUri = uri
             retryCount = 0
+            consecutiveDecoderFailures = 0
             pendingSeekMs = -1L
             // An item is loaded from here on: the UI may offer "back to
             // playback" and (once READY) know whether it is audio-only.
@@ -845,6 +880,21 @@ class DlnaReceiver(
             p.stop()
             p.clearMediaItems()
         }
+    }
+
+    /**
+     * Extracts the MediaCodec component name from a decode failure, e.g. the
+     * `OMX.amlogic.hevc.decoder.awesome` of
+     * "DecoderInitializationException: Decoder init failed: OMX.amlogic.hevc.decoder.awesome, Format(…)".
+     * Returns null when the message uses another shape.
+     */
+    private fun failingCodecName(error: PlaybackException): String? {
+        val text = buildString {
+            append(error.message ?: "")
+            error.cause?.let { append(it.message ?: "") }
+        }
+        val match = Regex("Decoder init failed:\\s*([^,\\s]+)").find(text)
+        return match?.groupValues?.getOrNull(1)
     }
 
     private fun report(state: ProtocolState) {
