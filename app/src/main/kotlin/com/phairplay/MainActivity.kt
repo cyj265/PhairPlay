@@ -212,7 +212,12 @@ class MainActivity : AppCompatActivity() {
             // this probe is polling a GONE view forever, which is exactly how
             // the field log ended up with "cooldown elapsed" notices that were
             // never followed by a start.
-            if (!isDlnaPlayerVisible && hasDlnaMedia()) {
+            //
+            // Unconditional, not gated on hasDlnaMedia(): the receiver rings this
+            // bell precisely when it has a parked item, and clearing that item's
+            // metadata is what stopped the re-show from happening (the log ends
+            // with "等待渲染面 4s 未就绪（播放层可见=false）" and nothing after).
+            if (!isDlnaPlayerVisible) {
                 showDlnaPlayer()
                 if (hasRealRenderSurface()) return
             }
