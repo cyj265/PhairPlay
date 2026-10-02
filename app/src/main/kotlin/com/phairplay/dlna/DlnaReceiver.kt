@@ -178,6 +178,42 @@ class DlnaReceiver(
      * The body lives in [onDecoderCooldownElapsed] because a lambda cannot
      * reference its own field during initialisation.
      */
+    /**
+     * Fails loudly and early if the buffer constants violate the contract
+     * [DefaultLoadControl] enforces in its constructor.
+     *
+     * WHY this exists: getting the order wrong (minBuffer 10 s vs rebuffer
+     * 12 s) throws `IllegalArgumentException` from inside `start()`, which the
+     * receiver catches as a startup failure — the whole DLNA stack then never
+     * comes up, so the box advertises nothing and even the /debug page is
+     * unreachable. That is a very expensive way to learn about four constants.
+     * A named check here points straight at the cause in the log.
+     */
+    private fun checkBufferDurations() {
+        val problems = buildList {
+            if (BUFFER_FOR_PLAYBACK_MS < 0) add("bufferForPlaybackMs < 0")
+            if (MIN_BUFFER_MS < BUFFER_FOR_PLAYBACK_MS) {
+                add("minBufferMs($MIN_BUFFER_MS) < bufferForPlaybackMs($BUFFER_FOR_PLAYBACK_MS)")
+            }
+            if (MAX_BUFFER_MS < MIN_BUFFER_MS) {
+                add("maxBufferMs($MAX_BUFFER_MS) < minBufferMs($MIN_BUFFER_MS)")
+            }
+            if (BUFFER_FOR_REBUFFER_MS < BUFFER_FOR_PLAYBACK_MS) {
+                add("bufferForPlaybackAfterRebufferMs($BUFFER_FOR_REBUFFER_MS) " +
+                    "< bufferForPlaybackMs($BUFFER_FOR_PLAYBACK_MS)")
+            }
+            if (MIN_BUFFER_MS < BUFFER_FOR_REBUFFER_MS) {
+                add("minBufferMs($MIN_BUFFER_MS) " +
+                    "< bufferForPlaybackAfterRebufferMs($BUFFER_FOR_REBUFFER_MS)")
+            }
+        }
+        if (problems.isNotEmpty()) {
+            throw IllegalArgumentException(
+                "DefaultLoadControl 缓冲参数非法（会导致 DLNA 启动失败）: " + problems.joinToString("; ")
+            )
+        }
+    }
+
     private val decoderCooldownRetry = Runnable { onDecoderCooldownElapsed() }
 
     private fun onDecoderCooldownElapsed() {
@@ -501,6 +537,7 @@ class DlnaReceiver(
             // every 13 s, each one recovering only because the retry re-prepared.
             // A deeper buffer absorbs those, which is the difference between
             // "briefly stalls" and "not really stalling".
+            checkBufferDurations()
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     MIN_BUFFER_MS,
@@ -1826,7 +1863,15 @@ class DlnaReceiver(
         // default depth absorbs those without adding perceptible latency on a
         // live stream, which is what the 13-second `IO_UNSPECIFIED` pattern in
         // the field log is really measuring.
-        private const val MIN_BUFFER_MS = 10_000
+        //
+        // ORDERING IS AN ASSERTION, NOT A PREFERENCE. DefaultLoadControl checks
+        //     minBufferMs >= bufferForPlaybackAfterRebufferMs
+        // and throws IllegalArgumentException otherwise — inside start(), which
+        // takes the whole DLNA stack down with it (no 8899 listener, so not even
+        // /debug is reachable). These four values violated it once already
+        // (min 10 s vs rebuffer 12 s) and took the receiver down on the box.
+        // Keep minBuffer >= rebuffer, and keep maxBuffer >= minBuffer.
+        private const val MIN_BUFFER_MS = 15_000
         private const val MAX_BUFFER_MS = 60_000
 
         /** Start playing once this much is buffered — near-instant on a live
@@ -1834,8 +1879,9 @@ class DlnaReceiver(
         private const val BUFFER_FOR_PLAYBACK_MS = 500
 
         /** How much must be buffered after a stall before resuming. A shallow
-         *  value here is what turns one failed segment into a visible freeze. */
-        private const val BUFFER_FOR_REBUFFER_MS = 12_000
+         *  value here is what turns one failed segment into a visible freeze.
+         *  MUST stay <= [MIN_BUFFER_MS] — see the assertion note above. */
+        private const val BUFFER_FOR_REBUFFER_MS = 10_000
 
         /**
          * How long a video item may sit at READY without a single frame before
