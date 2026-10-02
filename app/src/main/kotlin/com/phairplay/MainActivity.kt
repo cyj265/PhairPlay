@@ -11,7 +11,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.ViewTreeObserver
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -103,6 +106,16 @@ class MainActivity : AppCompatActivity() {
                 service?.resumeDlnaPlayback()
                 showDlnaPlayer()
             }
+
+            // The receiver parks an item whenever a decoder init failed with no
+            // surface behind it, and rings this bell instead of retrying (each
+            // blind retry burns another MediaCodec and stalls the picture). Only
+            // this side can see when a Surface actually shows up.
+            lifecycleScope.launch {
+                service?.dlnaSurfaceProbeTick?.collectLatest {
+                    if (it > 0 && isDlnaPlayerVisible) scheduleDlnaSurfaceProbe()
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -145,6 +158,66 @@ class MainActivity : AppCompatActivity() {
             updateResumePill()
             dlnaDebugHandler.postDelayed(this, 500)
         }
+    }
+
+    /**
+     * Waits until the PlayerView has actually created its Surface, then tells
+     * the receiver it may prepare.
+     *
+     * WHY a poll and not a layout callback: `TextureView` reports its size
+     * before its `SurfaceTexture` exists, and PlayerView hands the player a
+     * video surface only once it does. Preparing in between makes ExoPlayer
+     * configure the Amlogic HEVC decoder against a placeholder surface, where
+     * the HAL blocks in `configure()` and never returns — the item then dies
+     * with `视频轨: 0x0` + `DecoderInitializationException … 超时`, repeatedly,
+     * once per sender poll. That is the whole "直播投得上但一直黑屏/卡" loop.
+     *
+     * `TextureView.isAvailable` is the honest signal: it flips to true only
+     * when the SurfaceTexture exists. The receiver keeps its own bounded
+     * audio-only fallback, so this probe can stop after
+     * [DLNA_SURFACE_PROBE_MS] without leaving a cast stuck.
+     */
+    private val dlnaSurfaceProbe = object : Runnable {
+        override fun run() {
+            if (hasRealRenderSurface()) {
+                service?.markDlnaSurfaceReady()
+                com.phairplay.util.DebugLog.log(
+                    "UI", "渲染面已可用 → 通知接收层可以 prepare"
+                )
+                return
+            }
+            if (SystemClock.uptimeMillis() - dlnaSurfaceProbeStartMs < DLNA_SURFACE_PROBE_MS) {
+                dlnaDebugHandler.postDelayed(this, DLNA_SURFACE_PROBE_INTERVAL_MS)
+            }
+            // Out of time: stay silent and let the receiver's own bounded
+            // audio-only fallback start the item, which is the old behaviour.
+        }
+    }
+
+    private var dlnaSurfaceProbeStartMs = 0L
+
+    /**
+     * True when the PlayerView's render target really has a Surface.
+     *
+     * `PlayerView.getVideoSurfaceView()` is the public accessor for the inner
+     * SurfaceView/TextureView (which one depends on `app:surface_type`). A
+     * TextureView counts as ready only when `isAvailable` — that is exactly the
+     * "SurfaceTexture has been created" moment. A laid-out-but-unavailable
+     * TextureView is the state that used to hang the decoder.
+     */
+    private fun hasRealRenderSurface(): Boolean {
+        val target = dlnaPlayerView?.videoSurfaceView ?: return false
+        return when (target) {
+            is TextureView -> target.isAvailable
+            is SurfaceView -> target.holder?.surface?.isValid == true
+            else -> target.width > 0 && target.height > 0
+        }
+    }
+
+    private fun scheduleDlnaSurfaceProbe() {
+        dlnaDebugHandler.removeCallbacks(dlnaSurfaceProbe)
+        dlnaSurfaceProbeStartMs = SystemClock.uptimeMillis()
+        dlnaDebugHandler.postDelayed(dlnaSurfaceProbe, DLNA_SURFACE_PROBE_INTERVAL_MS)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -681,6 +754,17 @@ class MainActivity : AppCompatActivity() {
 
         /** How far the D-pad left/right seek (±10 s). */
         private const val SEEK_STEP_MS = 10_000L
+
+        /** How often the render-surface probe re-checks the player. */
+        private const val DLNA_SURFACE_PROBE_INTERVAL_MS = 120L
+
+        /**
+         * How long the probe looks for a Surface before giving up and letting
+         * the receiver start the item audio-only. Generous on purpose: a
+         * TextureView that was just revealed needs a frame or two, and giving
+         * up early is exactly what this probe exists to prevent.
+         */
+        private const val DLNA_SURFACE_PROBE_MS = 4_000L
     }
 
     // ─── Streaming overlay ────────────────────────────────────────────────────
@@ -790,22 +874,20 @@ class MainActivity : AppCompatActivity() {
         pv.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
-        // The player must not prepare against a texture that is still 0×0: on
-        // this box MediaCodec blocks forever inside configure(), which is what
-        // every "Decoder init failed … 超时" was. The receiver starts the item
-        // on the first real layout instead (and audio-only if the UI never
-        // produces one — see DlnaReceiver.SURFACE_WAIT_MS).
-        pv.viewTreeObserver.addOnPreDrawListener(
-            object : ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
-                    if (pv.width > 0 && pv.height > 0) {
-                        pv.viewTreeObserver.removeOnPreDrawListener(this)
-                        service?.markDlnaSurfaceReady()
-                    }
-                    return true
-                }
-            }
-        )
+        // The player must not prepare against a surface that does not exist
+        // yet. On this box MediaCodec then blocks forever inside configure()
+        // and every poll the sender makes burns another decoder.
+        //
+        // A sized View is NOT that signal. addOnPreDrawListener only proves
+        // width/height > 0; a TextureView's SurfaceTexture is usually still
+        // being created at that moment, so the PlayerView has not handed
+        // anything to the player yet and ExoPlayer configures against a
+        // placeholder surface. Field evidence: the cast that started in the
+        // same second as the layer was shown logged "video track 0x0" and
+        // failed three times, while a cast started on that same surface 40 s
+        // later ("UI not in foreground" and all) played at 1920x1080 on the
+        // first try. So poll for the real thing instead — [dlnaSurfaceProbe].
+        scheduleDlnaSurfaceProbe()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         updateDlnaMusicCard()
         updateResumePill()
@@ -842,6 +924,9 @@ class MainActivity : AppCompatActivity() {
         // The texture this player was writing into is gone: tell the receiver
         // so the next Play is not armed against a dead surface (and so the
         // codec verdicts taken on it are not carried over).
+        // The probe must die with it, or it would report "surface ready" for
+        // a view that is on its way out.
+        dlnaDebugHandler.removeCallbacks(dlnaSurfaceProbe)
         service?.markDlnaSurfaceGone()
         pv.player = null
         pv.visibility = View.GONE

@@ -78,7 +78,13 @@ class DlnaReceiver(
     private val context: Context,
     private val displayName: String,
     private val onStateChanged: (ProtocolState) -> Unit,
-    private val onError: (String) -> Unit = {}
+    private val onError: (String) -> Unit = {},
+    /**
+     * Asks the UI to look again for a render surface. Fired when an item is
+     * parked because a decoder init failed with no real surface behind it —
+     * only the Activity can say when a Surface appears.
+     */
+    private val onSurfaceProbeNeeded: () -> Unit = {}
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -146,6 +152,22 @@ class DlnaReceiver(
     @Volatile
     private var surfaceGeneration = 0
 
+    /**
+     * True when the current start attempt was gated on a surface the PlayerView
+     * had really handed to the player (MainActivity waits for
+     * `player.videoSurface != null`, not for the View to have a size).
+     *
+     * A decoder init failure is only evidence about the *component* when a real
+     * surface was there. Configure against a placeholder/just-created surface
+     * and the Amlogic HAL blocks regardless of how good the codec is — field
+     * evidence: three consecutive "init failed … 超时" on a surface that had
+     * just been revealed, then the very same component playing 1920x1080 on
+     * the first try 40 s later on that same surface. So failures recorded
+     * before this flag are counted separately and never write a component off.
+     */
+    @Volatile
+    private var startedOnRealSurface = false
+
     /** Play received but not started yet because no render surface existed. */
     @Volatile
     private var pendingStartUri: String? = null
@@ -156,7 +178,11 @@ class DlnaReceiver(
 
     /** Gives up waiting for the UI after [SURFACE_WAIT_MS] and starts the item
      *  without a picture — exactly what receivers did before auto-foreground,
-     *  so a cast that never opens the UI still makes sound. */
+     *  so a cast that never opens the UI still makes sound.
+     *
+     *  Note this path can be reached with NO surface at all, so a decoder
+     *  failure after it says nothing about the component (see
+     *  [startedOnRealSurface]). */
     private val surfaceTimeoutRunnable = Runnable {
         val uri = pendingStartUri ?: return@Runnable
         pendingStartUri = null
@@ -165,7 +191,7 @@ class DlnaReceiver(
             "DLNA",
             "等待播放层 ${SURFACE_WAIT_MS / 1000}s 未就绪 → 按仅音频起播: $uri"
         )
-        if (started) runStart(uri)
+        if (started) runStart(uri, audioOnly = true)
     }
 
     /**
@@ -382,8 +408,25 @@ class DlnaReceiver(
                                 // the very next one succeeds, so writing the
                                 // component off on the first failure is what
                                 // left the first cast of a session dead.
+                                //
+                                // AND only when this attempt actually had a
+                                // surface. Configure against a placeholder and
+                                // the Amlogic HAL blocks no matter how good the
+                                // codec is — the field log shows three "init
+                                // failed" on a surface revealed that very
+                                // second, then that same component at
+                                // 1920x1080 on the first try once the surface
+                                // had settled. A component must never be judged
+                                // on an attempt that had nothing to decode into.
                                 if (consecutiveDecoderFailures >= HEVC_ATTEMPT_LIMIT) {
-                                    hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                    if (startedOnRealSurface) {
+                                        hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                    } else {
+                                        DebugLog.log(
+                                            "DLNA",
+                                            "本次起播没有真实渲染面 → 不判定解码器不可用，等待新渲染面再试"
+                                        )
+                                    }
                                 }
                                 Logger.w(
                                     "Decoder init failed ($failedCodec) " +
@@ -417,7 +460,41 @@ class DlnaReceiver(
                                     DebugLog.lastError = "HEVC解码器不可用: $failedCodec"
                                 }
                             }
-                            if (uri != null && retryCount < 2 && !decoderDead) {
+
+                            // A decoder init failure with no real surface behind it is
+                            // not a decoder problem, it is a surface problem — and
+                            // retrying straight away just builds the next doomed
+                            // MediaCodec (the field log shows three of them, 2 s
+                            // apart, all on a surface revealed that same second).
+                            // Park the item again and let the UI's surface probe
+                            // release it once the PlayerView really has a Surface.
+                            val surfaceLessFailure =
+                                uri != null &&
+                                    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
+                                    !startedOnRealSurface
+                            if (surfaceLessFailure) {
+                                DebugLog.log(
+                                    "DLNA",
+                                    "无渲染面导致的解码失败 → 重新等待播放层，不再盲目重试: ${uri?.take(72)}…"
+                                )
+                                player?.let { p ->
+                                    runCatching { p.stop() }
+                                    runCatching { p.clearMediaItems() }
+                                }
+                                currentUri = null
+                                pendingStartUri = uri
+                                surfaceReady = false
+                                surfaceGeneration++
+                                hevcCodecSelector.resetFailures()
+                                consecutiveDecoderFailures = 0
+                                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                                // No timeout runnable here on purpose: the item must
+                                // wait for a real surface rather than fall back to a
+                                // surface-less start that is known to fail. The
+                                // sender's next Play re-enters the same gate, and
+                                // the UI is asked to keep watching for a Surface.
+                                onSurfaceProbeNeeded()
+                            } else if (uri != null && retryCount < 2 && !decoderDead) {
                                 retryCount++
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
@@ -823,6 +900,11 @@ class DlnaReceiver(
      * Safety net for a cast that must make *some* sound: if the Activity never
      * reaches the foreground (launch refused, user in another app) the item is
      * started without a picture instead of staying silent forever.
+     *
+     * This is the path that produced the one good playback in the field log
+     * (1920x1080 first try, 40 s after the surface appeared) — so "no
+     * foreground" is not the problem it was assumed to be. It stays as a
+     * fallback, but a decoder failure here must not blacklist a component.
      */
     private val foregroundTimeoutRunnable = Runnable {
         val uri = pendingStartUri ?: return@Runnable
@@ -832,7 +914,7 @@ class DlnaReceiver(
             "DLNA",
             "等待前台 ${FOREGROUND_WAIT_MS / 1000}s 未成功 → 按仅音频起播: $uri"
         )
-        if (started) runStart(uri)
+        if (started) runStart(uri, audioOnly = true)
     }
 
     /** Starts the parked item, if the render surface is there by now. */
@@ -934,9 +1016,8 @@ class DlnaReceiver(
             }
 
             // ── Wait for the render surface ───────────────────────────────────
-            // The UI is on screen but the revealed PlayerView may still lack a
-            // sized surface; configuring the decoder against a 0×0 texture
-            // hangs the same way. [SURFACE_WAIT_MS] keeps a hard cap.
+            // The UI is on screen but the revealed PlayerView may not have a
+            // real Surface yet. [SURFACE_WAIT_MS] keeps a hard cap.
             if (!surfaceReady) {
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
@@ -948,6 +1029,12 @@ class DlnaReceiver(
                 report(ProtocolState.CONNECTED)
                 return@post
             }
+
+            // Past the surface gate, so `surfaceReady` can only have been set by
+            // [markSurfaceReady] (the two bounded fallbacks call [runStart]
+            // directly, never through here) — a real surface. [runStart] records
+            // that in [startedOnRealSurface] so a decoder failure is judged
+            // against the component instead of the surface.
 
             // ── Idempotent replay ─────────────────────────────────────────────
             // This is the black-screen-with-sound fix. Phone apps re-send the
@@ -998,9 +1085,14 @@ class DlnaReceiver(
      * Loads, prepares and plays one item. Reached either straight from
      * [startPlayback] (surface already there) or once the UI reports
      * [markSurfaceReady].
+     *
+     * @param audioOnly True when one of the bounded fallbacks fired because no
+     *   usable surface ever appeared. Preparing without a surface is what makes
+     *   the Amlogic HAL hang, so this is a last resort, and a decoder failure
+     *   recorded on such an attempt says nothing about the component.
      */
     @OptIn(UnstableApi::class)
-    private fun runStart(uri: String) {
+    private fun runStart(uri: String, audioOnly: Boolean = false) {
         mainHandler.post {
             if (!started) return@post
             val p = player ?: return@post
@@ -1008,6 +1100,7 @@ class DlnaReceiver(
             currentUri = uri
             retryCount = 0
             consecutiveDecoderFailures = 0
+            startedOnRealSurface = !audioOnly
             pendingSeekMs = -1L
             mainHandler.removeCallbacks(surfaceTimeoutRunnable)
             // An item is loaded from here on: the UI may offer "back to
