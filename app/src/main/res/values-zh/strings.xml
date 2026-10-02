@@ -15,6 +15,12 @@
 
     <!-- ── 首页 ────────────────────────────────────────────────── -->
     <string name="home_title">已就绪，等待连接</string>
+    <!-- %1$s = 协议名（AirPlay / DLNA） -->
+    <string name="home_title_streaming">正在投屏 · %1$s</string>
+    <!-- %1$s = 协议名，%2$s = 媒体标题 -->
+    <string name="home_title_streaming_media">正在投屏 · %1$s · %2$s</string>
+    <!-- %1$s = 媒体标题 -->
+    <string name="home_dlna_now_playing">正在播放：%1$s · 点按返回播放</string>
     <!-- %1$s = 投屏设备列表中显示的设备名 -->
     <string name="home_device_visible_as">显示为：%1$s</string>
 

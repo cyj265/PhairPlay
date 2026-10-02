@@ -17,6 +17,12 @@
 
     <!-- ── HomeFragment ────────────────────────────────────────── -->
     <string name="home_title">Ready for connections</string>
+    <!-- %1$s = protocol name (AirPlay / DLNA) -->
+    <string name="home_title_streaming">Casting · %1$s</string>
+    <!-- %1$s = protocol name, %2$s = media title -->
+    <string name="home_title_streaming_media">Casting · %1$s · %2$s</string>
+    <!-- %1$s = media title -->
+    <string name="home_dlna_now_playing">Now playing: %1$s · tap to resume</string>
     <!-- %1$s = device name shown in sender pickers -->
     <string name="home_device_visible_as">Visible as: %1$s</string>
 
