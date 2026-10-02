@@ -6,14 +6,11 @@
     ┌──────────────────────────────────────────────────────────┐
     │  "Ready for connections"           [●] Service Running   │
     │                                                          │
-    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐        │
-    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 Cast    │        │
-    │  │  ●Running   │ │  ●Running   │ │  ●Running   │        │
-    │  │  Waiting... │ │  Waiting... │ │  Waiting... │        │
-    │  └─────────────┘ └─────────────┘ └─────────────┘        │
-    │  ┌─────────────┐                                        │
-    │  │  🟠 DLNA    │  (phone video-app casting)             │
-    │  └─────────────┘                                        │
+    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐│
+    │  │ 📺 AirPlay │ │  🟠 DLNA    │ │ 📡 Miracast│ │  🔵 Cast    ││
+    │  │ ●Running   │ │ ●Connected │ │  开发中     │ │  开发中      ││
+    │  │ Waiting... │ │ Waiting... │ │            │ │             ││
+    │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘│
     │                                                          │
     │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
     │  │  ▶ Start │  │  ■ Stop  │  │  ↺ Restart│             │
@@ -121,9 +118,22 @@
             android:orientation="horizontal"
             android:layout_marginBottom="40dp">
 
+            <!-- Order: AirPlay, DLNA, Miracast, Cast. DLNA is what this box is
+                 actually used for, so it sits next to AirPlay; the two receivers
+                 that are still being worked on follow. -->
+
             <!-- AirPlay card -->
             <include
                 android:id="@+id/card_airplay"
+                layout="@layout/card_protocol_status"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="12dp" />
+
+            <!-- DLNA card -->
+            <include
+                android:id="@+id/card_dlna"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
@@ -142,15 +152,6 @@
             <!-- Cast card -->
             <include
                 android:id="@+id/card_cast"
-                layout="@layout/card_protocol_status"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="12dp" />
-
-            <!-- DLNA card -->
-            <include
-                android:id="@+id/card_dlna"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"

@@ -48,6 +48,11 @@
          of a raw %1$s. -->
     <string name="home_protocol_detail_connected">正在接收投屏</string>
     <string name="protocol_detail_error">Check Wi-Fi settings</string>
+    <!-- Miracast and Cast cards: the receivers exist but are not finished
+         (Cast cannot run at all on the Fire TV flavor — no Play Services).
+         The status row keeps reporting the real state for diagnostics; only
+         the detail line says so on screen. -->
+    <string name="protocol_detail_in_development">正在开发中</string>
 
     <!-- ── Service states (header badge) ───────────────────────── -->
     <string name="service_state_running">Running</string>
