@@ -435,6 +435,15 @@ class PhairPlayService : Service() {
                 // The receiver parks an item when a decoder init failed with no
                 // surface behind it; only the Activity can see when one appears.
                 onSurfaceProbeNeeded = { requestDlnaSurfaceProbe() },
+                // …and only the Activity can bring the playback layer back. A
+                // parked item sits in ADVERTISING while showDlnaPlayer() only runs
+                // on CONNECTED, so without this the retry would wait for a Surface
+                // behind a hidden PlayerView — forever. The field log shows four
+                // "cooldown elapsed" notices with no start after any of them.
+                onPlaybackUiNeeded = {
+                    requestDlnaSurfaceProbe()
+                    bringActivityToForeground("DLNA 重试")
+                },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
