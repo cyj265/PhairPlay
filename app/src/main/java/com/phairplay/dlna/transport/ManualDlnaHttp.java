@@ -492,10 +492,27 @@ public final class ManualDlnaHttp {
                     try {
                         long seconds = parseDuration(target);
                         com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
-                        if (c != null) {
-                            c.seekTo(seconds);
+                        long current = c != null ? c.getPositionSeconds() : -1L;
+                        // Senders re-issue SetAVTransportURI + Play + Seek on
+                        // every poll. A Seek landing on the position we are
+                        // already at is a no-op semantically, but ExoPlayer does
+                        // not treat it as one: it flushes the buffer and
+                        // re-fetches the segment (and the AES key on HLS), which
+                        // is another few seconds before a frame can show —
+                        // restarting that cycle every 12-30 s is exactly what
+                        // keeps the picture black.
+                        if (current >= 0 && Math.abs(current - seconds) <= 3) {
+                            DebugLog.INSTANCE.log(
+                                "SOAP", "Seek 忽略(位置未变): target=" + target
+                                    + " 当前=" + current + "s");
+                        } else {
+                            if (c != null) {
+                                c.seekTo(seconds);
+                            }
+                            positionSeconds = seconds;
+                            DebugLog.INSTANCE.log(
+                                "SOAP", "Seek -> " + seconds + "s (原 " + current + "s)");
                         }
-                        positionSeconds = seconds;
                     } catch (Throwable ignored) {
                     }
                 }
