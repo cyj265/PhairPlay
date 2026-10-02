@@ -423,6 +423,23 @@ public final class ManualDlnaHttp {
         return result;
     }
 
+    /**
+     * File-name fallback for the media title: senders frequently omit
+     * DIDL-Lite, and a blank music card looks like a failure.
+     */
+    private static String guessTitle(String uri) {
+        try {
+            String path = uri;
+            int q = path.indexOf('?');
+            if (q > 0) path = path.substring(0, q);
+            int slash = path.lastIndexOf('/');
+            String name = slash >= 0 ? path.substring(slash + 1) : path;
+            return java.net.URLDecoder.decode(name, "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private static String safeBodyPreview(String body) {
         if (body == null) {
             return "null";
@@ -443,6 +460,22 @@ public final class ManualDlnaHttp {
                 transportState = "STOPPED";
                 positionSeconds = 0;
                 DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
+                // DIDL-Lite metadata (title/artist/cover) — the only place the
+                // sender tells us what this item IS. Without it an audio cast
+                // can only show a black screen, and the UI has no way to offer
+                // a "back to playback" label. Fall back to the file name so the
+                // music card is never blank.
+                String meta = tag(body, "CurrentURIMetaData");
+                String title = null, artist = null, artUri = null;
+                if (meta != null && !meta.isEmpty()) {
+                    String m = xmlUnescape(meta);
+                    title = tag(m, "dc:title");
+                    artist = tag(m, "upnp:artist");
+                    artUri = tag(m, "upnp:albumArtURI");
+                }
+                com.phairplay.dlna.DlnaMediaMeta.setMeta(
+                    (title != null && !title.isEmpty()) ? title : guessTitle(uri),
+                    artist, artUri);
                 return avtResponse("SetAVTransportURIResponse", "");
             }
             case "Play": {

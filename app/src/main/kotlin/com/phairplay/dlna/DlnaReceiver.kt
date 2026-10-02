@@ -235,9 +235,11 @@ class DlnaReceiver(
                                         "DLNA",
                                         "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
                                     )
-                                    // Apply a Seek that arrived while we were still
-                                    // preparing — executing it earlier aborts the
-                                    // in-flight HLS loads (see pendingSeekMs docs).
+                                    // No video track (music / audio-only cast):
+                                    // a video surface would just be a black
+                                    // rectangle, so the UI shows a music card.
+                                    DlnaMediaMeta.audioOnly =
+                                        p.videoSize.width == 0 || p.videoSize.height == 0
                                     val pending = pendingSeekMs
                                     if (pending >= 0L) {
                                         pendingSeekMs = -1L
@@ -627,6 +629,22 @@ class DlnaReceiver(
         }
     }
 
+    /**
+     * Ends playback because the user left the app (Back out of the UI).
+     * The receiver itself keeps running — a renderer that stops advertising
+     * the moment its own UI closes can never be found by the next cast — but
+     * the media must not keep sounding from an app the user closed, and the
+     * sender has to see STOPPED instead of a stuck PLAYING.
+     */
+    @OptIn(UnstableApi::class)
+    fun stopPlaybackFromUi() {
+        mainHandler.post {
+            clearPlayback()
+            ManualDlnaHttp.notifyPlaybackEnded()
+            report(ProtocolState.ADVERTISING)
+        }
+    }
+
     /** Resumes the DLNA player when the app returns to the foreground. */
     fun resumePlaybackFromUi() {
         mainHandler.post {
@@ -667,6 +685,10 @@ class DlnaReceiver(
             currentUri = uri
             retryCount = 0
             pendingSeekMs = -1L
+            // An item is loaded from here on: the UI may offer "back to
+            // playback" and (once READY) know whether it is audio-only.
+            DlnaMediaMeta.setActive(true)
+            DlnaMediaMeta.audioOnly = false
             Logger.i("DLNA playback start: $uri")
             DebugLog.log("DLNA", "开始播放: $uri")
             // Anti-leech CDNs: install whatever headers the sender embedded in
@@ -818,6 +840,7 @@ class DlnaReceiver(
     private fun clearPlayback() {
         currentUri = null
         pendingSeekMs = -1L
+        DlnaMediaMeta.setActive(false)
         player?.let { p ->
             p.stop()
             p.clearMediaItems()

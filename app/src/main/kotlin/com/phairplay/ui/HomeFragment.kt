@@ -130,6 +130,15 @@ class HomeFragment : Fragment() {
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
         card.findViewById<android.widget.ImageView>(R.id.img_protocol_icon)?.setImageResource(iconRes)
         card.findViewById<TextView>(R.id.text_protocol_name)?.setText(nameRes)
+        // Tapping the DLNA card returns to playback. Without this the only way
+        // back after Back left the player was the nav pill, and users naturally
+        // press the card that says DLNA.
+        if (card == cardDlna) {
+            card.isFocusable = true
+            card.setOnClickListener {
+                (activity as? com.phairplay.MainActivity)?.returnToDlnaPlayback()
+            }
+        }
     }
 
     /**
@@ -185,6 +194,12 @@ class HomeFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             svc.dlnaState.collectLatest { state ->
                 updateProtocolCard(cardDlna, state)
+                // An item may be loaded (even paused) while the player UI is
+                // not on screen — say so, or the card looks unresponsive.
+                if (com.phairplay.dlna.DlnaMediaMeta.hasMedia) {
+                    val d = cardDlna.findViewById<TextView>(R.id.text_protocol_detail)
+                    d?.text = "${d?.text ?: ""} · 点按返回播放"
+                }
             }
         }
         viewLifecycleOwner.lifecycleScope.launch {
