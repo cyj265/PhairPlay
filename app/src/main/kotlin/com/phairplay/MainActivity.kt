@@ -747,23 +747,79 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * TV-safe menu dialog, drawn by hand instead of AlertDialog. The leanback
+     * theme's alert-dialog list items rendered with no visible text on the N1
+     * (empty panel over a translucent window — the user saw a blank striped
+     * box). Explicit colors/sizes here cannot be broken by any theme. Rows are
+     * focusable so the D-pad works; Back dismisses (Dialog default).
+     */
+    private fun showMenuDialog(title: String, entries: List<Pair<String, () -> Unit>>) {
+        val density = resources.displayMetrics.density
+        val pad = (24 * density).toInt()
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0xF2101010.toInt())
+            setPadding(pad, pad, pad, pad)
+        }
+        container.addView(android.widget.TextView(this).apply {
+            text = title
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 22f
+            setPadding(0, 0, 0, pad)
+        })
+        for ((label, action) in entries) {
+            container.addView(android.widget.TextView(this).apply {
+                text = label
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 20f
+                val v = (10 * density).toInt()
+                setPadding(v, v, v, v)
+                isFocusable = true
+                isClickable = true
+                setOnFocusChangeListener { _, hasFocus ->
+                    setBackgroundColor(if (hasFocus) 0xFF3A5A78.toInt() else 0x00000000)
+                }
+                setOnClickListener {
+                    (tag as? android.app.Dialog)?.dismiss()
+                    action()
+                }
+                // The dialog is only known after setContentView; stash it on
+                // the row via tag right after creation below.
+            })
+        }
+        val dialog = android.app.Dialog(this).apply {
+            requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+            setContentView(container)
+            setCancelable(true)
+            window?.setBackgroundDrawable(
+                android.graphics.drawable.ColorDrawable(0x00000000)
+            )
+        }
+        for (i in 0 until container.childCount) {
+            container.getChildAt(i).tag = dialog
+        }
+        // Initial focus on the first row so the D-pad is immediately live.
+        if (container.childCount > 1) {
+            container.getChildAt(1).requestFocus()
+        }
+        dialog.show()
+    }
+
+    /**
      * The Menu-key equivalent of the DLNA player settings: what the remote can
      * do to the session it is driving, since a D-pad cannot reach an on-screen
      * button either way.
      */
     private fun showAirPlaySessionMenu() {
-        val items = arrayOf("播放 / 暂停", "下一首", "上一首", "返回投屏画面")
-        android.app.AlertDialog.Builder(this)
-            .setTitle("投屏控制 · AirPlay")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> sendDacp(DacpClient.CMD_PLAY_PAUSE)
-                    1 -> sendDacp(DacpClient.CMD_NEXT)
-                    2 -> sendDacp(DacpClient.CMD_PREV)
-                }
-            }
-            .setCancelable(true)
-            .show()
+        showMenuDialog(
+            "投屏控制 · AirPlay",
+            listOf(
+                "播放 / 暂停" to { sendDacp(DacpClient.CMD_PLAY_PAUSE) },
+                "下一首" to { sendDacp(DacpClient.CMD_NEXT) },
+                "上一首" to { sendDacp(DacpClient.CMD_PREV) },
+                "关闭" to {}
+            )
+        )
     }
 
     /** Seeks the DLNA player relative to the current position, clamped to [0, duration]. */
@@ -790,31 +846,24 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showPlayerSettings() {
         val pv = dlnaPlayerView ?: return
-        val p = pv.player
-        if (p == null) {
-            return
-        }
-        val options = arrayOf("音轨 / 字幕", "播放速度", "画面比例", "关闭设置")
-        android.app.AlertDialog.Builder(this)
-            .setTitle("播放器设置")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> showTrackSettings(p)
-                    1 -> showSpeedSettings(p)
-                    2 -> cycleResizeMode(pv)
-                }
-            }
-            .setCancelable(true)
-            .show()
+        val p = pv.player ?: return
+        showMenuDialog(
+            "播放器设置",
+            listOf(
+                "音轨 / 字幕" to { showTrackSettings(p) },
+                "播放速度" to { showSpeedSettings(p) },
+                "画面比例" to { cycleResizeMode(pv) },
+                "关闭设置" to {}
+            )
+        )
     }
 
     private fun showSpeedSettings(p: androidx.media3.common.Player) {
         val speeds = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-        val labels = speeds.map { "${it}x" }.toTypedArray()
-        android.app.AlertDialog.Builder(this)
-            .setTitle("播放速度")
-            .setItems(labels) { _, i -> p.playbackParameters = p.playbackParameters.withSpeed(speeds[i]) }
-            .show()
+        showMenuDialog(
+            "播放速度",
+            speeds.map { s -> "${s}x" to { p.playbackParameters = p.playbackParameters.withSpeed(s) } }
+        )
     }
 
     private fun cycleResizeMode(pv: PlayerView) {
@@ -848,32 +897,25 @@ class MainActivity : AppCompatActivity() {
             android.widget.Toast.makeText(this, "该媒体没有可选音轨/字幕", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
-        val labels = ArrayList<String>()
-        val actions = ArrayList<() -> Unit>()
+        val entries = ArrayList<Pair<String, () -> Unit>>()
         for (group in groups) {
             val kind = if (group.type == androidx.media3.common.C.TRACK_TYPE_AUDIO) "音轨" else "字幕"
             for (i in 0 until group.length) {
                 val fmt = group.getTrackFormat(i)
                 val lang = fmt.language?.takeIf { it.isNotBlank() && it != "und" } ?: "默认"
                 val label = fmt.label ?: fmt.codecs ?: ""
-                labels.add("$kind $i · $lang ${label.ifBlank { "" }}".trim())
-                actions.add {
+                entries.add("$kind $i · $lang ${label.ifBlank { "" }}".trim() to {
                     p.trackSelectionParameters = p.trackSelectionParameters
                         .buildUpon()
                         .setOverrideForType(
                             androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i)
                         )
                         .build()
-                }
+                })
             }
         }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("音轨 / 字幕")
-            .setItems(labels.toTypedArray()) { _, i ->
-                actions[i].invoke()
-                dlnaPlayerView?.showController()
-            }
-            .show()
+        entries.add("关闭" to {})
+        showMenuDialog("音轨 / 字幕", entries)
     }
 
 }

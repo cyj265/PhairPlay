@@ -117,6 +117,28 @@ class DlnaReceiver(
     private var retryCount = 0
 
     /**
+     * A Seek that arrived before the pipeline reached READY. Senders poll and
+     * re-issue Seek(≈resume position) right after Play; executing it while the
+     * HLS loader is still fetching the first segments aborts those in-flight
+     * loads (manifest/keys/segments) and can leave the item stuck in
+     * BUFFERING. Parked here and applied by the STATE_READY handler.
+     */
+    @Volatile
+    private var pendingSeekMs: Long = -1L
+
+    /**
+     * HTTP factory shared with the media source factory. Request headers
+     * carried by the sender's relay URL (see [applyRelayHeaders]) are applied
+     * here before every new media item, because HLS playlists resolve their
+     * segments to absolute CDN URLs that ExoPlayer fetches directly.
+     */
+    private val httpFactory: DefaultHttpDataSource.Factory = DefaultHttpDataSource.Factory()
+        .setUserAgent(DEFAULT_HTTP_USER_AGENT)
+        .setAllowCrossProtocolRedirects(true)
+        .setConnectTimeoutMs(10_000)
+        .setReadTimeoutMs(20_000)
+
+    /**
      * Fires when an starts but never reaches READY — i.e. a black screen with
      * *no* error callbacks. Nothing else in the player reports that case, and
      * it is the one that looks like a broken app rather than a broken source.
@@ -184,20 +206,6 @@ class DlnaReceiver(
                 Logger.i("Manual SSDP start failed: ${t.message}")
             }
 
-            // HttpDataSource tuned for DLNA senders: browser-style UA (some
-            // senders like 5KPlayer behave differently for non-browser clients),
-            // cross-protocol redirects, and generous timeouts.
-            val httpFactory = DefaultHttpDataSource.Factory()
-                .setUserAgent("Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(10_000)
-                .setReadTimeoutMs(20_000)
-
-            // Renderers with decoder fallback: some DLNA senders (5KPlayer)
-            // produce H.264 High@5.0 streams whose format is *reported* as
-            // supported by the hardware MediaCodec yet fails at decode time
-            // (ERROR_CODE_DECODING_FAILED). Enabling fallback lets ExoPlayer
-            // retry the same stream with the software decoder automatically.
             val renderersFactory = DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(true)
 
@@ -227,6 +235,15 @@ class DlnaReceiver(
                                         "DLNA",
                                         "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
                                     )
+                                    // Apply a Seek that arrived while we were still
+                                    // preparing — executing it earlier aborts the
+                                    // in-flight HLS loads (see pendingSeekMs docs).
+                                    val pending = pendingSeekMs
+                                    if (pending >= 0L) {
+                                        pendingSeekMs = -1L
+                                        DebugLog.log("DLNA", "执行暂存的 Seek → ${pending / 1000}s")
+                                        p.seekTo(pending)
+                                    }
                                     if (currentUri != null) {
                                         retryCount = 0
                                         report(ProtocolState.CONNECTED)
@@ -649,8 +666,12 @@ class DlnaReceiver(
 
             currentUri = uri
             retryCount = 0
+            pendingSeekMs = -1L
             Logger.i("DLNA playback start: $uri")
             DebugLog.log("DLNA", "开始播放: $uri")
+            // Anti-leech CDNs: install whatever headers the sender embedded in
+            // the relay URL BEFORE the first request leaves (see helper docs).
+            applyRelayHeaders(uri)
             mainHandler.removeCallbacks(stallWatchdog)
             mainHandler.postDelayed(stallWatchdog, STALL_TIMEOUT_MS.toLong())
             p.setMediaItem(buildMediaItem(uri))
@@ -688,7 +709,15 @@ class DlnaReceiver(
     @OptIn(UnstableApi::class)
     override fun seekTo(positionSeconds: Long) {
         mainHandler.post {
-            player?.takeIf { started && !it.isReleased }?.seekTo(positionSeconds * 1000L)
+            val p = player?.takeIf { started && !it.isReleased } ?: return@post
+            if (p.playbackState != Player.STATE_READY) {
+                // Still preparing: park the seek instead of aborting the
+                // in-flight HLS loads. The STATE_READY handler applies it.
+                pendingSeekMs = positionSeconds * 1000L
+                DebugLog.log("DLNA", "起播未就绪，暂存 Seek → ${positionSeconds}s")
+                return@post
+            }
+            p.seekTo(positionSeconds * 1000L)
         }
     }
 
@@ -730,9 +759,65 @@ class DlnaReceiver(
 
     // ─── Private helpers ──────────────────────────────────────────────────
 
+    /**
+     * Applies HTTP headers the sender embedded in a relay URL:
+     * `...&headers=<base64 of "K:V" lines>`. Anti-leech CDNs (vd.wmvbo.com,
+     * observed 2026-10-02) 302-redirect every request whose User-Agent is not
+     * the one the original downloader used. The manifest survives because the
+     * phone's local proxy injects the header, but an HLS playlist resolves its
+     * segments to absolute CDN URLs which ExoPlayer then fetches directly —
+     * with the wrong UA every segment bounces to a 302 and the item sits in
+     * BUFFERING until it dies with PARSING_CONTAINER_MALFORMED. So the header
+     * must be installed at player (DataSource.Factory) level, not just for the
+     * manifest request. This is also why ijkplayer-based senders (当贝) play
+     * the same URL: their ffmpeg default UA is exactly `Lavf/…`.
+     */
+    private fun applyRelayHeaders(uri: String) {
+        var ua: String? = null
+        val map = LinkedHashMap<String, String>()
+        try {
+            val raw = android.net.Uri.parse(uri).getQueryParameter("headers")
+            if (!raw.isNullOrBlank()) {
+                // Base64 payloads may be standard or URL-safe and unpadded;
+                // accept both, then percent-decode the inner value encoding.
+                val b64 = raw.trim().let {
+                    it + "=".repeat((4 - it.length % 4) % 4)
+                }
+                val decoded = try {
+                    android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                } catch (_: IllegalArgumentException) {
+                    android.util.Base64.decode(b64, android.util.Base64.URL_SAFE)
+                }.toString(Charsets.UTF_8)
+                val lines = java.net.URLDecoder.decode(decoded, "UTF-8")
+                    .split("\n", "&&")
+                for (line in lines) {
+                    val idx = line.indexOf(':')
+                    if (idx <= 0) continue
+                    val key = line.substring(0, idx).trim()
+                    val value = line.substring(idx + 1).trim()
+                    if (key.isEmpty() || value.isEmpty()) continue
+                    if (key.equals("User-Agent", ignoreCase = true)) ua = value else map[key] = value
+                }
+            }
+        } catch (t: Throwable) {
+            DebugLog.log("DLNA", "解析投屏请求头失败: ${t.message}")
+        }
+        httpFactory.setUserAgent(ua ?: DEFAULT_HTTP_USER_AGENT)
+        httpFactory.setDefaultRequestProperties(map)
+        val shown = buildString {
+            if (ua != null) append("User-Agent=$ua")
+            for ((k, v) in map) {
+                if (isNotEmpty()) append(", ")
+                append("$k=$v")
+            }
+        }
+        DebugLog.log("DLNA", if (shown.isEmpty()) "投屏无附加请求头（默认浏览器UA）" else "应用投屏请求头: $shown")
+    }
+
     @OptIn(UnstableApi::class)
     private fun clearPlayback() {
         currentUri = null
+        pendingSeekMs = -1L
         player?.let { p ->
             p.stop()
             p.clearMediaItems()
@@ -792,6 +877,10 @@ class DlnaReceiver(
     companion object {
         /** How long a source may stay silent before we probe it ourselves. */
         private const val STALL_TIMEOUT_MS = 15_000
+
+        /** Fallback UA when the sender does not declare one. */
+        private const val DEFAULT_HTTP_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
 
         private fun stateNameOf(state: Int): String = when (state) {
             Player.STATE_IDLE -> "IDLE"
