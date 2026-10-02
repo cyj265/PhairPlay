@@ -81,6 +81,12 @@ class MainActivity : AppCompatActivity() {
     // Service binding — gives access to state flows for showing/hiding the streaming overlay
     private var service: PhairPlayService? = null
     private var isBound = false
+
+    /**
+     * Whether this Activity is on screen, tracked locally because the service
+     * binding is asynchronous — see [onResume].
+     */
+    private var isUiInForeground = false
     private var currentAirPlayState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
@@ -94,6 +100,14 @@ class MainActivity : AppCompatActivity() {
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { getVideoSurface() }
+
+            // onResume fired before this callback (bindService is async), so the
+            // receiver never heard "the UI is on screen" and every cast started
+            // by waiting out the full foreground timeout. Re-send it now.
+            if (isUiInForeground) {
+                service?.onActivityResumed()
+                service?.setDlnaUiForeground(true)
+            }
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
@@ -266,12 +280,21 @@ class MainActivity : AppCompatActivity() {
         // not trigger another auto-foreground launch on top of us. This is the
         // signal the receiver waits for — the media is only prepared once the
         // Activity confirms it is really on screen.
+        //
+        // Remember it locally as well: bindService is asynchronous, so on a cold
+        // start `service` is still null here and the call would be dropped. The
+        // flag is then re-sent from onServiceConnected, which is the only reason
+        // a first cast after launching the app used to sit through the full
+        // 10 s "UI not in foreground" wait before starting — and it started with
+        // a perfectly good picture, because the PlayerView was there all along.
+        isUiInForeground = true
         service?.onActivityResumed()
         service?.setDlnaUiForeground(true)
     }
 
     override fun onPause() {
         // Keep the flag accurate even if the pause race with a cast start.
+        isUiInForeground = false
         service?.onActivityPaused()
         service?.setDlnaUiForeground(false)
         super.onPause()
