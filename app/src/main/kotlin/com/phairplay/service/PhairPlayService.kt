@@ -381,6 +381,9 @@ class PhairPlayService : Service() {
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
+                        // Mirror/AirPlay video needs the same UI rescue as DLNA:
+                        // a background Activity means no Surface and no picture.
+                        bringActivityToForeground("AirPlay 投屏")
                     }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
@@ -449,6 +452,10 @@ class PhairPlayService : Service() {
                                 streamingSenderName = if (title.isNullOrBlank()) "DLNA"
                                                       else "DLNA · $title"
                             )
+                            // The sender just pushed media. If the UI is not on
+                            // screen a Surface is missing and ExoPlayer keeps
+                            // decoding audio only — pull the app to the front.
+                            bringActivityToForeground("DLNA 播放")
                         }
                         ProtocolState.ADVERTISING,
                         ProtocolState.DISABLED,
@@ -494,6 +501,74 @@ class PhairPlayService : Service() {
      */
     fun stopDlnaPlayback() {
         dlnaReceiver?.stopPlaybackFromUi()
+    }
+
+    // ─── Auto foreground (receiver → UI) ────────────────────────────────────
+
+    /**
+     * True while [MainActivity] is in the resumed state.
+     *
+     * The receivers report state changes from their own threads; this flag is
+     * the only reliable answer to "is somebody watching?". When the Activity
+     * was never opened, only this service is alive and the renderer runs
+     * without a Surface — which is exactly what the "cast works but only
+     * audio plays in the background" report looked like.
+     */
+    @Volatile private var activityResumed = false
+
+    /** Guards against a sender hammering Play (polling every 10–30 s). */
+    @Volatile private var lastForegroundLaunchMs = 0L
+
+    /** Called by MainActivity so the service knows whether someone is watching. */
+    fun onActivityResumed() { activityResumed = true }
+
+    /** Called by MainActivity when it loses visibility (pause/destroy). */
+    fun onActivityPaused() { activityResumed = false }
+
+    /**
+     * Brings the app UI to the front when a cast starts while it is in the
+     * background — the receiver-side half of what every other receiver app
+     * does: the picture has to appear when the sender pushes media, not when
+     * the user happens to open the launcher.
+     *
+     * The Activity is started from this foreground service, which is exempt
+     * from the background activity-start restrictions (Android 10+); on API 25
+     * (N1) those restrictions do not exist at all.
+     *
+     * Skipped when the UI is already visible: the Activity's collectors then
+     * show the player straight from the state flows. A short throttle keeps a
+     * polling sender (it re-sends Play every 10–30 s) from re-launching the
+     * Activity over and over when the first launch failed.
+     *
+     * @param reason Human-readable trigger, kept for diagnosis.
+     */
+    fun bringActivityToForeground(reason: String) {
+        if (activityResumed) {
+            Logger.d("Auto-foreground skipped — UI already visible ($reason)")
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastForegroundLaunchMs < AUTOFOREGROUND_THROTTLE_MS) {
+            Logger.d("Auto-foreground throttled ($reason)")
+            return
+        }
+        lastForegroundLaunchMs = now
+        runCatching {
+            val intent = Intent(applicationContext, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+                putExtra(EXTRA_AUTO_FOREGROUND_REASON, reason)
+            }
+            startActivity(intent)
+            Logger.i("Auto-foreground: opened MainActivity ($reason)")
+        }.onFailure {
+            // The notification's content intent opens the same Activity, so the
+            // user is never left with a silent picture and no way back.
+            Logger.w("Auto-foreground launch failed — notification can still open the app")
+        }
     }
 
     private fun stopAllReceiversInternal() {
@@ -639,6 +714,8 @@ class PhairPlayService : Service() {
         const val ACTION_START    = "com.phairplay.action.START"
         const val ACTION_STOP     = "com.phairplay.action.STOP"
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
+        const val EXTRA_AUTO_FOREGROUND_REASON = "com.phairplay.extra.AUTO_FOREGROUND_REASON"
+        const val AUTOFOREGROUND_THROTTLE_MS = 3_000L
     }
 }
 
