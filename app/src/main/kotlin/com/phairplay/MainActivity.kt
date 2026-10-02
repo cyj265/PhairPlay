@@ -171,6 +171,34 @@ class MainActivity : AppCompatActivity() {
         requestNearbyWifiPermission()
     }
 
+    /**
+     * The service auto-launched this Activity because a sender pushed media
+     * while the UI was in the background. Without handling it here the launch
+     * would just resume the app on whatever screen was last open (Settings,
+     * Home, …) instead of the picture the user actually asked for.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
+            service?.resumeDlnaPlayback()
+            if (hasDlnaMedia()) showDlnaPlayer()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Report visibility before resuming: a cast that starts right now must
+        // not trigger another auto-foreground launch on top of us.
+        service?.onActivityResumed()
+    }
+
+    override fun onPause() {
+        // Keep the flag accurate even if the pause race with a cast start.
+        service?.onActivityPaused()
+        super.onPause()
+    }
+
     override fun onStart() {
         super.onStart()
         // Bind so we can observe StateFlows and supply the video Surface
