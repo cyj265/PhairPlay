@@ -105,6 +105,34 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
     /** True once every HEVC component on this box is known to fail. */
     fun isHevcBroken(): Boolean = allBroken && workingName == null
 
+    /**
+     * True when [name] is the only HEVC component this box has left.
+     *
+     * WHY this matters: blacklisting is a *permanent* verdict, and on a box
+     * with a single component it is self-defeating. Excluding the only decoder
+     * does not make the next cast pick a different one — it makes every later
+     * HEVC cast fall back to whatever `MediaCodecSelector.DEFAULT` still
+     * offers, which in practice means no video track at all: the item reaches
+     * READY with `视频轨: 0x0` and plays audio only, for the rest of the
+     * session. The caller uses this to cool down and retry instead.
+     */
+    fun isSoleCandidate(name: String?): Boolean {
+        if (name.isNullOrBlank()) return false
+        return synchronized(lock) {
+            val others = (rawComponents.map { it.name } + safeDefaultNames())
+                .filter { it != name && it !in brokenNames }
+            others.isEmpty()
+        }
+    }
+
+    private fun safeDefaultNames(): List<String> = try {
+        MediaCodecSelector.DEFAULT
+            .getDecoderInfos(MimeTypes.VIDEO_H265, false, false)
+            .map { it.name }
+    } catch (t: Throwable) {
+        emptyList()
+    }
+
     // ─── Failure / success bookkeeping ─────────────────────────────────────
 
     /** Records a component that refused to initialise so later attempts skip it. */

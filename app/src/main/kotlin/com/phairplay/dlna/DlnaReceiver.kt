@@ -131,6 +131,82 @@ class DlnaReceiver(
     private var lastHevcDeadNoticeMs = 0L
 
     /**
+     * When a real-surface decoder init failed, and until when.
+     *
+     * WHY: a failed `MediaCodec.configure()` does not always unwind cleanly in
+     * the Amlogic HAL — the instance can stay stuck holding the box's single
+     * hardware decoder slot. That slot is shared with every other app, so a
+     * receiver that keeps retrying does not merely fail to play: it takes the
+     * decoder away from the user's IPTV player too, and the box only recovers
+     * on reboot. So after a genuine (real-surface) failure we stop touching the
+     * decoder for [DECODER_COOLDOWN_MS] and let the slot breathe. The cast
+     * resumes by itself afterwards, or immediately when the UI comes back.
+     */
+    @Volatile
+    private var decoderCooldownUntilMs = 0L
+
+    private fun decoderCooldownActive(): Boolean =
+        System.currentTimeMillis() < decoderCooldownUntilMs
+
+    /**
+     * Runs [DECODER_COOLDOWN_MS] after it was posted.
+     *
+     * Scheduled only after a real-surface decoder failure or a silent
+     * no-picture start, so the box gets its hardware decoder back before this
+     * app takes it again. Without it a failed cast would either stay dead or,
+     * worse, be retried by the sender's poll every few seconds and take the
+     * slot with it.
+     *
+     * The body lives in [onDecoderCooldownElapsed] because a lambda cannot
+     * reference its own field during initialisation.
+     */
+    private val decoderCooldownRetry = Runnable { onDecoderCooldownElapsed() }
+
+    private fun onDecoderCooldownElapsed() {
+        val uri = pendingStartUri ?: return
+        if (!started) return
+        if (decoderCooldownActive()) {
+            mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
+            return
+        }
+        DebugLog.log("DLNA", "硬解冷却结束 → 重新等待渲染面并起播")
+        surfaceGeneration++
+        hevcCodecSelector.resetFailures()
+        consecutiveDecoderFailures = 0
+        retryCount = 0
+        if (surfaceReady) {
+            runStart(uri)
+        } else {
+            onSurfaceProbeNeeded()
+        }
+    }
+
+    /**
+     * Gives the hardware decoder slot back after a failed init: stop the
+     * pipeline, drop the surface and the item, and cool down.
+     *
+     * Called on the main thread from the error handler. `stop()` is what
+     * releases the renderer; `clearVideoSurface()` makes sure the codec is not
+     * holding a surface it may never see again.
+     */
+    private fun enterDecoderCooldown(reason: String) {
+        decoderCooldownUntilMs = System.currentTimeMillis() + DECODER_COOLDOWN_MS
+        mainHandler.removeCallbacks(stallWatchdog)
+        mainHandler.removeCallbacks(firstPictureWatchdog)
+        player?.let { p ->
+            runCatching { p.stop() }
+            runCatching { p.clearVideoSurface() }
+            runCatching { p.clearMediaItems() }
+        }
+        currentUri = null
+        DebugLog.log(
+            "DLNA",
+            "$reason → 交还硬解槽并冷却 ${DECODER_COOLDOWN_MS / 1000}s，" +
+                "期间不抢占解码器（否则会拖垮盒子上的其他播放器）"
+        )
+    }
+
+    /**
      * True once the playback UI reports a render target that exists *and* has
      * a real size (see [markSurfaceReady]).
      *
@@ -176,6 +252,20 @@ class DlnaReceiver(
     @Volatile
     private var uiForeground = false
 
+    /**
+     * An item that was playing when the UI went to the background, kept so it
+     * can be rebuilt on the way back.
+     *
+     * The player is emptied on the way out (that is the only way to hand the
+     * single hardware decoder back — see [pausePlaybackFromUi]), so returning
+     * to the app means re-preparing from scratch. Holding the URI and position
+     * is what makes that invisible to the user.
+     */
+    private data class ParkedMedia(val uri: String, val positionMs: Long)
+
+    @Volatile
+    private var parkedForUi: ParkedMedia? = null
+
     /** Gives up waiting for the UI after [SURFACE_WAIT_MS] and starts the item
      *  without a picture — exactly what receivers did before auto-foreground,
      *  so a cast that never opens the UI still makes sound.
@@ -217,11 +307,15 @@ class DlnaReceiver(
         .setReadTimeoutMs(20_000)
 
     /**
-     * Fires when an starts but never reaches READY — i.e. a black screen with
-     * *no* error callbacks. Nothing else in the player reports that case, and
-     * it is the one that looks like a broken app rather than a broken source.
-     * Probes the URL directly and records what the far end answered, turning
-     * "black screen" into either "source dead" or "still buffering".
+     * Fires when an item starts but never reaches READY — i.e. a black screen
+     * with *no* error callbacks. Nothing else in the player reports that case,
+     * and it is the one that looks like a broken app rather than a broken
+     * source. Probes the URL directly and records what the far end answered,
+     * turning "black screen" into either "source dead" or "still buffering".
+     *
+     * The companion case — READY but zero video size, i.e. audio with no
+     * picture — is [firstPictureWatchdog]'s job, because this one is cancelled
+     * on READY.
      */
     private val stallWatchdog = Runnable {
         val p = player
@@ -234,6 +328,36 @@ class DlnaReceiver(
             )
             probeSourceAsync(uri)
         }
+    }
+
+    /**
+     * Deadline for "a video item that reached READY must have produced frames
+     * by now".
+     *
+     * The field log's nastiest state: `播放器状态: READY … 视频轨: 0x0` — audio
+     * playing, no picture, and *no error callback of any kind*, so the sender
+     * sees a healthy session and never re-sends anything. Cancelling the
+     * regular stall watchdog on READY is right for buffering but blind to this,
+     * hence a separate timer that a real first frame disarms.
+     */
+    private val firstPictureWatchdog: Runnable = Runnable {
+        val p = player
+        val uri = currentUri
+        if (p == null || uri == null) return@Runnable
+        if (p.videoSize.width > 0 && p.videoSize.height > 0) return@Runnable
+        DebugLog.log(
+            "DLNA",
+            "READY 后 ${FIRST_PICTURE_TIMEOUT_MS / 1000}s 仍无画面（视频轨 0x0）" +
+                "→ 交还硬解槽，等渲染面稳定后重试"
+        )
+        enterDecoderCooldown("READY 后无画面")
+        pendingStartUri = uri
+        surfaceReady = false
+        surfaceGeneration++
+        hevcCodecSelector.resetFailures()
+        consecutiveDecoderFailures = 0
+        mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+        mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
     }
 
     /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
@@ -326,6 +450,19 @@ class DlnaReceiver(
                                     // the next item instead of carrying a verdict
                                     // that only ever applied to the one that hung.
                                     consecutiveDecoderFailures = 0
+                                    // READY only means the *audio* pipeline is
+                                    // healthy. With a video item and no frames
+                                    // (视频轨 0x0) it is still a black screen, and
+                                    // nothing else would ever say so — the
+                                    // stall watchdog is cancelled right here, so
+                                    // this case needs its own deadline.
+                                    mainHandler.removeCallbacks(firstPictureWatchdog)
+                                    if (p.videoSize.width > 0 && p.videoSize.height > 0) {
+                                        mainHandler.postDelayed(
+                                            firstPictureWatchdog,
+                                            FIRST_PICTURE_TIMEOUT_MS.toLong()
+                                        )
+                                    }
                                     // No video track (music / audio-only cast):
                                     // a video surface would just be a black
                                     // rectangle, so the UI shows a music card.
@@ -366,11 +503,13 @@ class DlnaReceiver(
                         /** Proof that pixels actually reached the screen (vs. a black overlay). */
                         override fun onRenderedFirstFrame() {
                             mainHandler.removeCallbacks(stallWatchdog)
+                            mainHandler.removeCallbacks(firstPictureWatchdog)
                             DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
                             mainHandler.removeCallbacks(stallWatchdog)
+                            mainHandler.removeCallbacks(firstPictureWatchdog)
                             val cause = error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" }
                             val msg = "DLNA播放失败: ${error.errorCodeName ?: error.errorCode} ${error.message}"
                             Logger.e("DLNA playback error: $msg", error)
@@ -420,7 +559,26 @@ class DlnaReceiver(
                                 // on an attempt that had nothing to decode into.
                                 if (consecutiveDecoderFailures >= HEVC_ATTEMPT_LIMIT) {
                                     if (startedOnRealSurface) {
-                                        hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                        // A blacklist is a *permanent* verdict, so
+                                        // it is only safe when something else is
+                                        // left to fall back to. This box advertises
+                                        // exactly one HEVC component: ruling it
+                                        // out does not make the next cast use a
+                                        // different decoder, it just turns every
+                                        // later HEVC cast into silent audio-only
+                                        // playback for the rest of the session —
+                                        // which is exactly what the field log
+                                        // showed (READY with 视频轨 0x0, twice).
+                                        // So hand the slot back and cool down
+                                        // instead; the next cast gets a fresh try.
+                                        if (hevcCodecSelector.isSoleCandidate(failedCodec)) {
+                                            DebugLog.log(
+                                                "DLNA",
+                                                "本机只有这一个 HEVC 组件 → 不拉黑，改为冷却后重试（否则本次会话之后所有 HEVC 都只有声音）"
+                                            )
+                                        } else {
+                                            hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                        }
                                     } else {
                                         DebugLog.log(
                                             "DLNA",
@@ -472,16 +630,16 @@ class DlnaReceiver(
                                 uri != null &&
                                     error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
                                     !startedOnRealSurface
+                            val realSurfaceFailure =
+                                uri != null &&
+                                    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
+                                    startedOnRealSurface
                             if (surfaceLessFailure) {
                                 DebugLog.log(
                                     "DLNA",
                                     "无渲染面导致的解码失败 → 重新等待播放层，不再盲目重试: ${uri?.take(72)}…"
                                 )
-                                player?.let { p ->
-                                    runCatching { p.stop() }
-                                    runCatching { p.clearMediaItems() }
-                                }
-                                currentUri = null
+                                enterDecoderCooldown("本次起播没有真实渲染面")
                                 pendingStartUri = uri
                                 surfaceReady = false
                                 surfaceGeneration++
@@ -494,7 +652,20 @@ class DlnaReceiver(
                                 // sender's next Play re-enters the same gate, and
                                 // the UI is asked to keep watching for a Surface.
                                 onSurfaceProbeNeeded()
-                            } else if (uri != null && retryCount < 2 && !decoderDead) {
+                            } else if (realSurfaceFailure) {
+                                // A genuine decoder failure on a surface that was
+                                // really there. Hand the slot back and stay off it
+                                // for a while: hammering a possibly wedged HAL
+                                // instance is what takes the hardware decoder away
+                                // from every other app on the box until reboot.
+                                enterDecoderCooldown("解码器初始化失败(${failedCodec ?: "?"})")
+                                pendingStartUri = uri
+                                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                                mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+                                mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
+                            } else if (uri != null && retryCount < 2 && !decoderDead &&
+                                !decoderCooldownActive()
+                            ) {
                                 retryCount++
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
@@ -765,6 +936,13 @@ class DlnaReceiver(
 
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
+        // A full teardown is the one moment where grabbing the hardware
+        // decoder slot again is impossible: the box may be running something
+        // else by now, and this receiver is going away.
+        decoderCooldownUntilMs = 0L
+        parkedForUi = null
+        mainHandler.removeCallbacks(decoderCooldownRetry)
+        mainHandler.removeCallbacks(firstPictureWatchdog)
         // Drop the pending "wait for IP" watcher first: it fires once and
         // checks `started`, so leaving it registered can only resurrect a
         // socket after this receiver has been torn down.
@@ -945,11 +1123,33 @@ class DlnaReceiver(
         }
     }
 
-    /** Pauses the DLNA player when the app goes to the background so the
-     *  MediaCodec renderer never writes into a destroyed Surface. */
+    /**
+     * Called when the UI leaves the foreground.
+     *
+     * This does far more than `pause()`. ExoPlayer **keeps the MediaCodec
+     * allocated while paused**, and on these boxes there is exactly one HEVC
+     * hardware decoder to go round: a receiver that merely pauses keeps the
+     * slot forever, and the next app to ask for hardware decoding (the user's
+     * IPTV player) is refused until the box is rebooted. So stop and drop the
+     * media item — that is what actually returns the decoder — and remember
+     * the URI so [resumePlaybackFromUi] can rebuild the item on the way back.
+     */
     fun pausePlaybackFromUi() {
         mainHandler.post {
-            player?.takeIf { started && !it.isReleased }?.pause()
+            val p = player?.takeIf { started && !it.isReleased } ?: return@post
+            val resumeUri = currentUri
+            val resumePos = runCatching { p.currentPosition }.getOrDefault(0L)
+            p.pause()
+            p.clearVideoSurface()
+            p.clearMediaItems()
+            p.stop()
+            if (resumeUri != null) {
+                parkedForUi = ParkedMedia(resumeUri, resumePos)
+                DebugLog.log(
+                    "DLNA",
+                    "界面退到后台 → 释放硬解槽（仅 pause 不会归还解码器）"
+                )
+            }
         }
     }
 
@@ -969,10 +1169,40 @@ class DlnaReceiver(
         }
     }
 
-    /** Resumes the DLNA player when the app returns to the foreground. */
+    /**
+     * Resumes DLNA playback when the app returns to the foreground.
+     *
+     * The media item was dropped on the way out to free the decoder, so this
+     * rebuilds it through the normal gated path — the render surface also has
+     * to be handed back before preparing, for the same reason as a fresh cast.
+     */
     fun resumePlaybackFromUi() {
         mainHandler.post {
-            player?.takeIf { started && !it.isReleased && currentUri != null }?.play()
+            val parked = parkedForUi ?: return@post
+            if (!started || player?.isReleased != false) return@post
+            // The sender's Play may have re-armed the item already; do not
+            // stomp on a start that is already in flight.
+            if (pendingStartUri != null) return@post
+            parkedForUi = null
+            DebugLog.log("DLNA", "回到前台 → 重建媒体项并等待渲染面: ${parked.uri.take(72)}…")
+            pendingSeekMs = parked.positionMs
+            currentUri = parked.uri
+            // Deliberately routed through the surface gate: preparing here
+            // without a real Surface is what wedged the decoder in the first place.
+            if (!uiForeground) {
+                pendingStartUri = parked.uri
+                mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+                mainHandler.postDelayed(
+                    foregroundTimeoutRunnable, FOREGROUND_WAIT_MS.toLong()
+                )
+            } else if (surfaceReady) {
+                runStart(parked.uri)
+            } else {
+                pendingStartUri = parked.uri
+                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                mainHandler.postDelayed(surfaceTimeoutRunnable, SURFACE_WAIT_MS.toLong())
+            }
+            onSurfaceProbeNeeded()
         }
     }
 
@@ -1062,6 +1292,12 @@ class DlnaReceiver(
             // sender keeps polling the same URI, so every one of those polls
             // used to build a fresh MediaCodec (and leak it) — refuse the ones
             // for the item we already ruled out instead.
+            // Give up on an item whose decoder is genuinely ruled out. On a
+            // single-component box this can no longer be reached (the sole
+            // candidate is never blacklisted — see the error handler), which is
+            // deliberate: this branch used to fire for the rest of the session
+            // and turned every later cast into audio-only playback with
+            // `视频轨: 0x0`.
             if (uri == currentUri && hevcCodecSelector.isHevcBroken()) {
                 val now = System.currentTimeMillis()
                 if (now - lastHevcDeadNoticeMs > HEVC_DEAD_NOTICE_MS) {
@@ -1364,6 +1600,30 @@ class DlnaReceiver(
 
         /** How long a source may stay silent before we probe it ourselves. */
         private const val STALL_TIMEOUT_MS = 15_000
+
+        /**
+         * How long the receiver stays off the hardware decoder after a failed
+         * init.
+         *
+         * The box has one HEVC decoder and every app shares it. A failed
+         * `configure()` can leave the Amlogic HAL holding that slot, and a
+         * receiver that keeps retrying robs the user's other players (their
+         * IPTV app then reports a hardware decode error) until the box is
+         * rebooted. Backing off for a few seconds is what keeps PhairPlay from
+         * breaking the rest of the system.
+         */
+        private const val DECODER_COOLDOWN_MS = 8_000
+
+        /**
+         * How long a video item may sit at READY without a single frame before
+         * we call it a failed start.
+         *
+         * Generous, because a live HLS stream legitimately takes a moment to
+         * deliver its first segment — this is not a latency budget, it only has
+         * to outlast "the decoder came up but is writing into a surface that
+         * never becomes usable".
+         */
+        private const val FIRST_PICTURE_TIMEOUT_MS = 12_000
 
         /** Gap between "this decoder is dead" notices in the debug log. */
         private const val HEVC_DEAD_NOTICE_MS = 30_000
