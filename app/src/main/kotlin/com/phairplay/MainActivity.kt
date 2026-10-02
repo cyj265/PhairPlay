@@ -125,9 +125,15 @@ class MainActivity : AppCompatActivity() {
             // surface behind it, and rings this bell instead of retrying (each
             // blind retry burns another MediaCodec and stalls the picture). Only
             // this side can see when a Surface actually shows up.
+            //
+            // The probe is started unconditionally: the request usually arrives
+            // while the playback layer is still hidden, and a probe gated on
+            // "is it visible?" would never run — which is how a parked item ended
+            // up waiting for a Surface behind a GONE PlayerView indefinitely. The
+            // probe itself is harmless when there is nothing to show.
             lifecycleScope.launch {
                 service?.dlnaSurfaceProbeTick?.collectLatest {
-                    if (it > 0 && isDlnaPlayerVisible) scheduleDlnaSurfaceProbe()
+                    if (it > 0) scheduleDlnaSurfaceProbe()
                 }
             }
         }
@@ -200,11 +206,25 @@ class MainActivity : AppCompatActivity() {
                 )
                 return
             }
+            // No Surface yet. The layer being hidden is the usual reason, and
+            // that is our own doing: a parked item sits in ADVERTISING, which
+            // never re-triggers showDlnaPlayer(). So re-show it here — otherwise
+            // this probe is polling a GONE view forever, which is exactly how
+            // the field log ended up with "cooldown elapsed" notices that were
+            // never followed by a start.
+            if (!isDlnaPlayerVisible && hasDlnaMedia()) {
+                showDlnaPlayer()
+                if (hasRealRenderSurface()) return
+            }
             if (SystemClock.uptimeMillis() - dlnaSurfaceProbeStartMs < DLNA_SURFACE_PROBE_MS) {
                 dlnaDebugHandler.postDelayed(this, DLNA_SURFACE_PROBE_INTERVAL_MS)
+            } else {
+                // Out of time: stay silent and let the receiver's own bounded
+                // audio-only fallback start the item, which is the old behaviour.
+                com.phairplay.util.DebugLog.log(
+                    "UI", "等待渲染面 ${DLNA_SURFACE_PROBE_MS / 1000}s 未就绪（播放层可见=$isDlnaPlayerVisible）"
+                )
             }
-            // Out of time: stay silent and let the receiver's own bounded
-            // audio-only fallback start the item, which is the old behaviour.
         }
     }
 

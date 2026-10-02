@@ -84,7 +84,16 @@ class DlnaReceiver(
      * parked because a decoder init failed with no real surface behind it —
      * only the Activity can say when a Surface appears.
      */
-    private val onSurfaceProbeNeeded: () -> Unit = {}
+    private val onSurfaceProbeNeeded: () -> Unit = {},
+    /**
+     * Asks the service to bring the playback UI back and show the player.
+     *
+     * Distinct from [onSurfaceProbeNeeded]: probing is pointless while the
+     * playback layer is hidden, and the layer is only shown on a CONNECTED
+     * state — so a parked item (which sits in ADVERTISING) would never get a
+     * Surface again without this.
+     */
+    private val onPlaybackUiNeeded: () -> Unit = {}
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -177,7 +186,14 @@ class DlnaReceiver(
         if (surfaceReady) {
             runStart(uri)
         } else {
+            // Ask the UI to *show* the player, not merely to re-probe. Ringing
+            // the probe alone deadlocks: the probe is a no-op while the playback
+            // layer is hidden, and nothing else would ever show it again —
+            // showDlnaPlayer() only runs on a CONNECTED state, while a failed
+            // start sits in ADVERTISING. The field log shows exactly that, four
+            // "cooldown elapsed" notices with no start after any of them.
             onSurfaceProbeNeeded()
+            onPlaybackUiNeeded()
         }
     }
 
@@ -371,6 +387,8 @@ class DlnaReceiver(
         consecutiveDecoderFailures = 0
         mainHandler.removeCallbacks(foregroundTimeoutRunnable)
         mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
+        onSurfaceProbeNeeded()
+        onPlaybackUiNeeded()
     }
 
     /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
@@ -676,6 +694,7 @@ class DlnaReceiver(
                                 // sender's next Play re-enters the same gate, and
                                 // the UI is asked to keep watching for a Surface.
                                 onSurfaceProbeNeeded()
+                                onPlaybackUiNeeded()
                             } else if (realSurfaceFailure) {
                                 // A genuine decoder failure on a surface that was
                                 // really there. Hand the slot back and stay off it
@@ -687,6 +706,7 @@ class DlnaReceiver(
                                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
                                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                                 mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
+                                onPlaybackUiNeeded()
                             } else if (uri != null && retryCount < 2 && !decoderDead &&
                                 !decoderCooldownActive()
                             ) {
@@ -1262,6 +1282,27 @@ class DlnaReceiver(
                 return@post
             }
 
+            // ── Respect the decoder cooldown ───────────────────────────────────
+            // A brand new SetAVTransportURI + Play arrives while the box is still
+            // cooling down from a failed init must NOT start immediately. That is
+            // the exact path that used to walk straight into the same failure:
+            // the cooldown only governed our own retries, while every sender poll
+            // (they come every 2–3 s) went straight through the gate. Park it and
+            // let [decoderCooldownRetry] pick it up — a different item also gets
+            // the same treatment, because the slot is a box-wide resource, not
+            // per-channel.
+            if (decoderCooldownActive()) {
+                pendingStartUri = uri
+                mainHandler.removeCallbacks(decoderCooldownRetry)
+                mainHandler.postDelayed(decoderCooldownRetry, COOLDOWN_RECHECK_MS.toLong())
+                DebugLog.log(
+                    "DLNA",
+                    "硬解冷却中 → 暂缓起播（约 ${(decoderCooldownUntilMs - System.currentTimeMillis()) / 1000}s 后重试）"
+                )
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
+
             // ── Wait for the foreground ───────────────────────────────────────
             // The order a receiver must keep: the sender pushes media → the UI
             // comes up → the UI confirms "I am on screen" → only then is the
@@ -1661,6 +1702,14 @@ class DlnaReceiver(
          * breaking the rest of the system.
          */
         private const val DECODER_COOLDOWN_MS = 8_000
+
+        /**
+         * How often a Play that arrived during the cooldown re-checks it.
+         *
+         * Senders poll every 2–3 s, so this only decides how promptly the item
+         * is picked up once the slot is free again.
+         */
+        private const val COOLDOWN_RECHECK_MS = 1_000
 
         /**
          * How long a video item may sit at READY without a single frame before
