@@ -244,6 +244,18 @@ class DlnaReceiver(
     @Volatile
     private var startedOnRealSurface = false
 
+    /**
+     * Whether a render surface exists right now, regardless of any start
+     * attempt.
+     *
+     * Distinct from [startedOnRealSurface], which describes the attempt that
+     * produced the current item. This one answers "could we start on a real
+     * surface if we wanted to?", which is what lets a stale foreground flag
+     * (see the gate in [startPlayback]) stop costing 10 seconds per cast.
+     */
+    @Volatile
+    private var realSurfacePresent = false
+
     /** Play received but not started yet because no render surface existed. */
     @Volatile
     private var pendingStartUri: String? = null
@@ -353,6 +365,7 @@ class DlnaReceiver(
         enterDecoderCooldown("READY 后无画面")
         pendingStartUri = uri
         surfaceReady = false
+        realSurfacePresent = false
         surfaceGeneration++
         hevcCodecSelector.resetFailures()
         consecutiveDecoderFailures = 0
@@ -481,8 +494,18 @@ class DlnaReceiver(
                                 }
                                 Player.STATE_ENDED -> {
                                     mainHandler.removeCallbacks(stallWatchdog)
+                                    mainHandler.removeCallbacks(firstPictureWatchdog)
                                     // The stream finished naturally — return to idle.
                                     if (currentUri != null) {
+                                        // Say so. A live HLS window ends on its own
+                                        // every few minutes, and the resulting IDLE
+                                        // used to appear in the log with no
+                                        // explanation, which is indistinguishable
+                                        // from a decoder dying.
+                                        DebugLog.log(
+                                            "DLNA",
+                                            "媒体流自然结束 (STATE_ENDED) → 回到空闲，pos=${p.currentPosition / 1000}s"
+                                        )
                                         clearPlayback()
                                         // Let the control point see STOPPED instead
                                         // of a stuck PLAYING after the media ends.
@@ -642,6 +665,7 @@ class DlnaReceiver(
                                 enterDecoderCooldown("本次起播没有真实渲染面")
                                 pendingStartUri = uri
                                 surfaceReady = false
+                                realSurfacePresent = false
                                 surfaceGeneration++
                                 hevcCodecSelector.resetFailures()
                                 consecutiveDecoderFailures = 0
@@ -785,6 +809,7 @@ class DlnaReceiver(
         mainHandler.removeCallbacks(surfaceTimeoutRunnable)
         mainHandler.removeCallbacks(stallWatchdog)
         surfaceReady = false
+        realSurfacePresent = false
         uiForeground = false
         releaseResources()
         // Proof in the debug card that Stop really reached the player — the
@@ -1038,6 +1063,7 @@ class DlnaReceiver(
      */
     fun markSurfaceReady() {
         mainHandler.post {
+            realSurfacePresent = true
             if (!surfaceReady) {
                 surfaceReady = true
                 surfaceGeneration++
@@ -1083,11 +1109,23 @@ class DlnaReceiver(
      * (1920x1080 first try, 40 s after the surface appeared) — so "no
      * foreground" is not the problem it was assumed to be. It stays as a
      * fallback, but a decoder failure here must not blacklist a component.
+     *
+     * If a real surface *did* appear while we waited (the flag was just stale),
+     * start on it rather than throwing the picture away — that is the whole
+     * difference between 10 wasted seconds and an instant start.
      */
     private val foregroundTimeoutRunnable = Runnable {
         val uri = pendingStartUri ?: return@Runnable
         pendingStartUri = null
         surfaceReady = true
+        if (realSurfacePresent) {
+            DebugLog.log(
+                "DLNA",
+                "等待前台期间渲染面已就绪 → 直接在真实渲染面上起播（不再等满 ${FOREGROUND_WAIT_MS / 1000}s）"
+            )
+            if (started) runStart(uri)
+            return@Runnable
+        }
         DebugLog.log(
             "DLNA",
             "等待前台 ${FOREGROUND_WAIT_MS / 1000}s 未成功 → 按仅音频起播: $uri"
@@ -1110,6 +1148,7 @@ class DlnaReceiver(
     fun markSurfaceGone() {
         mainHandler.post {
             surfaceReady = false
+            realSurfacePresent = false
             mainHandler.removeCallbacks(surfaceTimeoutRunnable)
         }
     }
@@ -1189,7 +1228,7 @@ class DlnaReceiver(
             currentUri = parked.uri
             // Deliberately routed through the surface gate: preparing here
             // without a real Surface is what wedged the decoder in the first place.
-            if (!uiForeground) {
+            if (!uiForeground && !realSurfacePresent) {
                 pendingStartUri = parked.uri
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                 mainHandler.postDelayed(
@@ -1231,7 +1270,16 @@ class DlnaReceiver(
             // the HEVC decoder while the Activity was still being started, and
             // every poll the sender made while that hung built another decoder.
             // Nothing is prepared before [setUiForeground] reports true.
-            if (!uiForeground) {
+            //
+            // Unless the surface is already there. "The Activity is resumed" and
+            // "there is a Surface to decode into" are different questions, and
+            // only the second one is what actually broke the decoder. The field
+            // log shows a cast that waited the full 10 s for a foreground report
+            // and then played 1920x1080 on the first try with no surface error
+            // at all — the PlayerView had been up the whole time. So a live
+            // surface overrides the flag; [uiForeground] only decides whether we
+            // need to *wait* for one.
+            if (!uiForeground && !realSurfacePresent) {
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                 mainHandler.postDelayed(
