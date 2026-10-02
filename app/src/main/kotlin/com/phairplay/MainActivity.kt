@@ -190,13 +190,17 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Report visibility before resuming: a cast that starts right now must
-        // not trigger another auto-foreground launch on top of us.
+        // not trigger another auto-foreground launch on top of us. This is the
+        // signal the receiver waits for — the media is only prepared once the
+        // Activity confirms it is really on screen.
         service?.onActivityResumed()
+        service?.setDlnaUiForeground(true)
     }
 
     override fun onPause() {
         // Keep the flag accurate even if the pause race with a cast start.
         service?.onActivityPaused()
+        service?.setDlnaUiForeground(false)
         super.onPause()
     }
 
@@ -763,6 +767,18 @@ class MainActivity : AppCompatActivity() {
      */
     fun showDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
+        // Re-binding the player tears the TextureView surface down and rebuilds
+        // it, and a cast regularly asks for this twice in the same second (the
+        // auto-foreground launch and the state change both reach us). One
+        // binding per show is enough — the second one is what made the picture
+        // stutter right after the cast started.
+        if (pv.visibility == View.VISIBLE && pv.player != null) {
+            updateDlnaMusicCard()
+            updateResumePill()
+            pv.isFocusable = true
+            pv.requestFocus()
+            return
+        }
         // DLNA owns the overlay: hide the AirPlay/photo screens (their debug
         // HUD would otherwise show through) and surface only the player.
         streamingScreen.visibility = View.GONE
