@@ -125,6 +125,46 @@ class DlnaReceiver(
     private var lastHevcDeadNoticeMs = 0L
 
     /**
+     * True once the playback UI reports a render target that exists *and* has
+     * a real size (see [markSurfaceReady]).
+     *
+     * The renderer used to prepare the player the instant Play arrived. When
+     * the UI had to be pulled to the front first (auto-foreground, v65) that
+     * meant configuring the Amlogic HEVC decoder against the TextureView
+     * surface of a view that had only just been revealed — still 0×0 in its
+     * first layout pass — and the HAL blocks in configure() waiting for that
+     * surface to become usable. It never does, so every poll reported
+     * "Decoder init failed … 超时" while the box sat there decoding audio.
+     * [startPlayback] now waits for this flag and [surfaceTimeoutRunnable]
+     * keeps a hard cap.
+     */
+    @Volatile
+    private var surfaceReady = false
+
+    /** Bumped for every new render surface so codec verdicts never leak
+     *  across surfaces: a fresh surface deserves a fresh chance. */
+    @Volatile
+    private var surfaceGeneration = 0
+
+    /** Play received but not started yet because no render surface existed. */
+    @Volatile
+    private var pendingStartUri: String? = null
+
+    /** Gives up waiting for the UI after [SURFACE_WAIT_MS] and starts the item
+     *  without a picture — exactly what receivers did before auto-foreground,
+     *  so a cast that never opens the UI still makes sound. */
+    private val surfaceTimeoutRunnable = Runnable {
+        val uri = pendingStartUri ?: return@Runnable
+        pendingStartUri = null
+        surfaceReady = true
+        DebugLog.log(
+            "DLNA",
+            "等待播放层 ${SURFACE_WAIT_MS / 1000}s 未就绪 → 按仅音频起播: $uri"
+        )
+        if (started) runStart(uri)
+    }
+
+    /**
      * A Seek that arrived before the pipeline reached READY. Senders poll and
      * re-issue Seek(≈resume position) right after Play; executing it while the
      * HLS loader is still fetching the first segments aborts those in-flight
@@ -668,6 +708,40 @@ class DlnaReceiver(
         }
     }
 
+    /**
+     * Called by the UI once the playback view really exists: visible, laid out
+     * with a non-zero size, and the PlayerView surface already attached.
+     *
+     * This is the gate that keeps ExoPlayer from creating a MediaCodec against
+     * a half-built TextureView surface (see [surfaceReady]).
+     */
+    fun markSurfaceReady() {
+        mainHandler.post {
+            if (surfaceReady) return@post
+            surfaceReady = true
+            surfaceGeneration++
+            // Verdicts belong to the surface they were taken on.
+            hevcCodecSelector.resetFailures()
+            consecutiveDecoderFailures = 0
+            mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+            val uri = pendingStartUri
+            if (uri != null) {
+                pendingStartUri = null
+                DebugLog.log("DLNA", "播放层就绪 → 起播")
+                runStart(uri)
+            }
+        }
+    }
+
+    /** Called by the UI when the playback view is hidden or destroyed, so the
+     *  next Play is never armed against a surface that no longer exists. */
+    fun markSurfaceGone() {
+        mainHandler.post {
+            surfaceReady = false
+            mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+        }
+    }
+
     /** Detaches the player output from any SurfaceView (call when the UI hides playback). */
     @OptIn(UnstableApi::class)
     fun detachSurface() {
@@ -714,7 +788,39 @@ class DlnaReceiver(
     override fun startPlayback(uri: String) {
         mainHandler.post {
             if (!started) return@post
+
             val p = player ?: return@post
+
+            // Something is already queued behind a missing render surface: the
+            // sender is polling the very item we could not start yet, so stay
+            // armed instead of replacing the pending attempt.
+            if (pendingStartUri == uri && !surfaceReady) {
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
+
+            // ── Wait for the render surface ───────────────────────────────────
+            // Play can arrive before the UI exists (auto-foreground pull, v65)
+            // or before the revealed PlayerView has a sized surface. Creating
+            // the Amlogic HEVC decoder there blocks in configure() forever, and
+            // the sender's next poll builds a second one — that is the
+            // "Decoder init failed … 超时" loop. This gate sits ahead of the
+            // idempotent branch on purpose: a sender polling the very item we
+            // have not started yet must not be mistaken for "already playing,
+            // nothing to do" — it has to leave the item armed.
+            // Start once the surface is real, or after [SURFACE_WAIT_MS] play
+            // audio only, exactly like receivers did before auto-foreground.
+            if (!surfaceReady) {
+                pendingStartUri = uri
+                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                mainHandler.postDelayed(surfaceTimeoutRunnable, SURFACE_WAIT_MS.toLong())
+                DebugLog.log(
+                    "DLNA",
+                    "播放层尚未就绪 → 暂缓起播（${SURFACE_WAIT_MS / 1000}s 内无界面则以仅音频起播）"
+                )
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
 
             // ── Idempotent replay ─────────────────────────────────────────────
             // This is the black-screen-with-sound fix. Phone apps re-send the
@@ -757,10 +863,26 @@ class DlnaReceiver(
                 return@post
             }
 
+            runStart(uri)
+        }
+    }
+
+    /**
+     * Loads, prepares and plays one item. Reached either straight from
+     * [startPlayback] (surface already there) or once the UI reports
+     * [markSurfaceReady].
+     */
+    @OptIn(UnstableApi::class)
+    private fun runStart(uri: String) {
+        mainHandler.post {
+            if (!started) return@post
+            val p = player ?: return@post
+
             currentUri = uri
             retryCount = 0
             consecutiveDecoderFailures = 0
             pendingSeekMs = -1L
+            mainHandler.removeCallbacks(surfaceTimeoutRunnable)
             // An item is loaded from here on: the UI may offer "back to
             // playback" and (once READY) know whether it is audio-only.
             DlnaMediaMeta.setActive(true)
@@ -995,6 +1117,15 @@ class DlnaReceiver(
     }
 
     companion object {
+        /**
+         * How long [startPlayback] may wait for the playback UI before it
+         * accepts "sound only". The Activity gets pulled to the front by the
+         * foreground service, and the view only reports a real surface after
+         * the next layout; that is a fraction of a second in practice, so this
+         * cap only matters when the UI never shows up at all.
+         */
+        private const val SURFACE_WAIT_MS = 3_000
+
         /** How long a source may stay silent before we probe it ourselves. */
         private const val STALL_TIMEOUT_MS = 15_000
 
