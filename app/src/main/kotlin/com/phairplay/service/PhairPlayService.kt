@@ -432,6 +432,9 @@ class PhairPlayService : Service() {
             dlnaReceiver = DlnaReceiver(
                 context = applicationContext,
                 displayName = settings.effectiveDisplayName,
+                // The receiver parks an item when a decoder init failed with no
+                // surface behind it; only the Activity can see when one appears.
+                onSurfaceProbeNeeded = { requestDlnaSurfaceProbe() },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
@@ -470,7 +473,6 @@ class PhairPlayService : Service() {
             Logger.d("DLNA receiver started (displayName='${settings.effectiveDisplayName}')")
         }
     }
-
     /** Exposes the DLNA player so the UI can attach a SurfaceView for video rendering. */
     val dlnaPlayer: ExoPlayer?
         get() = dlnaReceiver?.playerOrNull
@@ -497,6 +499,22 @@ class PhairPlayService : Service() {
     /** Called by the UI when the DLNA playback view goes away. */
     fun markDlnaSurfaceGone() {
         dlnaReceiver?.markSurfaceGone()
+    }
+
+    /**
+     * Asks the UI to run another render-surface probe.
+     *
+     * The receiver parks an item whenever a decoder init failed without a real
+     * surface behind it. Whether a surface shows up afterwards is something only
+     * the Activity can answer (it watches `player.videoSurface`), so the
+     * receiver rings this bell instead of guessing. Bumped as a counter rather
+     * than a boolean so two requests in a row are two requests, not one.
+     */
+    private val _dlnaSurfaceProbeTick = MutableStateFlow(0)
+    val dlnaSurfaceProbeTick: StateFlow<Int> = _dlnaSurfaceProbeTick
+
+    fun requestDlnaSurfaceProbe() {
+        _dlnaSurfaceProbeTick.value += 1
     }
 
     /** Pauses the DLNA player when the app goes to the background. */
