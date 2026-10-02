@@ -27,6 +27,7 @@ import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
 import com.phairplay.settings.SettingsRepository
+import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.NowPlayingScreen
@@ -223,11 +224,13 @@ class MainActivity : AppCompatActivity() {
 
         // Full-screen DLNA playback: a PlayerView with built-in controller,
         // keep-screen-on, and automatic Surface lifecycle management.
-        dlnaPlayerView = PlayerView(this).apply {
-            useController = true
-            setKeepScreenOn(true)
-            visibility = View.GONE
-        }
+        // Created from XML because the render target has to be a TextureView
+        // (see dlna_player_view.xml) and that can only be set via the
+        // resource attribute.
+        dlnaPlayerView = layoutInflater.inflate(
+            R.layout.dlna_player_view, streamingContainer, false
+        ) as PlayerView
+        dlnaPlayerView?.visibility = View.GONE
         streamingContainer.addView(
             dlnaPlayerView,
             FrameLayout.LayoutParams(
@@ -377,34 +380,10 @@ class MainActivity : AppCompatActivity() {
     fun getVideoSurface() = streamingScreen.getSurface()
 
     /**
-     * Routes TV-remote media keys to the AirPlay sender (DACP reverse control) while audio-only or a
-     * stream is showing — so the remote can play/pause/skip what the Mac/iPhone is streaming. Returns
-     * false for other keys so normal navigation is unaffected.
+     * Volume keys stay with the system on both protocols — forwarding them to
+     * the sender only worked for AirPlay and made the same button behave
+     * differently depending on what was casting.
      */
-    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
-        if (overlayActive) {
-            val command = when (keyCode) {
-                android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
-                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE,
-                android.view.KeyEvent.KEYCODE_DPAD_CENTER -> com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE
-                android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> com.phairplay.airplay.DacpClient.CMD_NEXT
-                android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> com.phairplay.airplay.DacpClient.CMD_PREV
-                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> com.phairplay.airplay.DacpClient.CMD_FF
-                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> com.phairplay.airplay.DacpClient.CMD_REW
-                else -> null
-            }
-            if (command != null) {
-                service?.sendAirPlayRemoteCommand(command)
-                return true
-            }
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
     /**
      * Requests POST_NOTIFICATIONS permission on Android 13+ (API 33+).
      * On older versions the permission is granted automatically with the manifest declaration.
@@ -447,6 +426,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
         private const val PERMISSION_REQUEST_NEARBY_WIFI = 1002
+
+        /** How far the D-pad left/right seek (±10 s). */
+        private const val SEEK_STEP_MS = 10_000L
     }
 
     // ─── Streaming overlay ────────────────────────────────────────────────────
@@ -545,6 +527,14 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // The remote drives this screen. Without focus the D-pad events go to
+        // whatever still holds it underneath and every key looks dead.
+        pv.isFocusable = true
+        pv.requestFocus()
+        com.phairplay.util.DebugLog.log(
+            "UI",
+            "显示播放层 (TextureView, player=${if (pv.player != null) "已绑定" else "null"})"
+        )
 
         // DLNA debug HUD honours the Settings → "Debug overlay" switch:
         // on → show live DLNA playback info; off → hidden.
@@ -618,36 +608,272 @@ class MainActivity : AppCompatActivity() {
     // hand focus to it; media keys (play/pause/ff/rew) are handled by
     // PlayerView itself.
 
+    /**
+     * TV remote mapping for the full-screen DLNA player.
+     *
+     * media3's PlayerView is built for touch: its controller only reacts to
+     * Left/Right once focus has landed on the seek bar, which a D-pad never
+     * does by itself here. So the keys that matter are handled explicitly —
+     * Left/Right seek, OK toggles play, Menu opens the player settings —
+     * and everything else falls through unchanged.
+     */
+    /**
+     * Single key map for both cast protocols.
+     *
+     * WHY: AirPlay used to be handled in onKeyDown and DLNA in
+     * dispatchKeyEvent, with two different key sets — the same physical button
+     * did nothing, or did different things, depending on which protocol was
+     * casting. Everything now routes through one table, taking AirPlay's
+     * transport semantics as the reference, and applies the local (ExoPlayer)
+     * equivalent when DLNA is the active session.
+     *
+     * Volume stays with the system in both cases so the remote always controls
+     * the box's own output level.
+     */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val pv = dlnaPlayerView
-        if (pv != null && pv.visibility == View.VISIBLE) {
-            // Back always has to leave full-screen playback. The playback layer
-            // is MATCH_PARENT over the whole content area, nav panel included,
-            // so without this a TV remote is stranded the moment playback
-            // starts - no way to reach home or settings. Playback itself keeps
-            // running (the ExoPlayer instance lives in the receiver); only the
-            // surface binding is dropped.
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                if (event.action == KeyEvent.ACTION_UP) {
-                    hideDlnaPlayer()
-                    // Give focus straight to the nav entry we were last on so
-                    // the D-pad works on the screen underneath immediately,
-                    // rather than landing nowhere and looking dead again.
-                    val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
-                    target.requestFocus()
+        val dlna = isDlnaPlayerVisible
+        val airPlay = isAirPlayOverlayActive
+        if ((dlna || airPlay) && event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                // Back leaves full-screen playback. DLNA drops back to the app
+                // UI first (that UI is reachable and stays usable); pressing
+                // Back there exits the app exactly like AirPlay does.
+                KeyEvent.KEYCODE_BACK -> {
+                    if (dlna && event.repeatCount == 0) {
+                        hideDlnaPlayer()
+                        val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
+                        target.requestFocus()
+                        return true
+                    }
+                    return false
                 }
-                return true
-            }
-            if (event.action == KeyEvent.ACTION_DOWN && !pv.isControllerFullyVisible) {
-                // Reveal the controller on the first D-pad press, but do NOT
-                // consume the event. Swallowing every direction press here was
-                // exactly why the remote did nothing: the event never reached
-                // PlayerView, so the controller buttons could never take focus
-                // and none of its play/pause/seek controls were reachable.
-                pv.showController()
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_MEDIA_REWIND,
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> {
+                    transportBackward(event.keyCode)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> {
+                    transportForward(event.keyCode)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                KeyEvent.KEYCODE_MEDIA_PLAY,
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    transportPlayPause()
+                    return true
+                }
+                KeyEvent.KEYCODE_MENU -> {
+                    if (dlna) showPlayerSettings() else showAirPlaySessionMenu()
+                    return true
+                }
+                else -> {
+                    // Any other key just reveals the controller. It must NOT be
+                    // consumed: swallowing every direction press was why the
+                    // remote looked completely dead in the first place.
+                    if (dlna && dlnaPlayerView?.isControllerFullyVisible == false) {
+                        dlnaPlayerView?.showController()
+                    }
+                }
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    /** True while an AirPlay stream / now-playing card owns the screen. */
+    private val isAirPlayOverlayActive: Boolean
+        get() = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
+
+    /** True while the full-screen DLNA player owns the screen. */
+    private val isDlnaPlayerVisible: Boolean
+        get() = dlnaPlayerView?.visibility == View.VISIBLE
+
+    private fun transportPlayPause() {
+        if (isDlnaPlayerVisible) {
+            togglePlayPause()
+            dlnaPlayerView?.showController()
+        } else {
+            sendDacp(DacpClient.CMD_PLAY_PAUSE)
+        }
+    }
+
+    /**
+     * Backwards transport control. DLNA has one media item in front of it, so
+     * "previous" cannot mean another track — it seeks back, which is the same
+     * intent the sender receives in the AirPlay case.
+     */
+    private fun transportBackward(keyCode: Int) {
+        if (isDlnaPlayerVisible) {
+            val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) -30_000L else -SEEK_STEP_MS
+            seekBy(step)
+            dlnaPlayerView?.showController()
+        } else {
+            sendDacp(
+                when (keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_REWIND -> DacpClient.CMD_REW
+                    KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                    KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> DacpClient.CMD_PREV
+                    else -> DacpClient.CMD_REW
+                }
+            )
+        }
+    }
+
+    private fun transportForward(keyCode: Int) {
+        if (isDlnaPlayerVisible) {
+            val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) 30_000L else SEEK_STEP_MS
+            seekBy(step)
+            dlnaPlayerView?.showController()
+        } else {
+            sendDacp(
+                when (keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> DacpClient.CMD_FF
+                    KeyEvent.KEYCODE_MEDIA_NEXT,
+                    KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> DacpClient.CMD_NEXT
+                    else -> DacpClient.CMD_FF
+                }
+            )
+        }
+    }
+
+    private fun sendDacp(command: String) {
+        service?.sendAirPlayRemoteCommand(command)
+    }
+
+    /**
+     * The Menu-key equivalent of the DLNA player settings: what the remote can
+     * do to the session it is driving, since a D-pad cannot reach an on-screen
+     * button either way.
+     */
+    private fun showAirPlaySessionMenu() {
+        val items = arrayOf("播放 / 暂停", "下一首", "上一首", "返回投屏画面")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("投屏控制 · AirPlay")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> sendDacp(DacpClient.CMD_PLAY_PAUSE)
+                    1 -> sendDacp(DacpClient.CMD_NEXT)
+                    2 -> sendDacp(DacpClient.CMD_PREV)
+                }
+            }
+            .setCancelable(true)
+            .show()
+    }
+
+    /** Seeks the DLNA player relative to the current position, clamped to [0, duration]. */
+    private fun seekBy(deltaMs: Long) {
+        val p = dlnaPlayerView?.player ?: return
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        val dur = p.duration
+        val target = if (dur > 0L) {
+            (pos + deltaMs).coerceIn(0L, dur)
+        } else {
+            (pos + deltaMs).coerceAtLeast(0L)
+        }
+        p.seekTo(target)
+    }
+
+    private fun togglePlayPause() {
+        val p = dlnaPlayerView?.player ?: return
+        p.playWhenReady = !p.playWhenReady
+    }
+
+    /**
+     * Player settings reachable from the Menu key — what PlayerView's own
+     * gear button offers, but that button is unreachable with a D-pad.
+     */
+    private fun showPlayerSettings() {
+        val pv = dlnaPlayerView ?: return
+        val p = pv.player
+        if (p == null) {
+            return
+        }
+        val options = arrayOf("音轨 / 字幕", "播放速度", "画面比例", "关闭设置")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("播放器设置")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showTrackSettings(p)
+                    1 -> showSpeedSettings(p)
+                    2 -> cycleResizeMode(pv)
+                }
+            }
+            .setCancelable(true)
+            .show()
+    }
+
+    private fun showSpeedSettings(p: androidx.media3.common.Player) {
+        val speeds = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+        val labels = speeds.map { "${it}x" }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("播放速度")
+            .setItems(labels) { _, i -> p.playbackParameters = p.playbackParameters.withSpeed(speeds[i]) }
+            .show()
+    }
+
+    private fun cycleResizeMode(pv: PlayerView) {
+        val next = when (pv.resizeMode) {
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT ->
+                androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL ->
+                androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+        pv.resizeMode = next
+        val name = when (next) {
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL -> "拉伸填满"
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "放大裁切"
+            else -> "原始比例"
+        }
+        android.widget.Toast.makeText(this, "画面比例: $name", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Audio/text track chooser via the Tracks API. Selecting a group override
+     * is how an unsupported audio codec (AC3/DTS on a TV box) gets swapped for
+     * a track the hardware can decode.
+     */
+    private fun showTrackSettings(p: androidx.media3.common.Player) {
+        val groups = p.currentTracks.groups.filter {
+            it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO ||
+                it.type == androidx.media3.common.C.TRACK_TYPE_TEXT
+        }
+        if (groups.isEmpty()) {
+            android.widget.Toast.makeText(this, "该媒体没有可选音轨/字幕", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = ArrayList<String>()
+        val actions = ArrayList<() -> Unit>()
+        for (group in groups) {
+            val kind = if (group.type == androidx.media3.common.C.TRACK_TYPE_AUDIO) "音轨" else "字幕"
+            for (i in 0 until group.length) {
+                val fmt = group.getTrackFormat(i)
+                val lang = fmt.language?.takeIf { it.isNotBlank() && it != "und" } ?: "默认"
+                val label = fmt.label ?: fmt.codecs ?: ""
+                labels.add("$kind $i · $lang ${label.ifBlank { "" }}".trim())
+                actions.add {
+                    p.trackSelectionParameters = p.trackSelectionParameters
+                        .buildUpon()
+                        .setOverrideForType(
+                            androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i)
+                        )
+                        .build()
+                }
+            }
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("音轨 / 字幕")
+            .setItems(labels.toTypedArray()) { _, i ->
+                actions[i].invoke()
+                dlnaPlayerView?.showController()
+            }
+            .show()
     }
 
 }

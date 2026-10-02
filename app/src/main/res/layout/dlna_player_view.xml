@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-screen DLNA playback surface.
+
+  NOTE on app:surface_type="texture_view": this is the supported way to switch
+  the render target — PlayerView.setSurfaceType() is @UnstableApi and is not
+  callable from Kotlin (restricted to the library group). The attribute is read
+  in the PlayerView constructor, so it must live in XML.
+
+  WHY texture_view instead of the default surface_view: SurfaceView draws into
+  its own window layer beneath the Activity window. In a full-screen overlay on
+  these TV boxes that layer surfaces as a perfectly black rectangle — the layer
+  exists and receives frames, nothing composites on top of it. TextureView
+  draws inside the view hierarchy and obeys normal View stacking.
+-->
+<androidx.media3.ui.PlayerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/dlna_player_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:keepScreenOn="true"
+    app:use_controller="true"
+    app:surface_type="texture_view" />

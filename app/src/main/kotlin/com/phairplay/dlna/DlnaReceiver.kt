@@ -116,6 +116,26 @@ class DlnaReceiver(
     @Volatile
     private var retryCount = 0
 
+    /**
+     * Fires when an starts but never reaches READY — i.e. a black screen with
+     * *no* error callbacks. Nothing else in the player reports that case, and
+     * it is the one that looks like a broken app rather than a broken source.
+     * Probes the URL directly and records what the far end answered, turning
+     * "black screen" into either "source dead" or "still buffering".
+     */
+    private val stallWatchdog = Runnable {
+        val p = player
+        val uri = currentUri
+        if (p == null || uri == null) return@Runnable
+        if (p.playbackState != Player.STATE_READY) {
+            DebugLog.log(
+                "DLNA",
+                "起播 ${STALL_TIMEOUT_MS / 1000}s 未就绪: state=${stateNameOf(p.playbackState)} → 主动探测源"
+            )
+            probeSourceAsync(uri)
+        }
+    }
+
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var manualSsdp: ManualSsdp? = null
@@ -189,20 +209,31 @@ class DlnaReceiver(
                 .also { p ->
                     p.addListener(object : Player.Listener {
                         override fun onPlaybackStateChanged(playbackState: Int) {
-                            val stateName = when (playbackState) {
-                                Player.STATE_IDLE -> "IDLE"
-                                Player.STATE_BUFFERING -> "BUFFERING"
-                                Player.STATE_READY -> "READY"
-                                Player.STATE_ENDED -> "ENDED"
-                                else -> "UNKNOWN"
-                            }
+                            val stateName = stateNameOf(playbackState)
                             Logger.d("DLNA player state: $stateName uri=${currentUri}")
+                            // Written to the in-app debug log deliberately: a black
+                            // picture with no visible error means ExoPlayer never
+                            // said anything at all, and on this box we have no
+                            // logcat access. State transitions are the cheapest
+                            // evidence of whether bytes ever arrived.
+                            DebugLog.log(
+                                "DLNA",
+                                "播放器状态: $stateName playWhenReady=${p.playWhenReady} pos=${p.currentPosition / 1000}s"
+                            )
                             when (playbackState) {
-                                Player.STATE_READY -> if (currentUri != null) {
-                                    retryCount = 0
-                                    report(ProtocolState.CONNECTED)
+                                Player.STATE_READY -> {
+                                    mainHandler.removeCallbacks(stallWatchdog)
+                                    DebugLog.log(
+                                        "DLNA",
+                                        "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
+                                    )
+                                    if (currentUri != null) {
+                                        retryCount = 0
+                                        report(ProtocolState.CONNECTED)
+                                    }
                                 }
                                 Player.STATE_ENDED -> {
+                                    mainHandler.removeCallbacks(stallWatchdog)
                                     // The stream finished naturally — return to idle.
                                     if (currentUri != null) {
                                         clearPlayback()
@@ -218,10 +249,26 @@ class DlnaReceiver(
                             }
                         }
 
+                        override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                            DebugLog.log("DLNA", "视频轨: ${videoSize.width}x${videoSize.height}")
+                        }
+
+                        /** Proof that pixels actually reached the screen (vs. a black overlay). */
+                        override fun onRenderedFirstFrame() {
+                            mainHandler.removeCallbacks(stallWatchdog)
+                            DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
+                        }
+
                         override fun onPlayerError(error: PlaybackException) {
+                            mainHandler.removeCallbacks(stallWatchdog)
+                            val cause = error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" }
                             val msg = "DLNA播放失败: ${error.errorCodeName ?: error.errorCode} ${error.message}"
                             Logger.e("DLNA playback error: $msg", error)
                             DebugLog.log("DLNA", msg)
+                            DebugLog.log(
+                                "DLNA",
+                                "错误根因: ${cause ?: "(无 cause)"} 超时/网络=${error.errorCode / 1000}"
+                            )
                             // A parsing failure nearly always means the SOURCE lied, not
                             // the player: it answered HTTP 200 with an HTML error page or
                             // plain text. Nothing in errorCodeName says so, so probe the
@@ -576,17 +623,41 @@ class DlnaReceiver(
     override fun startPlayback(uri: String) {
         mainHandler.post {
             if (!started) return@post
+            val p = player ?: return@post
+
+            // ── Idempotent replay ─────────────────────────────────────────────
+            // This is the black-screen-with-sound fix. Phone apps re-send the
+            // same SetAVTransportURI + Play every 10–30 s while polling whether
+            // playback really started (we saw four identical pushes inside a
+            // minute). Re-running setMediaItem + prepare on each one tears the
+            // pipeline back to square one *just before* the first frame lands,
+            // so it can never get past the black frame → looks dead, while the
+            // same URL plays elsewhere because those renderers treat Play as
+            // "make sure it plays". Only a *different* URI is a real source
+            // change.
+            if (uri == currentUri && p.mediaItemCount > 0 &&
+                p.playbackState != Player.STATE_IDLE
+            ) {
+                DebugLog.log(
+                    "DLNA",
+                    "重复 Play(同一 URI) → 仅续播 state=${stateNameOf(p.playbackState)}"
+                )
+                if (!p.playWhenReady) p.play()
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
+
             currentUri = uri
             retryCount = 0
             Logger.i("DLNA playback start: $uri")
             DebugLog.log("DLNA", "开始播放: $uri")
-            player?.let { p ->
-                p.setMediaItem(buildMediaItem(uri))
-                p.volume = (DlnaAudioRenderingControl.getVolumeValue() / 100f)
-                    .coerceIn(0f, 1f)
-                p.prepare()
-                p.play()
-            }
+            mainHandler.removeCallbacks(stallWatchdog)
+            mainHandler.postDelayed(stallWatchdog, STALL_TIMEOUT_MS.toLong())
+            p.setMediaItem(buildMediaItem(uri))
+            p.volume = (DlnaAudioRenderingControl.getVolumeValue() / 100f)
+                .coerceIn(0f, 1f)
+            p.prepare()
+            p.play()
             report(ProtocolState.CONNECTED)
         }
     }
@@ -719,6 +790,17 @@ class DlnaReceiver(
     }
 
     companion object {
+        /** How long a source may stay silent before we probe it ourselves. */
+        private const val STALL_TIMEOUT_MS = 15_000
+
+        private fun stateNameOf(state: Int): String = when (state) {
+            Player.STATE_IDLE -> "IDLE"
+            Player.STATE_BUFFERING -> "BUFFERING"
+            Player.STATE_READY -> "READY"
+            Player.STATE_ENDED -> "ENDED"
+            else -> "UNKNOWN"
+        }
+
         @Volatile
         private var crashGuardInstalled = false
 
