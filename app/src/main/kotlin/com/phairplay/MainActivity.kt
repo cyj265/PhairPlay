@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.KeyEvent
+import android.view.ViewTreeObserver
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
@@ -773,6 +774,22 @@ class MainActivity : AppCompatActivity() {
         pv.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
+        // The player must not prepare against a texture that is still 0×0: on
+        // this box MediaCodec blocks forever inside configure(), which is what
+        // every "Decoder init failed … 超时" was. The receiver starts the item
+        // on the first real layout instead (and audio-only if the UI never
+        // produces one — see DlnaReceiver.SURFACE_WAIT_MS).
+        pv.viewTreeObserver.addOnPreDrawListener(
+            object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    if (pv.width > 0 && pv.height > 0) {
+                        pv.viewTreeObserver.removeOnPreDrawListener(this)
+                        service?.markDlnaSurfaceReady()
+                    }
+                    return true
+                }
+            }
+        )
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         updateDlnaMusicCard()
         updateResumePill()
@@ -806,6 +823,10 @@ class MainActivity : AppCompatActivity() {
     /** Hides the full-screen DLNA PlayerView and releases the player binding. */
     fun hideDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
+        // The texture this player was writing into is gone: tell the receiver
+        // so the next Play is not armed against a dead surface (and so the
+        // codec verdicts taken on it are not carried over).
+        service?.markDlnaSurfaceGone()
         pv.player = null
         pv.visibility = View.GONE
         dlnaDebugHandler.removeCallbacks(dlnaDebugTick)

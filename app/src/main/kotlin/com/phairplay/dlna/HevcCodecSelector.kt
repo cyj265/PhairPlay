@@ -129,6 +129,24 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
         startProbe()
     }
 
+    /**
+     * Forgets every component ruled out so far.
+     *
+     * A verdict is only valid for the render surface it was measured on. A
+     * component that hung while the view had just been revealed (still 0×0 in
+     * its first layout pass) may work perfectly on the next surface — the N1
+     * hardware degrades nothing. Called from [DlnaReceiver.markSurfaceReady].
+     */
+    fun resetFailures() {
+        synchronized(lock) {
+            if (brokenNames.isEmpty()) return@synchronized
+            brokenNames.clear()
+            allBroken = false
+        }
+        Logger.w("HEVC decoder verdicts cleared — the render surface changed")
+        DebugLog.log("DECODER", "HEVC解码器名单已重置（渲染面已更换）")
+    }
+
     /** Records a component that initialised, and stops probing after that. */
     fun noteDecoderSuccess(name: String?) {
         if (name.isNullOrBlank() || name == workingName) return

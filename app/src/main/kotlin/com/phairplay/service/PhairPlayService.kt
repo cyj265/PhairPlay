@@ -485,6 +485,20 @@ class PhairPlayService : Service() {
         dlnaReceiver?.detachSurface()
     }
 
+    /**
+     * Called by the UI once the DLNA playback view has a surface with a real
+     * size. Preparing the player before that makes the Amlogic HEVC decoder
+     * block in configure() forever (see DlnaReceiver.surfaceReady).
+     */
+    fun markDlnaSurfaceReady() {
+        dlnaReceiver?.markSurfaceReady()
+    }
+
+    /** Called by the UI when the DLNA playback view goes away. */
+    fun markDlnaSurfaceGone() {
+        dlnaReceiver?.markSurfaceGone()
+    }
+
     /** Pauses the DLNA player when the app goes to the background. */
     fun pauseDlnaPlayback() {
         dlnaReceiver?.pausePlaybackFromUi()
