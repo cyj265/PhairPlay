@@ -18,6 +18,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -491,7 +492,29 @@ class DlnaReceiver(
                 .setEnableDecoderFallback(true)
                 .setMediaCodecSelector(hevcCodecSelector)
 
+            // A live HLS window on these boxes is only a few segments deep, and
+            // ExoPlayer's defaults (2.5 s / 5 s) are thinner than one segment
+            // round-trip to the CDN. Every hiccup there drains the buffer to zero
+            // and the picture freezes — the field log shows a clean pattern of
+            // "READY 1920x1080" then a repeatable
+            // `ERROR_CODE_IO_UNSPECIFIED … IllegalArgumentException` roughly
+            // every 13 s, each one recovering only because the retry re-prepared.
+            // A deeper buffer absorbs those, which is the difference between
+            // "briefly stalls" and "not really stalling".
+            val loadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    MIN_BUFFER_MS,
+                    MAX_BUFFER_MS,
+                    BUFFER_FOR_PLAYBACK_MS,
+                    BUFFER_FOR_REBUFFER_MS
+                )
+                // Cap by wall time, not by byte count: bitrate is unknown for
+                // these relay URLs and a byte cap starves a 1080p stream.
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
+
             val exoPlayer = ExoPlayer.Builder(context, renderersFactory)
+                .setLoadControl(loadControl)
                 .setMediaSourceFactory(
                     DefaultMediaSourceFactory(context).setDataSourceFactory(httpFactory)
                 )
@@ -679,7 +702,20 @@ class DlnaReceiver(
                             } else {
                                 consecutiveDecoderFailures = 0
                             }
-                            onError(msg)
+                            // A source-side hiccup (a segment that failed to load,
+                            // a playlist that rolled mid-fetch) is not a receiver
+                            // fault: the very next retry in the field log came back
+                            // with a picture, twice in a row. Surfacing it as an
+                            // error flashes the home card red at the user for
+                            // something they never caused and cannot see.
+                            // Anything decoder-related still reports, because that
+                            // one is real and needs the card to say so.
+                            val sourceGlitch = error.errorCode / 1000 == 2
+                            if (sourceGlitch) {
+                                DebugLog.log("DLNA", "源端瞬时抖动（可自恢复），不向界面报错")
+                            } else {
+                                onError(msg)
+                            }
                             // Reflect STOPPED immediately so the control point's
                             // UI doesn't stay stuck on PLAYING while we retry.
                             ManualDlnaHttp.notifyPlaybackEnded()
@@ -1781,6 +1817,25 @@ class DlnaReceiver(
          * is picked up once the slot is free again.
          */
         private const val COOLDOWN_RECHECK_MS = 1_000
+
+        // ── Buffering ──────────────────────────────────────────────────────
+        // A live HLS window here holds only a few segments, and ExoPlayer's
+        // defaults are thinner than one segment round-trip. Anything that makes
+        // a segment fetch slow (CDN hiccup, a redirect, a slow TCP window)
+        // drains the buffer to zero and the picture freezes. Four times the
+        // default depth absorbs those without adding perceptible latency on a
+        // live stream, which is what the 13-second `IO_UNSPECIFIED` pattern in
+        // the field log is really measuring.
+        private const val MIN_BUFFER_MS = 10_000
+        private const val MAX_BUFFER_MS = 60_000
+
+        /** Start playing once this much is buffered — near-instant on a live
+         *  stream that is already buffering in the background. */
+        private const val BUFFER_FOR_PLAYBACK_MS = 500
+
+        /** How much must be buffered after a stall before resuming. A shallow
+         *  value here is what turns one failed segment into a visible freeze. */
+        private const val BUFFER_FOR_REBUFFER_MS = 12_000
 
         /**
          * How long a video item may sit at READY without a single frame before
