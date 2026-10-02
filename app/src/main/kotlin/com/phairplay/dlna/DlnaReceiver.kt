@@ -120,6 +120,10 @@ class DlnaReceiver(
     @Volatile
     private var consecutiveDecoderFailures = 0
 
+    /** Throttle for "this item's decoder is dead" notices (see [startPlayback]). */
+    @Volatile
+    private var lastHevcDeadNoticeMs = 0L
+
     /**
      * A Seek that arrived before the pipeline reached READY. Senders poll and
      * re-issue Seek(≈resume position) right after Play; executing it while the
@@ -163,7 +167,8 @@ class DlnaReceiver(
     }
 
     /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
-    private val hevcCodecSelector = HevcCodecSelector()
+    private val hevcCodecSelector =
+        HevcCodecSelector(context.applicationContext)
 
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -314,9 +319,19 @@ class DlnaReceiver(
                             // this is a codec problem rather than a network hiccup.
                             val failedCodec = failingCodecName(error)
                             if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED) {
-                                consecutiveDecoderFailures++
+                                // Count only components we have not already
+                                // ruled out. Senders alternate between the two
+                                // URLs they proxy the channel through, which
+                                // used to reset the counter per URL and turn
+                                // one broken decoder into a MediaCodec leak
+                                // every few seconds.
+                                val alreadyKnown = hevcCodecSelector.isBroken(failedCodec)
+                                if (!alreadyKnown) consecutiveDecoderFailures++
                                 hevcCodecSelector.noteDecoderFailure(failedCodec)
-                                Logger.w("Decoder init failed ($failedCodec) — 连续第 $consecutiveDecoderFailures 次")
+                                Logger.w(
+                                    "Decoder init failed ($failedCodec) " +
+                                        "— 连续第 $consecutiveDecoderFailures 次${if (alreadyKnown) "(已知不可用)" else ""}"
+                                )
                             } else {
                                 consecutiveDecoderFailures = 0
                             }
@@ -334,9 +349,16 @@ class DlnaReceiver(
                             // different item, so don't burn a MediaCodec per poll.
                             val decoderDead =
                                 error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
-                                consecutiveDecoderFailures >= 2
+                                (consecutiveDecoderFailures >= 2 ||
+                                    hevcCodecSelector.isHevcBroken() ||
+                                    hevcCodecSelector.isBroken(failedCodec))
                             if (decoderDead) {
                                 DebugLog.log("DLNA", "${hevcCodecSelector.describeAvailable()} → 放弃自动重试")
+                                // The debug card must say why the picture is
+                                // black: a silent box looks like an app bug.
+                                if (failedCodec != null) {
+                                    DebugLog.lastError = "HEVC解码器不可用: $failedCodec"
+                                }
                             }
                             if (uri != null && retryCount < 2 && !decoderDead) {
                                 retryCount++
@@ -716,6 +738,25 @@ class DlnaReceiver(
                 return@post
             }
 
+            // A decoder that never initialises will never initialise. The
+            // sender keeps polling the same URI, so every one of those polls
+            // used to build a fresh MediaCodec (and leak it) — refuse the ones
+            // for the item we already ruled out instead.
+            if (uri == currentUri && hevcCodecSelector.isHevcBroken()) {
+                val now = System.currentTimeMillis()
+                if (now - lastHevcDeadNoticeMs > HEVC_DEAD_NOTICE_MS) {
+                    lastHevcDeadNoticeMs = now
+                    DebugLog.log(
+                        "DLNA",
+                        "跳过同一片源的重试（HEVC 解码器已排除）: $uri"
+                    )
+                    DebugLog.log("DLNA", hevcCodecSelector.describeAvailable())
+                }
+                ManualDlnaHttp.notifyPlaybackEnded()
+                report(ProtocolState.ADVERTISING)
+                return@post
+            }
+
             currentUri = uri
             retryCount = 0
             consecutiveDecoderFailures = 0
@@ -893,7 +934,13 @@ class DlnaReceiver(
             append(error.message ?: "")
             error.cause?.let { append(it.message ?: "") }
         }
-        val match = Regex("Decoder init failed:\\s*([^,\\s]+)").find(text)
+        // Two shapes: "Decoder init failed: <component>, Format(…)" from
+        // media3, or "Video framework suggested decoder <component> (…)" once
+        // decoder fallback has walked past several candidates. Fall back to
+        // any component name that shows up in the message.
+        val match = Regex("Decoder init failed:\\s*([^,\\s]+)")
+            .find(text)
+            ?: Regex("(OMX\\.[A-Za-z0-9_.]+)").find(text)
         return match?.groupValues?.getOrNull(1)
     }
 
@@ -950,6 +997,9 @@ class DlnaReceiver(
     companion object {
         /** How long a source may stay silent before we probe it ourselves. */
         private const val STALL_TIMEOUT_MS = 15_000
+
+        /** Gap between "this decoder is dead" notices in the debug log. */
+        private const val HEVC_DEAD_NOTICE_MS = 30_000
 
         /** Fallback UA when the sender does not declare one. */
         private const val DEFAULT_HTTP_USER_AGENT =
