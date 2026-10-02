@@ -28,8 +28,8 @@ android {
         // applicationId is overridden per flavor below
         minSdk = 25           // Lowest common denominator (Fire TV)
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.0.56"
+        versionCode = 9
+        versionName = "1.0.57"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")

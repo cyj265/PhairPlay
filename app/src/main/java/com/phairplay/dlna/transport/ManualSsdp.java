@@ -368,7 +368,7 @@ public final class ManualSsdp {
                 // device whose SSDP packet lacks it, i.e. the TV is simply not listed.
                 + "X-User-Agent: redsonic\r\n"
                 + "LOCATION: " + loc + "\r\n"
-                + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
+                + "SERVER: PhairPlay/1.0 UPnP/1.1\r\n"
                 + "NT: " + nt + "\r\n"
                 + ntsHeader + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
@@ -557,7 +557,7 @@ public final class ManualSsdp {
                 // DLNA CORE profile header — required by several phone cast stacks.
                 + "X-User-Agent: redsonic\r\n"
                 + "LOCATION: " + f.location(httpPort) + "\r\n"
-                + "SERVER: PhairPlay/1.0 UPnP/1.0 UPnP/1.1\r\n"
+                + "SERVER: PhairPlay/1.0 UPnP/1.1\r\n"
                 + "ST: " + st + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
         send(f, resp, target.getHostAddress(), port);
