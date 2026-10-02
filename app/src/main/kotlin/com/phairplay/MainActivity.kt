@@ -270,6 +270,12 @@ class MainActivity : AppCompatActivity() {
         navItemHome.setOnClickListener {
             if (selectedNavIndex != 0) {
                 navigateTo(HomeFragment(), navItemHome)
+            } else if (service?.dlnaState?.value == ProtocolState.CONNECTED) {
+                // Already on home, and DLNA is still playing underneath (the
+                // remote pressed Back out of the player). Re-selecting Home
+                // returns to the picture; otherwise the only way back would be
+                // re-casting from the phone.
+                showDlnaPlayer()
             }
         }
         navItemSettings.setOnClickListener {
@@ -615,26 +621,30 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val pv = dlnaPlayerView
         if (pv != null && pv.visibility == View.VISIBLE) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT,
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> {
-                    if (event.action == KeyEvent.ACTION_DOWN) {
-                        // Always surface the controller on a D-pad press (it
-                        // auto-hides after the timeout; re-showing is a no-op
-                        // while visible). Its buttons are focusable, so the
-                        // remote's D-pad then navigates play/pause/seek.
-                        pv.showController()
-                        return true
-                    }
+            // Back always has to leave full-screen playback. The playback layer
+            // is MATCH_PARENT over the whole content area, nav panel included,
+            // so without this a TV remote is stranded the moment playback
+            // starts - no way to reach home or settings. Playback itself keeps
+            // running (the ExoPlayer instance lives in the receiver); only the
+            // surface binding is dropped.
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                if (event.action == KeyEvent.ACTION_UP) {
+                    hideDlnaPlayer()
+                    // Give focus straight to the nav entry we were last on so
+                    // the D-pad works on the screen underneath immediately,
+                    // rather than landing nowhere and looking dead again.
+                    val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
+                    target.requestFocus()
                 }
-                else -> {
-                    // Media keys and everything else: let PlayerView/ExoPlayer
-                    // handle them.
-                }
+                return true
+            }
+            if (event.action == KeyEvent.ACTION_DOWN && !pv.isControllerFullyVisible) {
+                // Reveal the controller on the first D-pad press, but do NOT
+                // consume the event. Swallowing every direction press here was
+                // exactly why the remote did nothing: the event never reached
+                // PlayerView, so the controller buttons could never take focus
+                // and none of its play/pause/seek controls were reachable.
+                pv.showController()
             }
         }
         return super.dispatchKeyEvent(event)

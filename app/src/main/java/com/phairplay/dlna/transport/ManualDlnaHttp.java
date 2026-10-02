@@ -38,6 +38,54 @@ public final class ManualDlnaHttp {
     public static final String CM = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
     private static final Pattern P_ACTION = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z_][\\w]*)");
+
+    /**
+     * Media types this renderer reports through ConnectionManager#GetProtocolInfo.
+     *
+     * Two things drove this list past plain mp4/mkv/avi: HLS is what phone
+     * casting apps push most often, and senders that consult the list compare
+     * against it literally - the video/* wildcard does not stand in for
+     * application/vnd.apple.mpegurl. An absent HLS entry means the sender
+     * completes SetAVTransportURI and then never sends Play, presenting as a
+     * silent failure on our side. DASH and the common container/audio types are
+     * here for the same reason.
+     */
+    private static final String[] SINK_TYPES = {
+        "video/*", "audio/*", "application/octet-stream",
+        "video/mp4", "video/x-matroska", "video/x-msvideo", "video/quicktime",
+        "video/mpeg", "video/mp2t", "video/webm", "video/x-flv",
+        "video/x-ms-asf", "video/x-ms-wmv", "video/3gpp",
+        "video/vnd.dlna.mpeg-tts",
+        "application/vnd.apple.mpegurl", "application/x-mpegURL",
+        "application/vnd.apple.mpegurl.audio",
+        "audio/mpegurl", "audio/x-mpegurl",
+        "application/dash+xml",
+        "audio/mpeg", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/flac", "audio/ogg", "audio/L16",
+    };
+
+    /** CSV form used in the GetProtocolInfo response. */
+    private static final String SINK_PROTOCOL_INFO = buildSinkProtocolInfo();
+
+    private static String buildSinkProtocolInfo() {
+        StringBuilder sb = new StringBuilder();
+        for (String t : SINK_TYPES) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append("http-get:*:").append(t).append(":*");
+        }
+        return sb.toString();
+    }
+
+    /** The same list as SCPD allowed values, so SCPD and GetProtocolInfo agree. */
+    private static String sinkAllowedValueList() {
+        StringBuilder sb = new StringBuilder("<allowedValueList>");
+        for (String t : SINK_TYPES) {
+            sb.append("<allowedValue>http-get:*:").append(t).append(":*</allowedValue>");
+        }
+        return sb.append("</allowedValueList>").toString();
+    }
     private static final Pattern P_TAG = Pattern.compile("<([A-Za-z0-9_]+)>([^<]*)</\\1>");
     private static final Pattern P_TAG_NS = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z0-9_]+)>([^<]*)</[A-Za-z_][\\w.-]*:\\2>");
 
@@ -316,7 +364,7 @@ public final class ManualDlnaHttp {
             + "  <serviceStateTable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>SinkProtocolInfo</name><dataType>string</dataType>"
-            + "<allowedValueList><allowedValue>http-get:*:video/mp4:*</allowedValue><allowedValue>http-get:*:video/x-matroska:*</allowedValue><allowedValue>http-get:*:video/x-msvideo:*</allowedValue><allowedValue>http-get:*:video/quicktime:*</allowedValue><allowedValue>http-get:*:audio/mpeg:*</allowedValue><allowedValue>http-get:*:audio/x-wav:*</allowedValue></allowedValueList></stateVariable>\n"
+            + sinkAllowedValueList() + "</stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType>"
             + "<allowedValueList><allowedValue>OK</allowedValue><allowedValue>ContentFormatMismatch</allowedValue><allowedValue>IncompatibleParameters</allowedValue><allowedValue>UnsupportedMode</allowedValue><allowedValue>Busy</allowedValue></allowedValueList></stateVariable>\n"
@@ -590,11 +638,16 @@ public final class ManualDlnaHttp {
     private static String handleCmAction(String action, String body) {
         switch (action) {
             case "GetProtocolInfo": {
+                // The Sink list is a capability contract, not decoration.
+                // Senders that check it match the payload MIME against these
+                // entries EXACTLY - video/* does not cover them. With HLS absent
+                // here, a caster would accept SetAVTransportURI and then never
+                // issue Play, which looks like a dead receiver rather than a
+                // negotiation failure. This is the difference against receivers
+                // such as Dangbei that advertise HLS and take the same file.
                 return cmResponse("GetProtocolInfoResponse",
                     "<Source></Source>"
-                        + "<Sink>http-get:*:video/*:*,http-get:*:audio/*:*,http-get:*:application/octet-stream:*,"
-                        + "http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-msvideo:*,"
-                        + "http-get:*:video/quicktime:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-wav:*</Sink>");
+                        + "<Sink>" + SINK_PROTOCOL_INFO + "</Sink>");
             }
             case "GetCurrentConnectionIDs": {
                 return cmResponse("GetCurrentConnectionIDsResponse", "<ConnectionIDs>0</ConnectionIDs>");

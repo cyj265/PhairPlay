@@ -12,6 +12,7 @@ import android.os.Looper
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
@@ -241,8 +242,11 @@ class DlnaReceiver(
                                 retryCount++
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
-                                        player?.let { p ->
-                                            p.setMediaItem(MediaItem.fromUri(uri))
+                                    player?.let { p ->
+                                        // Retry without a declared type: if the
+                                        // inference above was wrong, byte sniffing
+                                        // is the other chance at playing it.
+                                        p.setMediaItem(MediaItem.fromUri(uri))
                                             p.prepare()
                                             p.play()
                                         }
@@ -421,6 +425,45 @@ class DlnaReceiver(
         }.apply { isDaemon = true; name = "dlna-source-probe" }.start()
     }
 
+    // ───────────────────────── MediaItem construction ─────────────────────────
+
+    /**
+     * Declares the container type instead of trusting the far end.
+     *
+     * ExoPlayer chooses its extractor from the HTTP Content-Type, and relay or
+     * resolver endpoints routinely answer with something unusable (text/plain,
+     * application/octet-stream) while still serving a perfectly valid playlist.
+     * The renderer then reports ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED and the
+     * same URL plays fine elsewhere, because other players work the type out
+     * from the address. Note the extension is not always in the path: app-local
+     * relays bury it inside a query parameter (proxy?do=m3u8&url=...index.m3u8),
+     * so both are inspected. Returns null when nothing can be inferred, leaving
+     * ExoPlayer to sniff the bytes.
+     */
+    private fun mimeTypeForUri(uri: String): String? {
+        val lower = uri.lowercase()
+        val path = lower.substringBefore('?')
+        val query = lower.substringAfter('?', "")
+        return when {
+            path.endsWith(".m3u8") || query.contains(".m3u8") || query.contains("do=m3u8") -> MimeTypes.APPLICATION_M3U8
+            path.endsWith(".mpd") || query.contains(".mpd") -> MimeTypes.APPLICATION_MPD
+            path.endsWith(".ism") || path.endsWith("/manifest") || query.contains(".ism") -> MimeTypes.APPLICATION_SS
+            path.endsWith(".mp4") || query.contains(".mp4") -> MimeTypes.VIDEO_MP4
+            else -> null
+        }
+    }
+
+    /** First attempt: type inferred from the URL when possible. */
+    private fun buildMediaItem(uri: String): MediaItem {
+        val builder = MediaItem.Builder().setUri(uri)
+        val mime = mimeTypeForUri(uri)
+        if (mime != null) {
+            builder.setMimeType(mime)
+            DebugLog.log("DLNA", "按URL推断容器: $mime")
+        }
+        return builder.build()
+    }
+
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
         // Drop the pending "wait for IP" watcher first: it fires once and
@@ -538,7 +581,7 @@ class DlnaReceiver(
             Logger.i("DLNA playback start: $uri")
             DebugLog.log("DLNA", "开始播放: $uri")
             player?.let { p ->
-                p.setMediaItem(MediaItem.fromUri(uri))
+                p.setMediaItem(buildMediaItem(uri))
                 p.volume = (DlnaAudioRenderingControl.getVolumeValue() / 100f)
                     .coerceIn(0f, 1f)
                 p.prepare()
