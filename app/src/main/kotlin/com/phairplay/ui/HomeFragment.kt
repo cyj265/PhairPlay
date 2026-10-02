@@ -61,6 +61,7 @@ class HomeFragment : Fragment() {
     }
 
     // View references — bound in onViewCreated
+    private lateinit var textPageTitle: TextView
     private lateinit var textDeviceName: TextView
     private lateinit var textServiceState: TextView
     private lateinit var dotServiceState: View
@@ -71,6 +72,10 @@ class HomeFragment : Fragment() {
 
     /** Most recent DLNA startup error message, re-applied after card redraws. */
     private var lastDlnaError: String? = null
+
+    /** Per-protocol session flags driving the page title (see [updateHomeTitle]). */
+    private var airPlayConnected = false
+    private var dlnaConnected = false
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRestart: Button
@@ -104,6 +109,7 @@ class HomeFragment : Fragment() {
     // ─── View Setup ──────────────────────────────────────────────────────────
 
     private fun bindViews(view: View) {
+        textPageTitle    = view.findViewById(R.id.text_page_title)
         textDeviceName   = view.findViewById(R.id.text_device_name)
         textServiceState = view.findViewById(R.id.text_service_state)
         dotServiceState  = view.findViewById(R.id.dot_service_state)
@@ -183,7 +189,11 @@ class HomeFragment : Fragment() {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
+            svc.airPlayState.collectLatest { state ->
+                airPlayConnected = state == ProtocolState.CONNECTED
+                updateProtocolCard(cardAirPlay, state)
+                updateHomeTitle()
+            }
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
@@ -193,13 +203,9 @@ class HomeFragment : Fragment() {
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.dlnaState.collectLatest { state ->
+                dlnaConnected = state == ProtocolState.CONNECTED
                 updateProtocolCard(cardDlna, state)
-                // An item may be loaded (even paused) while the player UI is
-                // not on screen — say so, or the card looks unresponsive.
-                if (com.phairplay.dlna.DlnaMediaMeta.hasMedia) {
-                    val d = cardDlna.findViewById<TextView>(R.id.text_protocol_detail)
-                    d?.text = "${d?.text ?: ""} · 点按返回播放"
-                }
+                updateHomeTitle()
             }
         }
         viewLifecycleOwner.lifecycleScope.launch {
@@ -256,8 +262,32 @@ class HomeFragment : Fragment() {
             detail.text = lastDlnaError
         }
 
-        // DLNA card behaves like the other protocol cards while advertising:
-        // green dot + "广播中" + "等待投屏设备..." — no address line on the home
-        // screen (the full diagnostic lives in Settings → 调试信息).
+        // AirPlay-aligned: a connected card names what is on screen. For DLNA
+        // that is the media title the sender embedded in DIDL-Lite — the same
+        // way the AirPlay notification names its sender while streaming.
+        if (card === cardDlna && state == ProtocolState.CONNECTED) {
+            val media = com.phairplay.dlna.DlnaMediaMeta.title
+            if (!media.isNullOrBlank()) {
+                detail.text = getString(R.string.home_dlna_now_playing, media)
+            }
+        }
+    }
+
+    /**
+     * The page title mirrors the session state, exactly like the AirPlay
+     * receiver flow: idle → "已就绪，等待连接"; a live session → what is
+     * casting (protocol + media title when known). The title used to be the
+     * static XML string, so it claimed "waiting" even mid-playback.
+     */
+    private fun updateHomeTitle() {
+        textPageTitle.text = when {
+            dlnaConnected -> {
+                val media = com.phairplay.dlna.DlnaMediaMeta.title
+                if (media.isNullOrBlank()) getString(R.string.home_title_streaming, "DLNA")
+                else getString(R.string.home_title_streaming_media, "DLNA", media)
+            }
+            airPlayConnected -> getString(R.string.home_title_streaming, "AirPlay")
+            else -> getString(R.string.home_title)
+        }
     }
 }

@@ -440,7 +440,15 @@ class PhairPlayService : Service() {
                             _dlnaError.value = null
                             _activeConnection.value =
                                 ActiveConnection("DLNA Sender", Protocol.DLNA)
-                            updateNotification(isRunning = true, streamingSenderName = "DLNA")
+                            // AirPlay names its sender in the notification while
+                            // streaming; the DLNA equivalent of that is the media
+                            // title parsed from DIDL-Lite (set before Play fires).
+                            val title = com.phairplay.dlna.DlnaMediaMeta.title
+                            updateNotification(
+                                isRunning = true,
+                                streamingSenderName = if (title.isNullOrBlank()) "DLNA"
+                                                      else "DLNA · $title"
+                            )
                         }
                         ProtocolState.ADVERTISING,
                         ProtocolState.DISABLED,

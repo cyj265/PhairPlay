@@ -184,10 +184,19 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Pause DLNA playback before the Surface is destroyed so the MediaCodec
-        // renderer never writes into a dead Surface (avoids DECODING_FAILED on
-        // background/foreground switches).
-        service?.pauseDlnaPlayback()
+        if (isFinishing) {
+            // Leaving the app for good ends the DLNA session — AirPlay-aligned:
+            // closing the receiver UI stops the media (the receiver service
+            // itself keeps running and stays discoverable). The Back-key path
+            // already called stopDlnaPlayback(); this covers every other way
+            // the Activity can finish.
+            service?.stopDlnaPlayback()
+        } else {
+            // Pause DLNA playback before the Surface is destroyed so the
+            // MediaCodec renderer never writes into a dead Surface (avoids
+            // DECODING_FAILED on background/foreground switches).
+            service?.pauseDlnaPlayback()
+        }
         // Clear surface reference before unbinding to avoid holding a dead Surface
         service?.setVideoSurfaceProvider { null }
         dlnaDebugHandler.removeCallbacks(dlnaUiTick)
@@ -849,27 +858,31 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val dlna = isDlnaPlayerVisible
         val airPlay = isAirPlayOverlayActive
-        if ((dlna || airPlay) && event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                // Back leaves full-screen playback. DLNA drops back to the app
-                // UI first (that UI is reachable and stays usable); pressing
-                // Back there exits the app exactly like AirPlay does.
-                KeyEvent.KEYCODE_BACK -> {
-                    if (dlna && event.repeatCount == 0) {
-                        hideDlnaPlayer()
-                        val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
-                        target.requestFocus()
-                        return true
-                    }
-                    // Back out of the app UI (not out of the player): leaving
-                    // must end playback too. Otherwise the box keeps sounding
-                    // an app the user closed, and re-opening PhairPlay resumes
-                    // the old item as if nothing happened.
-                    if (event.repeatCount == 0) {
-                        service?.stopDlnaPlayback()
-                    }
-                    return false
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            // Back is handled OUTSIDE the overlay gate. The old code put the
+            // "leaving the app ends playback" branch inside `if (dlna || airPlay)`,
+            // which is false once the player is hidden — so exiting the app never
+            // reached stopDlnaPlayback, the item merely got paused in onStop, and
+            // re-entering the app resumed it. That is the "退出 App 停止媒体没有
+            // 生效" report.
+            if (event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) {
+                if (dlna) {
+                    // Back inside full-screen playback drops to the app UI first
+                    // (that UI is reachable and stays usable); AirPlay semantics.
+                    hideDlnaPlayer()
+                    val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
+                    target.requestFocus()
+                    return true
                 }
+                // Back out of the app UI: leaving must END playback, not pause it.
+                // Otherwise the box keeps sounding an app the user closed, and
+                // re-opening PhairPlay resumes the old item as if nothing happened.
+                // (No-op for AirPlay sessions — those are driven by the sender.)
+                service?.stopDlnaPlayback()
+                return super.dispatchKeyEvent(event)
+            }
+            if (dlna || airPlay) {
+                when (event.keyCode) {
                 KeyEvent.KEYCODE_DPAD_LEFT,
                 KeyEvent.KEYCODE_MEDIA_REWIND,
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS,
@@ -903,6 +916,7 @@ class MainActivity : AppCompatActivity() {
                     if (dlna && dlnaPlayerView?.isControllerFullyVisible == false) {
                         dlnaPlayerView?.showController()
                     }
+                }
                 }
             }
         }
