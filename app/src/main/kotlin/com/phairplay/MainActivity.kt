@@ -984,62 +984,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * TV-safe menu dialog, drawn by hand instead of AlertDialog. The leanback
-     * theme's alert-dialog list items rendered with no visible text on the N1
-     * (empty panel over a translucent window — the user saw a blank striped
-     * box). Explicit colors/sizes here cannot be broken by any theme. Rows are
-     * focusable so the D-pad works; Back dismisses (Dialog default).
+     * TV-safe menu dialog — moved into [TvDialogs] so the Settings screen's
+     * display-name and debug-info dialogs share the exact same hand-drawn
+     * style (the leanback AlertDialog rendered invisible text on the N1).
      */
     private fun showMenuDialog(title: String, entries: List<Pair<String, () -> Unit>>) {
-        val density = resources.displayMetrics.density
-        val pad = (24 * density).toInt()
-        val container = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setBackgroundColor(0xF2101010.toInt())
-            setPadding(pad, pad, pad, pad)
-        }
-        container.addView(android.widget.TextView(this).apply {
-            text = title
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 22f
-            setPadding(0, 0, 0, pad)
-        })
-        for ((label, action) in entries) {
-            container.addView(android.widget.TextView(this).apply {
-                text = label
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 20f
-                val v = (10 * density).toInt()
-                setPadding(v, v, v, v)
-                isFocusable = true
-                isClickable = true
-                setOnFocusChangeListener { _, hasFocus ->
-                    setBackgroundColor(if (hasFocus) 0xFF3A5A78.toInt() else 0x00000000)
-                }
-                setOnClickListener {
-                    (tag as? android.app.Dialog)?.dismiss()
-                    action()
-                }
-                // The dialog is only known after setContentView; stash it on
-                // the row via tag right after creation below.
-            })
-        }
-        val dialog = android.app.Dialog(this).apply {
-            requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-            setContentView(container)
-            setCancelable(true)
-            window?.setBackgroundDrawable(
-                android.graphics.drawable.ColorDrawable(0x00000000)
-            )
-        }
-        for (i in 0 until container.childCount) {
-            container.getChildAt(i).tag = dialog
-        }
-        // Initial focus on the first row so the D-pad is immediately live.
-        if (container.childCount > 1) {
-            container.getChildAt(1).requestFocus()
-        }
-        dialog.show()
+        com.phairplay.ui.TvDialogs.menu(this, title, entries)
     }
 
     /**

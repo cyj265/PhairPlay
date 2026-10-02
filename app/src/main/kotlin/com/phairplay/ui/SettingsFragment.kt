@@ -1,14 +1,10 @@
 package com.phairplay.ui
 
-import android.app.AlertDialog
 import android.os.Bundle
 import com.phairplay.service.ServiceController
-import android.text.InputFilter
-import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.widget.SwitchCompat
@@ -255,42 +251,34 @@ class SettingsFragment : Fragment() {
      * Collision detection: Android's NsdManager automatically appends " (2)", " (3)" etc. if
      * another device on the network already uses the same mDNS name. This is transparent to
      * the user at save-time; the actual registered name is logged at registration.
+     *
+     * Uses the hand-drawn [TvDialogs.input] — the leanback AlertDialog's title
+     * and buttons were invisible on the N1 (same bug as the player menus).
      */
     private fun showDisplayNameDialog() {
-        val currentName = viewLifecycleOwner.lifecycleScope.run {
-            // Read directly from the displayed value (already loaded)
-            val displayed = textDisplayNameValue.text?.toString() ?: ""
-            if (displayed == getString(R.string.setting_display_name_system_default)) "" else displayed
-        }
+        // Read directly from the displayed value (already loaded)
+        val displayed = textDisplayNameValue.text?.toString() ?: ""
+        val currentName = if (displayed == getString(R.string.setting_display_name_system_default)) "" else displayed
 
-        val editText = EditText(requireContext()).apply {
-            setText(currentName)
-            hint = getString(R.string.setting_display_name_dialog_hint)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            filters = arrayOf(InputFilter.LengthFilter(AppSettings.DISPLAY_NAME_MAX_LENGTH))
-            setSingleLine(true)
-            // Move cursor to end so user can append rather than overwrite
-            setSelection(currentName.length)
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.setting_display_name)
-            .setView(editText)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val newName = editText.text?.toString()?.trim() ?: ""
+        TvDialogs.input(
+            context = requireContext(),
+            title = getString(R.string.setting_display_name),
+            prefill = currentName,
+            hint = getString(R.string.setting_display_name_dialog_hint),
+            maxLength = AppSettings.DISPLAY_NAME_MAX_LENGTH,
+            onConfirm = { newName ->
                 save { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
                     getString(R.string.setting_display_name_system_default)
                 }
                 Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
-            }
-            .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
+            },
+            onReset = {
                 save { it.copy(displayName = "") }
                 textDisplayNameValue.text = getString(R.string.setting_display_name_system_default)
                 Logger.i("Display name reset to system default")
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        )
     }
 
     /**
@@ -306,46 +294,29 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    /** Shows the in-app DLNA/SSDP diagnostics dialog (debugging aid). */
+    /** Shows the in-app DLNA/SSDP diagnostics dialog (debugging aid).
+     *  Hand-drawn via [TvDialogs.info] — same reason as the display-name dialog. */
     private fun showDebugInfoDialog() {
         val context = requireContext()
-        val text = android.widget.TextView(context).apply {
-            textSize = 12f
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(24, 24, 24, 24)
-            // TV themes resolve the default TextView color to the same light tone
-            // as the dialog panel — white text on a white panel renders as a blank
-            // box (observed on a Sony TV over an N1 box). Pin both colors so the
-            // diagnostics are readable regardless of theme.
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF111111.toInt())
-        }
-        val scroll = android.widget.ScrollView(context).apply { addView(text) }
-        val dialog = AlertDialog.Builder(context)
-            .setTitle("调试信息")
-            .setView(scroll)
-            .setPositiveButton("复制", { _, _ ->
-                val clipboard = context.getSystemService(
-                    android.content.Context.CLIPBOARD_SERVICE
-                ) as android.content.ClipboardManager
-                clipboard.setPrimaryClip(
-                    android.content.ClipData.newPlainText(
-                        "PhairPlay debug", com.phairplay.util.DebugLog.dump()
+        TvDialogs.info(
+            context = context,
+            title = "调试信息",
+            textProvider = { com.phairplay.util.DebugLog.dump() },
+            actions = listOf(
+                "复制" to {
+                    val clipboard = context.getSystemService(
+                        android.content.Context.CLIPBOARD_SERVICE
+                    ) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(
+                        android.content.ClipData.newPlainText(
+                            "PhairPlay debug", com.phairplay.util.DebugLog.dump()
+                        )
                     )
-                )
-            })
-            .setNegativeButton("关闭", null)
-            .show()
-        // Refresh while shown: dump() is a snapshot, and the probe counters are
-        // only meaningful after the sender has been searching for a while —
-        // forcing a close/reopen roundtrip on a TV remote is tedious.
-        val refresh = object : Runnable {
-            override fun run() {
-                if (!dialog.isShowing) return
-                text.text = com.phairplay.util.DebugLog.dump()
-                text.postDelayed(this, 2000)
-            }
-        }
-        text.post(refresh)
+                    android.widget.Toast.makeText(
+                        context, "已复制到剪贴板", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            )
+        )
     }
 }
