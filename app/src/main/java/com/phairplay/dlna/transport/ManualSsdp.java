@@ -61,12 +61,23 @@ public final class ManualSsdp {
         final NetworkInterface ni;
         final MulticastSocket sock;
         final int prefixLen;
+        /**
+         * Port this face actually bound. Anything other than {@link #PORT} means
+         * the face is <em>deaf</em>: M-SEARCH probes are addressed to :1900, so
+         * a socket parked on an ephemeral port never sees one. Reported on the
+         * status card rather than papered over.
+         */
+        final int boundPort;
+        /** M-SEARCH probes this face has received — see {@link #faceDistribution()}. */
+        final java.util.concurrent.atomic.AtomicInteger searches =
+                new java.util.concurrent.atomic.AtomicInteger();
 
-        Face(InetAddress ip, NetworkInterface ni, MulticastSocket sock, int prefixLen) {
+        Face(InetAddress ip, NetworkInterface ni, MulticastSocket sock, int prefixLen, int boundPort) {
             this.ip = ip;
             this.ni = ni;
             this.sock = sock;
             this.prefixLen = prefixLen;
+            this.boundPort = boundPort;
         }
 
         /** LOCATION advertised on this face — the renderer's HTTP control URL. */
@@ -76,13 +87,17 @@ public final class ManualSsdp {
 
         String label() {
             return (ni == null ? "default" : ni.getName()) + "/" + ip.getHostAddress()
-                    + (prefixLen > 0 ? "/" + prefixLen : "");
+                    + (prefixLen > 0 ? "/" + prefixLen : "")
+                    + ":" + boundPort;
         }
     }
 
     private volatile boolean running;
     /** Every LAN face we advertise on; mutated while starting and stopping only. */
     private final List<Face> faces = new CopyOnWriteArrayList<Face>();
+    /** M-SEARCH probes seen across all faces — surfaced as DebugLog.searchTotal. */
+    private final java.util.concurrent.atomic.AtomicInteger totalSearches =
+            new java.util.concurrent.atomic.AtomicInteger();
     private ScheduledExecutorService notifier;
     private volatile String location = "";
     /** Port the DLNA HTTP control server listens on (must match AndroidStreamServer). */
@@ -111,18 +126,24 @@ public final class ManualSsdp {
                     MulticastSocket sock = new MulticastSocket(null);
                     sock.setReuseAddress(true);
                     try {
-                        // A spec-ish SSDP originator binds :1900. When the port is
-                        // already taken (e.g. another SSDP client on the box) fall
-                        // back to an ephemeral port — a socket that joined the group
-                        // still receives every packet addressed to the multicast
-                        // group, so discovery keeps working.
+                        // An SSDP listener normally owns :1900. If another process
+                        // already holds the port (some TV-box ROMs ship their own
+                        // cast/mirror service) fall back to an ephemeral port.
+                        //
+                        // NOTE: such a face is then DEAF, not merely "unaffected".
+                        // M-SEARCH is addressed to :1900, so a socket parked on an
+                        // arbitrary port never sees a probe and the box stays
+                        // invisible in the sender's list. The old comment claimed
+                        // the opposite, which is why this case used to look
+                        // healthy; it is now surfaced on the status card.
                         sock.bind(new InetSocketAddress(PORT));
                     } catch (SocketException busy) {
                         sock = new MulticastSocket(null);
                         sock.setReuseAddress(true);
                         sock.bind(new InetSocketAddress(0));
-                        DebugLog.INSTANCE.log("SSDP",
-                                ":1900 已被占用，改用临时端口（组播监听不受影响）");
+                        DebugLog.INSTANCE.log("SSDP", "接口 " + ni.getName()
+                                + " 的 :1900 已被占用，降级到临时端口 "
+                                + sock.getLocalPort() + " → 该面收不到 M-SEARCH");
                     }
                     try {
                         sock.setTimeToLive(4);
@@ -140,7 +161,7 @@ public final class ManualSsdp {
                         }
                         continue;
                     }
-                    Face f = new Face(addr, ni, sock, prefixOf(ni, addr));
+                    Face f = new Face(addr, ni, sock, prefixOf(ni, addr), sock.getLocalPort());
                     built.add(f);
                     DebugLog.INSTANCE.log("SSDP", "监听面 " + f.label());
                 }
@@ -155,10 +176,15 @@ public final class ManualSsdp {
                     sock.bind(new InetSocketAddress(0));
                 }
                 joinGroup(sock, GROUP, null);
-                built.add(new Face(InetAddress.getByName(ip), null, sock, 24));
+                built.add(new Face(InetAddress.getByName(ip), null, sock, 24, sock.getLocalPort()));
             }
             faces.clear();
             faces.addAll(built);
+            // Fresh start => fresh probe counters, so the status card always
+            // describes the current run rather than accumulating across restarts.
+            totalSearches.set(0);
+            DebugLog.INSTANCE.setSearchTotal(0);
+            DebugLog.INSTANCE.setSearchByFace("—");
         } catch (Exception e) {
             running = false;
             closeAll();
@@ -171,7 +197,21 @@ public final class ManualSsdp {
         for (Face f : faces) {
             ifaceDump.append(f.label()).append(" ");
         }
-        DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ", 面数=" + faces.size() + ")");
+        int deafFaces = 0;
+        for (Face f : faces) {
+            if (f.boundPort != PORT) {
+                deafFaces++;
+            }
+        }
+        if (deafFaces > 0) {
+            // Never claim a healthy :1900 while some face is parked elsewhere:
+            // that face cannot see M-SEARCH at all, which is exactly the
+            // "service running but the phone finds nothing" symptom.
+            DebugLog.INSTANCE.setSsdpStatus("异常: " + deafFaces + "/" + faces.size()
+                    + " 个面未绑 1900 → 收不到手机探测");
+        } else {
+            DebugLog.INSTANCE.setSsdpStatus("运行中 (端口 " + PORT + ", 面数=" + faces.size() + ")");
+        }
         DebugLog.INSTANCE.log("SSDP", ifaceDump.toString());
         DebugLog.INSTANCE.setSsdpLocation(location);
         DebugLog.INSTANCE.log("SSDP", "启动成功, location=" + location);
@@ -354,6 +394,9 @@ public final class ManualSsdp {
                 face.sock.receive(p);
                 String data = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
                 if (data.startsWith("M-SEARCH")) {
+                    face.searches.incrementAndGet();
+                    DebugLog.INSTANCE.setSearchTotal(totalSearches.incrementAndGet());
+                    DebugLog.INSTANCE.setSearchByFace(faceDistribution());
                     respondToSearch(data, p.getAddress(), p.getPort(), face);
                 }
             } catch (SocketException e) {
@@ -370,6 +413,28 @@ public final class ManualSsdp {
                 pauseBeforeRetry();
             }
         }
+    }
+
+    /**
+     * Probe count per face, e.g. "wlan0=12 eth0=0".
+     *
+     * The split is the point: on a dual-homed box one NIC showing 0 while the
+     * phone keeps searching means that face is deaf, or the phone's traffic
+     * never reaches that interface. Neither is visible from a plain "running"
+     * status, and together with {@link com.phairplay.util.DebugLog#searchTotal}
+     * it separates "probes never reach the box" from "we answered but the
+     * sender ignored us".
+     */
+    private String faceDistribution() {
+        StringBuilder sb = new StringBuilder();
+        for (Face f : faces) {
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(f.ni == null ? "default" : f.ni.getName())
+                    .append('=').append(f.searches.get());
+        }
+        return sb.length() == 0 ? "—" : sb.toString();
     }
 
     /** Backs off the receive loop so a failing socket can never burn a CPU core. */
