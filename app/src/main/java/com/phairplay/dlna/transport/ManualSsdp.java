@@ -44,6 +44,12 @@ public final class ManualSsdp {
     public static final String GROUP = "239.255.255.250";
     public static final int PORT = 1900;
     public static final String DEVICE_TYPE = "urn:schemas-upnp-org:device:MediaRenderer:1";
+    /** Service-level STs. Video/screencast apps typically probe AVTransport directly. */
+    static final String[] SERVICE_TYPES = {
+        "urn:schemas-upnp-org:service:AVTransport:1",
+        "urn:schemas-upnp-org:service:RenderingControl:1",
+        "urn:schemas-upnp-org:service:ConnectionManager:1",
+    };
     // Standard UUID format — Windows/VLC drop non-UUID UDNs.
     public static final String UDN_FULL = "uuid:6f61c845-1dd2-11b2-8f7b-001185123456";
     public static final String USN = UDN_FULL + "::" + DEVICE_TYPE;
@@ -457,6 +463,11 @@ public final class ManualSsdp {
                 || UDN_FULL.equals(stTrim)
                 || USN.equals(stTrim)
                 || "upnp:rootdevice".equals(stTrim)
+                // Service-level probes. Most phone casting libraries search the
+                // AVTransport ST directly because that is the service they will
+                // drive; without this the probe fell into the "not matched"
+                // branch and the sender's list stayed empty forever.
+                || serviceTypeOf(stTrim) != null
                 // Windows Play-To also probes this well-known DLNA DMR UUID;
                 // answering it makes the renderer show up as a DMR in
                 // Windows' dedicated search pass.
@@ -483,17 +494,27 @@ public final class ManualSsdp {
         // response ST against its request).
         if ("ssdp:all".equals(stTrim)) {
             // Per spec, ssdp:all must be answered once per matching resource:
-            // rootdevice + UUID + MediaRenderer. Control points that build
-            // their tree strictly from rootdevice responses find nothing
-            // when only the service type is answered.
+            // rootdevice + UUID + MediaRenderer + every service. Control points
+            // that filter responses by looking for a service token in ST/USN
+            // (common shortcut in casting libraries) find nothing when only the
+            // device-level triple is answered.
             sendSearchResponse(from, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", target, port);
             sendSearchResponse(from, UDN_FULL, UDN_FULL, target, port);
             sendSearchResponse(from, DEVICE_TYPE, USN, target, port);
+            for (String svc : SERVICE_TYPES) {
+                sendSearchResponse(from, svc, UDN_FULL + "::" + svc, target, port);
+            }
             return;
         }
+        String svc = serviceTypeOf(stTrim);
         String respSt;
         String respUsn;
-        if ("upnp:rootdevice".equals(stTrim)) {
+        if (svc != null) {
+            // Echo the requested service ST verbatim (spec requirement) and
+            // pair it with our UDN in the USN.
+            respSt = stTrim;
+            respUsn = UDN_FULL + "::" + stTrim;
+        } else if ("upnp:rootdevice".equals(stTrim)) {
             respSt = "upnp:rootdevice";
             respUsn = UDN_FULL + "::upnp:rootdevice";
         } else if (UDN_FULL.equals(stTrim)) {
@@ -511,6 +532,21 @@ public final class ManualSsdp {
             respUsn = USN;
         }
         sendSearchResponse(from, respSt, respUsn, target, port);
+    }
+
+    /**
+     * Returns the canonical service type for a requested ST, accepting any
+     * version the sender may ask for (e.g. AVTransport:3 maps to our :1), or
+     * null when the ST is not one of our services.
+     */
+    private static String serviceTypeOf(String st) {
+        for (String svc : SERVICE_TYPES) {
+            String base = svc.substring(0, svc.lastIndexOf(':'));
+            if (st.equals(svc) || st.startsWith(base + ":")) {
+                return svc;
+            }
+        }
+        return null;
     }
 
     /** The face whose subnet contains `target`, or null when nothing matches. */
