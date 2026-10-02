@@ -8,8 +8,6 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.phairplay.util.DebugLog
 import com.phairplay.util.Logger
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * Chooses the H.265/HEVC decoder instead of blindly taking the first one the
@@ -41,7 +39,7 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
 
     private val lock = Any()
 
-    /** Last component that created successfully during a probe. */
+    /** First component that created successfully (only used to sort candidates). */
     @Volatile
     private var workingName: String? = null
 
@@ -55,9 +53,6 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
     /** True once every candidate is known dead — the caller should stop retrying. */
     @Volatile
     private var allBroken = false
-
-    @Volatile
-    private var probeStarted = false
 
     init {
         scanAsync()
@@ -83,8 +78,13 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
             // ones worth a second look when the stock pick is broken.
             rawComponents.map { it.name }.forEach { if (it !in brokenNames) names.add(it) }
             val usable = names.filter { it !in brokenNames }
-            if (usable.isEmpty()) {
-                allBroken = true
+            // Recomputed, never latched: a verdict taken on one render surface
+            // must not outlive it (see [resetFailures]).
+            allBroken = usable.isEmpty()
+            // Remember the first candidate in the order we prefer, so later
+            // attempts put it first again.
+            if (usable.isNotEmpty() && workingName == null) {
+                noteDecoderSuccess(usable.first())
             }
             usable.map { name ->
                 stock.firstOrNull { it.name == name } ?: candidateInfo(name)
@@ -126,7 +126,6 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
             )
             DebugLog.lastError = "HEVC解码器不可用: $name"
         }
-        startProbe()
     }
 
     /**
@@ -192,71 +191,6 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
             }
         }, "phairplay-codec-scan").apply { isDaemon = true }
         thread.start()
-    }
-
-    /**
-     * Tries to create every HEVC component on the box. Creating is the step
-     * that throws for the broken ones, and each attempt runs behind a timeout
-     * so a wedged component can only cost its own attempt — the thread is
-     * abandoned (a native call in progress cannot be interrupted) instead of
-     * blocking the probe as a whole.
-     */
-    private fun startProbe() {
-        synchronized(this) {
-            if (probeStarted) return
-            probeStarted = true
-        }
-        Thread(probeRunnable, "phairplay-hevc-probe").apply { isDaemon = true }.start()
-    }
-
-    private val probeRunnable = Runnable {
-        // What ijkplayer-based players do — worth a name in the log because it
-        // is the difference between "no decoder" and "the other decoder".
-        val typeBased = try {
-            val codec = MediaCodec.createDecoderByType(MimeTypes.VIDEO_H265)
-            runCatching { codec.release() }.isSuccess
-        } catch (t: Throwable) {
-            DebugLog.log("DECODER", "createDecoderByType(video/hevc) 不可用: ${t.message}")
-            false
-        }
-        DebugLog.log("DECODER", "createDecoderByType(video/hevc) ${if (typeBased) "可用" else "不可用"}")
-
-        val candidates = synchronized(lock) { rawComponents.map { it.name } }
-            .filter { it != workingName && it !in brokenNames }
-            .sortedWith(compareBy({ preferenceOf(it) }, { it }))
-        DebugLog.log("DECODER", "探测HEVC解码器: ${candidates.joinToString()}")
-
-        for (name in candidates) {
-            var created: MediaCodec? = null
-            val done = CountDownLatch(1)
-            val worker = Thread({
-                try {
-                    created = MediaCodec.createByCodecName(name)
-                    noteDecoderSuccess(name)
-                    DebugLog.log("DECODER", "HEVC解码器创建成功: $name")
-                } catch (t: Throwable) {
-                    Logger.w("HEVC decoder $name unavailable: ${t.message}")
-                    DebugLog.log("DECODER", "HEVC解码器不可用: $name (${t.message})")
-                } finally {
-                    // Release outside try: a half-constructed codec throws on
-                    // release as well, and neither path should stop the probe.
-                    runCatching { created?.release() }
-                    done.countDown()
-                }
-            }, "phairplay-hevc-probe-$name").apply { isDaemon = true }
-            worker.start()
-            done.await(3, TimeUnit.SECONDS)
-            if (workingName != null) break
-        }
-        synchronized(lock) {
-            if (brokenNames.isNotEmpty() && getDecoderInfos(MimeTypes.VIDEO_H265, false, false).isEmpty()) {
-                allBroken = true
-            }
-        }
-        DebugLog.log(
-            "DECODER",
-            "HEVC探测结束: 可用=${workingName ?: "无（此设备/固件无法硬解 HEVC）"} ${describeAvailable()}"
-        )
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────

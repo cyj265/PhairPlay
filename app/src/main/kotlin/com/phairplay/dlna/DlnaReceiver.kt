@@ -150,6 +150,10 @@ class DlnaReceiver(
     @Volatile
     private var pendingStartUri: String? = null
 
+    /** True while the Activity really is in the foreground (see [setUiForeground]). */
+    @Volatile
+    private var uiForeground = false
+
     /** Gives up waiting for the UI after [SURFACE_WAIT_MS] and starts the item
      *  without a picture — exactly what receivers did before auto-foreground,
      *  so a cast that never opens the UI still makes sound. */
@@ -291,6 +295,11 @@ class DlnaReceiver(
                                         "DLNA",
                                         "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
                                     )
+                                    // The pipeline decoded something: whatever was
+                                    // tried worked, so the counter starts over for
+                                    // the next item instead of carrying a verdict
+                                    // that only ever applied to the one that hung.
+                                    consecutiveDecoderFailures = 0
                                     // No video track (music / audio-only cast):
                                     // a video surface would just be a black
                                     // rectangle, so the UI shows a music card.
@@ -367,10 +376,19 @@ class DlnaReceiver(
                                 // every few seconds.
                                 val alreadyKnown = hevcCodecSelector.isBroken(failedCodec)
                                 if (!alreadyKnown) consecutiveDecoderFailures++
-                                hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                // Only after [HEVC_ATTEMPT_LIMIT] failed
+                                // attempts on one component: the first create of
+                                // a session regularly times out on this HAL and
+                                // the very next one succeeds, so writing the
+                                // component off on the first failure is what
+                                // left the first cast of a session dead.
+                                if (consecutiveDecoderFailures >= HEVC_ATTEMPT_LIMIT) {
+                                    hevcCodecSelector.noteDecoderFailure(failedCodec)
+                                }
                                 Logger.w(
                                     "Decoder init failed ($failedCodec) " +
-                                        "— 连续第 $consecutiveDecoderFailures 次${if (alreadyKnown) "(已知不可用)" else ""}"
+                                        "— 第 $consecutiveDecoderFailures/$HEVC_ATTEMPT_LIMIT 次" +
+                                        (if (alreadyKnown) "(已列入黑名单)" else "")
                                 )
                             } else {
                                 consecutiveDecoderFailures = 0
@@ -389,8 +407,7 @@ class DlnaReceiver(
                             // different item, so don't burn a MediaCodec per poll.
                             val decoderDead =
                                 error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED &&
-                                (consecutiveDecoderFailures >= 2 ||
-                                    hevcCodecSelector.isHevcBroken() ||
+                                (hevcCodecSelector.isHevcBroken() ||
                                     hevcCodecSelector.isBroken(failedCodec))
                             if (decoderDead) {
                                 DebugLog.log("DLNA", "${hevcCodecSelector.describeAvailable()} → 放弃自动重试")
@@ -477,12 +494,55 @@ class DlnaReceiver(
         }
     }
 
-    /** Unregisters the renderer, releases the multicast lock and the player. Main thread only. */
+    /**
+     * Unregisters the renderer, releases the multicast lock and the player.
+     *
+     * Safe to call from **any** thread. Everything released here is main-thread
+     * only — most importantly ExoPlayer, whose stop/release throw
+     * IllegalStateException when touched off the main thread. That failure used
+     * to be swallowed by the per-step `catch`, which then dropped the only
+     * reference to a still-playing player: the audio kept going with nothing
+     * left holding it, so no button could ever stop it. Callers therefore get
+     * bounced onto the main thread and waited for.
+     */
     fun stop() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val done = java.util.concurrent.CountDownLatch(1)
+            mainHandler.post {
+                try {
+                    stopOnMainThread()
+                } finally {
+                    done.countDown()
+                }
+            }
+            // Bounded so a wedged main thread cannot hang the caller's thread
+            // (the service runs this from Dispatchers.IO during ACTION_STOP).
+            if (!done.await(STOP_MAIN_THREAD_TIMEOUT_MS.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                Logger.w("DLNA stop: main thread did not answer in ${STOP_MAIN_THREAD_TIMEOUT_MS}ms")
+            }
+            return
+        }
+        stopOnMainThread()
+    }
+
+    /** Main thread only. See [stop]. */
+    private fun stopOnMainThread() {
         if (!started) return
         started = false
         DlnaPlayerBridge.setControl(null)
+        // A queued Play has nothing to attach to any more, and the surface gate
+        // must not resurrect a start after teardown.
+        pendingStartUri = null
+        mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+        mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+        mainHandler.removeCallbacks(stallWatchdog)
+        surfaceReady = false
+        uiForeground = false
         releaseResources()
+        // Proof in the debug card that Stop really reached the player — the
+        // report this fixes was "I pressed stop and the sound never stopped",
+        // which was invisible from the UI.
+        DebugLog.log("DLNA", "接收器已停止：播放器已释放（音频应立即停止）")
         report(ProtocolState.DISABLED)
     }
 
@@ -661,16 +721,22 @@ class DlnaReceiver(
         }
         multicastLock = null
 
-        try {
-            player?.let { p ->
-                p.stop()
-                p.clearMediaItems()
-                p.release()
-            }
-        } catch (e: Exception) {
-            Logger.w("ExoPlayer release warning: ${e.message}")
-        }
+        // ExoPlayer is the one resource whose failure is user-visible (a leaked
+        // player keeps playing audio nobody can reach), so it gets a defence in
+        // depth: silence it first, then release, and drop the reference either
+        // way so a half-released instance is never left behind.
+        val p = player
         player = null
+        if (p != null) {
+            // runCatching per step: one failure must not skip the next. Volume
+            // first — it stops the sound even if stop()/release() throws.
+            runCatching { p.volume = 0f }
+            runCatching { p.stop() }
+            runCatching { p.clearMediaItems() }
+            runCatching { p.release() }.onFailure {
+                Logger.w("ExoPlayer release warning: ${it.message}")
+            }
+        }
         currentUri = null
     }
 
@@ -717,20 +783,66 @@ class DlnaReceiver(
      */
     fun markSurfaceReady() {
         mainHandler.post {
-            if (surfaceReady) return@post
-            surfaceReady = true
-            surfaceGeneration++
-            // Verdicts belong to the surface they were taken on.
-            hevcCodecSelector.resetFailures()
-            consecutiveDecoderFailures = 0
-            mainHandler.removeCallbacks(surfaceTimeoutRunnable)
-            val uri = pendingStartUri
-            if (uri != null) {
-                pendingStartUri = null
-                DebugLog.log("DLNA", "播放层就绪 → 起播")
-                runStart(uri)
+            if (!surfaceReady) {
+                surfaceReady = true
+                surfaceGeneration++
+                // Verdicts belong to the surface they were taken on.
+                hevcCodecSelector.resetFailures()
+                consecutiveDecoderFailures = 0
+                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+            }
+            flushPendingStart()
+        }
+    }
+
+    /**
+     * Tells the receiver whether the Activity is actually on screen.
+     *
+     * This is the "cast arrives → bring the player up first → play once it is
+     * really in the foreground" rule. The previous version pulled the UI and
+     * prepared the player in the same breath, which let ExoPlayer configure the
+     * Amlogic HEVC decoder against a view that was still getting its first
+     * layout; MediaCodec then hung in configure() and the sender's next poll
+     * built a second one. Nothing is prepared until the UI confirms it is there.
+     */
+    fun setUiForeground(foreground: Boolean) {
+        mainHandler.post {
+            uiForeground = foreground
+            if (foreground) {
+                mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+                if (surfaceReady) {
+                    flushPendingStart()
+                } else {
+                    DebugLog.log("DLNA", "前台已确认 → 等播放层就绪")
+                }
             }
         }
+    }
+
+    /**
+     * Safety net for a cast that must make *some* sound: if the Activity never
+     * reaches the foreground (launch refused, user in another app) the item is
+     * started without a picture instead of staying silent forever.
+     */
+    private val foregroundTimeoutRunnable = Runnable {
+        val uri = pendingStartUri ?: return@Runnable
+        pendingStartUri = null
+        surfaceReady = true
+        DebugLog.log(
+            "DLNA",
+            "等待前台 ${FOREGROUND_WAIT_MS / 1000}s 未成功 → 按仅音频起播: $uri"
+        )
+        if (started) runStart(uri)
+    }
+
+    /** Starts the parked item, if the render surface is there by now. */
+    private fun flushPendingStart() {
+        val uri = pendingStartUri ?: return
+        if (!surfaceReady) return
+        pendingStartUri = null
+        mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+        DebugLog.log("DLNA", "前台已就绪 → 起播")
+        runStart(uri)
     }
 
     /** Called by the UI when the playback view is hidden or destroyed, so the
@@ -799,17 +911,32 @@ class DlnaReceiver(
                 return@post
             }
 
+            // ── Wait for the foreground ───────────────────────────────────────
+            // The order a receiver must keep: the sender pushes media → the UI
+            // comes up → the UI confirms "I am on screen" → only then is the
+            // player prepared. Preparing earlier is what produced the
+            // "Decoder init failed … 超时" loop on this box: ExoPlayer configured
+            // the HEVC decoder while the Activity was still being started, and
+            // every poll the sender made while that hung built another decoder.
+            // Nothing is prepared before [setUiForeground] reports true.
+            if (!uiForeground) {
+                pendingStartUri = uri
+                mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+                mainHandler.postDelayed(
+                    foregroundTimeoutRunnable, FOREGROUND_WAIT_MS.toLong()
+                )
+                DebugLog.log(
+                    "DLNA",
+                    "界面不在前台 → 先拉起播放器，确认前台后再起播（${FOREGROUND_WAIT_MS / 1000}s 兜底仅音频）"
+                )
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
+
             // ── Wait for the render surface ───────────────────────────────────
-            // Play can arrive before the UI exists (auto-foreground pull, v65)
-            // or before the revealed PlayerView has a sized surface. Creating
-            // the Amlogic HEVC decoder there blocks in configure() forever, and
-            // the sender's next poll builds a second one — that is the
-            // "Decoder init failed … 超时" loop. This gate sits ahead of the
-            // idempotent branch on purpose: a sender polling the very item we
-            // have not started yet must not be mistaken for "already playing,
-            // nothing to do" — it has to leave the item armed.
-            // Start once the surface is real, or after [SURFACE_WAIT_MS] play
-            // audio only, exactly like receivers did before auto-foreground.
+            // The UI is on screen but the revealed PlayerView may still lack a
+            // sized surface; configuring the decoder against a 0×0 texture
+            // hangs the same way. [SURFACE_WAIT_MS] keeps a hard cap.
             if (!surfaceReady) {
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
@@ -1117,14 +1244,30 @@ class DlnaReceiver(
     }
 
     companion object {
-        /**
-         * How long [startPlayback] may wait for the playback UI before it
-         * accepts "sound only". The Activity gets pulled to the front by the
-         * foreground service, and the view only reports a real surface after
-         * the next layout; that is a fraction of a second in practice, so this
-         * cap only matters when the UI never shows up at all.
-         */
+        /** How long [startPlayback] waits for the UI to be on screen. */
+        private const val FOREGROUND_WAIT_MS = 10_000
+
+        /** How long an off-main-thread [stop] waits for the main thread to run
+         *  the teardown. Only the wait is bounded; the teardown itself is not. */
+        private const val STOP_MAIN_THREAD_TIMEOUT_MS = 3_000
+
+        /** How long [startPlayback] may wait for the playback UI before it
+         *  accepts "sound only". The view only reports a real surface after
+         *  the next layout; that is a fraction of a second in practice, so
+         *  this cap only matters when the UI never shows up at all. */
         private const val SURFACE_WAIT_MS = 3_000
+
+        /**
+         * Decoder init attempts before a component is written off.
+         *
+         * The Amlogic HEVC component on these boxes refuses the *first*
+         * create after a while (the HAL is warming up) and then works: in the
+         * field the first cast failed and the next three played at once. So a
+         * single failure is not proof anything is broken — it gets a few
+         * attempts and only then lands on the skip list, which is what used
+         * to make "one bad channel" permanently unrunnable.
+         */
+        private const val HEVC_ATTEMPT_LIMIT = 3
 
         /** How long a source may stay silent before we probe it ourselves. */
         private const val STALL_TIMEOUT_MS = 15_000

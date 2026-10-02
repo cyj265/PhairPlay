@@ -540,6 +540,16 @@ class PhairPlayService : Service() {
     fun onActivityPaused() { activityResumed = false }
 
     /**
+     * Hands the DLNA receiver the confirmed foreground state.
+     *
+     * The receiver does not play until this says true, so the cast order is
+     * "sender pushes → UI comes up → UI is on screen → media starts".
+     */
+    fun setDlnaUiForeground(foreground: Boolean) {
+        dlnaReceiver?.setUiForeground(foreground)
+    }
+
+    /**
      * Brings the app UI to the front when a cast starts while it is in the
      * background — the receiver-side half of what every other receiver app
      * does: the picture has to appear when the sender pushes media, not when
