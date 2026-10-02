@@ -255,6 +255,16 @@ class HomeFragment : Fragment() {
         detail.setText(detailRes)
         dot.background.setTint(requireContext().getColor(colorRes))
 
+        // Miracast and Cast are still being worked on, and Cast cannot run on
+        // this Fire TV flavor at all (no Play Services). Their detail line says
+        // so instead of "Enable in Settings" / "Waiting for sender…", which
+        // reads as a broken promise. Applied last so it wins over the generic
+        // line; the status row above still reports the real state, which keeps
+        // this card useful for diagnostics.
+        if (card === cardMiracast || card === cardCast) {
+            detail.setText(R.string.protocol_detail_in_development)
+        }
+
         // A DLNA startup failure carries a concrete message; keep showing it
         // instead of the generic error hint (the dlnaState emission may arrive
         // after the dlnaError emission and would otherwise overwrite it).
