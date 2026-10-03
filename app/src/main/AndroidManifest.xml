@@ -49,6 +49,11 @@
 
     <!-- Foreground service notification (Android 13+ requires runtime grant) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets the receiver ask the system to drop a *background* process that is
+         still holding the box's single hardware decoder. Normal level, no
+         prompt. It cannot stop a foreground app — that needs root or the
+         system's own force-stop screen, which is what the UI falls back to. -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
     <!--
         Declare this app as a TV app (leanback).

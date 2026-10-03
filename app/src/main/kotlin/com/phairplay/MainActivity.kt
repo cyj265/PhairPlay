@@ -36,15 +36,19 @@ import com.phairplay.service.ServiceController
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
+import com.phairplay.dlna.DecoderSlotGuard
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.NowPlayingScreen
 import com.phairplay.ui.PhotoScreen
 import com.phairplay.ui.PinScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
+import com.phairplay.ui.TvDialogs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
@@ -323,6 +327,13 @@ class MainActivity : AppCompatActivity() {
         isUiInForeground = true
         service?.onActivityResumed()
         service?.setDlnaUiForeground(true)
+        // Coming back from the system's force-stop screen: the slot may be free
+        // now, so retry at once instead of making the user wait out a cooldown
+        // that was sized for "somebody else still holds it".
+        if (pendingRetryAfterKill) {
+            pendingRetryAfterKill = false
+            service?.retryDlnaAfterSlotRelease()
+        }
     }
 
     override fun onPause() {
@@ -611,6 +622,49 @@ class MainActivity : AppCompatActivity() {
      * is exactly how a plain "open the app" ended up inside a black player
      * instead of on the home screen.
      */
+    /**
+     * One automatic "open the player" per cast.
+     *
+     * WHY A QUOTA: the sender re-sends Play every 10-30 s and the player keeps
+     * changing state, so without a limit every buffer blip drags the user back
+     * into full-screen playback right after they pressed Back to look at the
+     * home screen — the long-standing "后台被 poll 拉回前台" complaint.
+     *
+     * Consumed by USER GESTURES ONLY, never by [hideDlnaPlayer] itself: that
+     * also runs automatically when a cast ends, and a control point that sends
+     * Stop followed by Play would then burn the quota on its own, leaving the
+     * legitimate restart stuck behind the home screen.
+     */
+    private var autoOpenUsedForCast = false
+
+    /** Name of the app the slot-blocker dialog was last shown for (no repeats). */
+    private var blockerDialogShownFor: String? = null
+
+    /** Set when we send the user to the system force-stop screen. */
+    private var pendingRetryAfterKill = false
+
+    /**
+     * Opens the player if a cast deserves it — and can be called as often as
+     * the evidence changes.
+     *
+     * The v82 bug was deciding this exactly once, at the instant
+     * `ProtocolState.CONNECTED` was emitted: at that moment the item has only
+     * just been handed to ExoPlayer (`BUFFERING playWhenReady=false`, or even
+     * still idle), so "is it playing?" is false and the player stayed hidden
+     * for the rest of the cast. `hasDlnaMedia()` is the line that fixes it:
+     * an item loaded for a cast the user just started IS worth showing, even
+     * before the first frame.
+     */
+    private fun tryOpenPlayerForCast() {
+        val svc = service ?: return
+        if (autoOpenUsedForCast) return
+        if (svc.dlnaState.value != ProtocolState.CONNECTED) return
+        if (!svc.isDlnaPlaybackLive() && !hasDlnaMedia()) return
+        autoOpenUsedForCast = true
+        showDlnaPlayer()
+        com.phairplay.util.DebugLog.log("UI", "自动打开播放层（本轮投屏首次）")
+    }
+
     private fun shouldOpenOnPlayer(): Boolean {
         if (intent?.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
             return true
@@ -618,13 +672,26 @@ class MainActivity : AppCompatActivity() {
         return service?.isDlnaPlaybackLive() == true
     }
 
+    /**
+     * The user asked for the picture back, so every gate that keeps it away
+     * goes at once: the "user closed this cast" flag in the service, and the
+     * local auto-open quota.
+     *
+     * Both must be cleared together — otherwise the manual `showDlnaPlayer()`
+     * works but the semantic is wrong, and the next state tick behaves as if
+     * the user had never asked.
+     */
+    private fun reopenDlnaByUser() {
+        service?.clearDlnaDismissed()
+        blockerDialogShownFor = null
+        autoOpenUsedForCast = false
+        showDlnaPlayer()
+    }
+
     /** Re-opens full-screen playback — how a TV remote gets back after Back. */
     fun returnToDlnaPlayback() {
         if (hasDlnaMedia()) {
-            // The user asked for the picture back, so the "user closed this
-            // cast" flag must not keep auto-foreground suppressed for it.
-            service?.clearDlnaDismissed()
-            showDlnaPlayer()
+            reopenDlnaByUser()
         } else {
             android.widget.Toast.makeText(this, "当前没有正在播放的内容", android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -673,7 +740,6 @@ class MainActivity : AppCompatActivity() {
             if (selectedNavIndex != 0) {
                 navigateTo(HomeFragment(), navItemHome)
             } else if (hasDlnaMedia()) {
-                service?.clearDlnaDismissed()
                 // Already on home and DLNA still has an item loaded underneath
                 // (the remote pressed Back out of the player). Re-selecting
                 // Home returns to the picture — otherwise the only way back
@@ -682,7 +748,6 @@ class MainActivity : AppCompatActivity() {
                 // The old check was `dlnaState == CONNECTED`, which is false
                 // the moment the sender pauses (PAUSED_PLAYBACK), so Home
                 // looked broken exactly when the user most needed to go back.
-                showDlnaPlayer()
             }
         }
         navItemSettings.setOnClickListener {
@@ -883,11 +948,32 @@ class MainActivity : AppCompatActivity() {
         }
         lifecycleScope.launch {
             svc.dlnaState.collectLatest { state ->
-                if (state == ProtocolState.CONNECTED && shouldOpenOnPlayer()) {
-                    showDlnaPlayer()
-                } else {
+                if (state != ProtocolState.CONNECTED) {
                     hideDlnaPlayer()
+                } else {
+                    // Never let one emission settle this. CONNECTED arrives
+                    // before the player has even buffered; the picture's
+                    // arrival is reported by [tryOpenPlayerForCast].
+                    tryOpenPlayerForCast()
                 }
+            }
+        }
+        // A new cast is the strongest possible reason to show the player.
+        lifecycleScope.launch {
+            svc.dlnaCastArrived.collectLatest {
+                autoOpenUsedForCast = false
+                tryOpenPlayerForCast()
+            }
+        }
+        // …and every change inside the player re-opens the question, which is
+        // what v82 could not do: it evaluated the same question once, too
+        // early, and then never again.
+        lifecycleScope.launch {
+            svc.dlnaPlaybackTick.collectLatest { tryOpenPlayerForCast() }
+        }
+        lifecycleScope.launch {
+            svc.dlnaSlotBlocker.collectLatest { blocker ->
+                if (blocker != null) maybeShowBlockerDialog(blocker)
             }
         }
         // A decoder hint (e.g. "HEVC 解码器可能被其他应用占用") is the one
@@ -918,6 +1004,67 @@ class MainActivity : AppCompatActivity() {
      * only. Kept as an overlay-style Toast rather than a dialog so it never
      * steals the D-pad from the player.
      */
+    /**
+     * Names the app that probably holds the box's HEVC slot and offers the one
+     * thing that works without root: the system's own force-stop screen.
+     *
+     * WHY NOT JUST A TOAST: the hint already says "close your other player" —
+     * but on a box the user often cannot tell which app that is, and even when
+     * they can, closing it means four remote clicks through a launcher.
+     * Naming it and landing on the button turns advice into an action.
+     *
+     * The holder cannot be queried (no API exists; `dumpsys media.codec` needs
+     * a signature permission), so this is an inference from what is running.
+     * Shown once per package — a slot that will not free up must not become a
+     * dialog the user cannot get out of.
+     */
+    private fun maybeShowBlockerDialog(blocker: DecoderSlotGuard.Suspect) {
+        if (blockerDialogShownFor == blocker.packageName) return
+        blockerDialogShownFor = blocker.packageName
+        val entries = ArrayList<Pair<String, () -> Unit>>()
+        entries.add(
+            "打开「${blocker.label}」的强制停止页面" to {
+                pendingRetryAfterKill = true
+                runCatching {
+                    startActivity(
+                        Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:${blocker.packageName}")
+                        )
+                    )
+                }.onFailure {
+                    showTvToast("无法打开应用详情页：$blocker")
+                }
+            }
+        )
+        if (service?.rootAvailable?.value == true) {
+            entries.add("（root）立即停止它并重试" to { releaseSlotWithRoot() })
+        }
+        entries.add("现在就重试播放" to { service?.retryDlnaAfterSlotRelease() })
+        entries.add("知道了" to {})
+        TvDialogs.menu(this, "HEVC 硬解槽被占用", entries)
+    }
+
+    /**
+     * Root path: stop the holder ourselves, then retry.
+     *
+     * Off the main thread — `su` blocks, and on a box without root the exec
+     * alone can take seconds before it fails.
+     */
+    private fun releaseSlotWithRoot() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val released = service?.releaseDecoderSlot(allowRoot = true) == true
+            withContext(Dispatchers.Main) {
+                if (released) {
+                    service?.retryDlnaAfterSlotRelease()
+                    showTvToast("已释放硬解槽，正在重试播放")
+                } else {
+                    showTvToast("无法自动释放，请手动停止占用应用")
+                }
+            }
+        }
+    }
+
     @Suppress("DEPRECATION") // Toast.setView: still honoured for foreground toasts
     private fun showTvToast(message: String) {
         val density = resources.displayMetrics.density
@@ -1143,6 +1290,11 @@ class MainActivity : AppCompatActivity() {
                 if (dlna) {
                     // Back inside full-screen playback drops to the app UI first
                     // (that UI is reachable and stays usable); AirPlay semantics.
+                    //
+                    // This is a user gesture, so it spends the auto-open quota:
+                    // having asked for the home screen, they must not be dragged
+                    // back by the sender's next poll.
+                    autoOpenUsedForCast = true
                     hideDlnaPlayer()
                     val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                     target.requestFocus()

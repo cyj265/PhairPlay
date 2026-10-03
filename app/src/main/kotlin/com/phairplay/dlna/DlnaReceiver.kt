@@ -112,7 +112,29 @@ class DlnaReceiver(
      * state — so a parked item (which sits in ADVERTISING) would never get a
      * Surface again without this.
      */
-    private val onPlaybackUiNeeded: () -> Unit = {}
+    private val onPlaybackUiNeeded: () -> Unit = {},
+    /**
+     * Ticks whenever the player's own state changes (IDLE / BUFFERING / READY)
+     * or a first frame lands.
+     *
+     * WHY A SEPARATE CHANNEL: "should the UI show the picture?" is a judgement
+     * that changes over time, while `ProtocolState.CONNECTED` is emitted once,
+     * early, and then never again (StateFlow dedupes equal values). Deciding
+     * at that single instant is exactly what broke v82: CONNECTED arrives
+     * while the player is still idle, the answer was "nothing is playing", the
+     * player view was hidden, and no later event ever reconsidered it — the
+     * cast ran with sound behind the home screen. This pulse is the
+     * reconsideration.
+     */
+    private val onPlaybackActivityChanged: () -> Unit = {},
+    /**
+     * A slot probe came back occupied: something else on the box is holding
+     * the HEVC instance. Carries the raw failure detail for the debug log.
+     *
+     * Fired instead of starting, so a retry that cannot possibly succeed does
+     * not spend another MediaCodec on finding that out.
+     */
+    private val onSlotBlocked: (String) -> Unit = {}
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -278,7 +300,47 @@ class DlnaReceiver(
             mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
             return
         }
-        DebugLog.log("DLNA", "硬解冷却结束 → 重新等待渲染面并起播")
+        DebugLog.log("DLNA", "硬解冷却结束 → 先探一次硬解槽位，再决定是否起播")
+        // Probe first. Retrying blind is what burned eight MediaCodec instances
+        // in twenty seconds: if the slot is still held, another configure()
+        // failure tells us nothing new and returns nothing to the box. A probe
+        // is a few milliseconds and hands the instance straight back, so it
+        // costs one thread and nothing else.
+        //
+        // Off the main thread: create/configure/start reaches into the OMX HAL.
+        Thread {
+            val result = DecoderSlotGuard.probeHevcSlot(hevcCodecSelector.preferredName() ?: "")
+            mainHandler.post { onSlotProbed(uri, result) }
+        }.apply { name = "hevc-slot-probe"; start() }
+    }
+
+    /** What to do with a probe result for [uri] (see [onDecoderCooldownElapsed]). */
+    private fun onSlotProbed(uri: String, result: DecoderSlotGuard.ProbeResult) {
+        if (!started) return
+        when (result) {
+            is DecoderSlotGuard.ProbeResult.Free -> {
+                DebugLog.log("DLNA", "硬解槽位探活: 可用 → 起播")
+                resumeAfterProbe(uri)
+            }
+            is DecoderSlotGuard.ProbeResult.Occupied -> {
+                // Do not start: it would fail identically and hand the box
+                // another half-released instance. Say who to blame (the service
+                // resolves it to an app) and wait the cooldown out again — the
+                // user-facing path is what actually clears this.
+                DebugLog.log("DLNA", "硬解槽位探活: 被占用 (${result.detail}) → 本轮不起播")
+                onSlotBlocked(result.detail)
+                mainHandler.postDelayed(decoderCooldownRetry, decoderCooldownMs.toLong())
+            }
+            is DecoderSlotGuard.ProbeResult.Unsupported -> {
+                // Probing says nothing here; fall back to the old behaviour
+                // rather than stalling playback on a measurement we cannot make.
+                DebugLog.log("DLNA", "硬解槽位探活: 不可用 (${result.detail}) → 按原逻辑重试")
+                resumeAfterProbe(uri)
+            }
+        }
+    }
+
+    private fun resumeAfterProbe(uri: String) {
         surfaceGeneration++
         hevcCodecSelector.resetFailures()
         consecutiveDecoderFailures = 0
@@ -294,6 +356,21 @@ class DlnaReceiver(
             // "cooldown elapsed" notices with no start after any of them.
             onSurfaceProbeNeeded()
             onPlaybackUiNeeded()
+        }
+    }
+
+    /**
+     * Called after the user has (or we have) freed the decoder slot: skip the
+     * remaining cooldown and try the parked item right now instead of making
+     * them wait out a backoff that no longer applies.
+     */
+    fun retryAfterSlotRelease() {
+        mainHandler.post {
+            val uri = pendingStartUri ?: return@post
+            decoderCooldownUntilMs = 0L
+            mainHandler.removeCallbacks(decoderCooldownRetry)
+            DebugLog.log("DLNA", "槽位已释放 → 立即重试挂起的投屏")
+            resumeAfterProbe(uri)
         }
     }
 
@@ -733,6 +810,9 @@ class DlnaReceiver(
                                     // STATE_IDLE / STATE_BUFFERING: transient, no UI change needed.
                                 }
                             }
+                            // Anything that can flip "is there a picture?"
+                            // must be able to flip the answer in the UI.
+                            onPlaybackActivityChanged()
                         }
 
                         override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -747,6 +827,8 @@ class DlnaReceiver(
                             // the next hiccup starts from the short delay again.
                             notePlaybackHealthy()
                             DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
+                            // The strongest possible "there is a picture now".
+                            onPlaybackActivityChanged()
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
