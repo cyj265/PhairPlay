@@ -118,9 +118,15 @@ class MainActivity : AppCompatActivity() {
             // already CONNECTED (the cast started while this Activity was
             // stopped — onStop paused playback and dropped the collectors),
             // immediately restore the full-screen player and resume playback.
-            if (service?.dlnaState?.value == ProtocolState.CONNECTED) {
+            // Only land on the picture when there really is one. CONNECTED
+            // survives a sender pause and a dead pipeline, so it used to drop
+            // the user into a black player every time the app was opened —
+            // "打开 app 后直接进播放器，不是首页".
+            if (shouldOpenOnPlayer()) {
                 service?.resumeDlnaPlayback()
                 showDlnaPlayer()
+            } else {
+                hideDlnaPlayer()
             }
 
             // The receiver parks an item whenever a decoder init failed with no
@@ -593,9 +599,31 @@ class MainActivity : AppCompatActivity() {
     private fun hasDlnaMedia(): Boolean =
         service?.dlnaPlayer != null && DlnaMediaMeta.hasMedia
 
+    /**
+     * Whether opening (or re-binding) the app should land on the player.
+     *
+     * Two things qualify: the app was launched *because* a cast arrived (the
+     * service put [PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON] in the
+     * intent), or the renderer is genuinely playing right now.
+     *
+     * `dlnaState == CONNECTED` deliberately does not qualify on its own — it
+     * stays true while the sender pauses and while the pipeline is dead, which
+     * is exactly how a plain "open the app" ended up inside a black player
+     * instead of on the home screen.
+     */
+    private fun shouldOpenOnPlayer(): Boolean {
+        if (intent?.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
+            return true
+        }
+        return service?.isDlnaPlaybackLive() == true
+    }
+
     /** Re-opens full-screen playback — how a TV remote gets back after Back. */
     fun returnToDlnaPlayback() {
         if (hasDlnaMedia()) {
+            // The user asked for the picture back, so the "user closed this
+            // cast" flag must not keep auto-foreground suppressed for it.
+            service?.clearDlnaDismissed()
             showDlnaPlayer()
         } else {
             android.widget.Toast.makeText(this, "当前没有正在播放的内容", android.widget.Toast.LENGTH_SHORT).show()
@@ -645,6 +673,7 @@ class MainActivity : AppCompatActivity() {
             if (selectedNavIndex != 0) {
                 navigateTo(HomeFragment(), navItemHome)
             } else if (hasDlnaMedia()) {
+                service?.clearDlnaDismissed()
                 // Already on home and DLNA still has an item loaded underneath
                 // (the remote pressed Back out of the player). Re-selecting
                 // Home returns to the picture — otherwise the only way back
@@ -854,7 +883,7 @@ class MainActivity : AppCompatActivity() {
         }
         lifecycleScope.launch {
             svc.dlnaState.collectLatest { state ->
-                if (state == ProtocolState.CONNECTED) {
+                if (state == ProtocolState.CONNECTED && shouldOpenOnPlayer()) {
                     showDlnaPlayer()
                 } else {
                     hideDlnaPlayer()
