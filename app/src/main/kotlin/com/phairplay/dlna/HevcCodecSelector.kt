@@ -246,32 +246,52 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
     /**
      * Rebuilds a media3 codec entry for a component media3's own query does not
      * return, so we can still offer it as a candidate.
+     *
+     * This is the whole point of scanning [rawComponents]: on this box media3
+     * lists one component, and a firmware that only ever advertised a *second*
+     * one (e.g. `OMX.amlogic.hevc.decoder` without the `awesome` suffix) would
+     * be invisible to the player no matter what [noteDecoderFailure] said.
+     * Returning the built instance is therefore essential — the caller drops
+     * nulls with `filterNotNull()`.
      */
     private fun candidateInfo(name: String): MediaCodecInfo? {
         val raw = rawComponents.firstOrNull { it.name == name } ?: return null
         val caps = runCatching { raw.getCapabilitiesForType(MimeTypes.VIDEO_H265) }.getOrNull()
             ?: return null
         val lower = name.lowercase(java.util.Locale.ROOT)
-        try {
-            // Positional: this is a Java factory, named arguments are refused.
+        // Signature (media3 1.4.1), positionally — Kotlin refuses named
+        // arguments on Java methods, so the mapping is written out here:
+        //   1 name                2 mimeType            3 codecMimeType
+        //   4 capabilities        5 hardwareAccelerated 6 softwareOnly
+        //   7 vendor              8 forceDisableAdaptive 9 forceSecure
+        // Note the polarity of #8: it *disables* adaptive playback, so it must
+        // be true only when the codec does NOT support it. This used to pass
+        // isFeatureSupported(FEATURE_AdaptivePlayback) instead, which claimed
+        // the opposite and switched adaptive playback off on every resurrected
+        // component. A semantic inversion like that compiles perfectly, so the
+        // mapping is documented rather than left implicit.
+        val adaptiveSupported = caps.isFeatureSupported(
+            android.media.MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback
+        )
+        return try {
             MediaCodecInfo.newInstance(
-                name,
-                MimeTypes.VIDEO_H265,
-                MimeTypes.VIDEO_H265,
-                caps,
-                // On API < 29 (this box ships 25) media3 decides by name alone,
-                // so use its rule instead of APIs that do not exist here.
+                name,                                    // 1 name
+                MimeTypes.VIDEO_H265,                    // 2 mimeType
+                MimeTypes.VIDEO_H265,                    // 3 codecMimeType
+                caps,                                    // 4 capabilities
+                // #5 hardwareAccelerated / #6 softwareOnly. On API < 29 (this
+                // box ships 25) media3 decides by name alone, so use its rule
+                // instead of APIs that do not exist here.
                 lower.startsWith("omx.") && !lower.contains(".sw") && !lower.contains("software"),
                 lower.startsWith("omx.google") || lower.contains("software"),
-                name.startsWith("OMX."),
-                caps.isFeatureSupported(android.media.MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback),
-                false
+                name.startsWith("OMX."),                  // 7 vendor
+                !adaptiveSupported,                       // 8 forceDisableAdaptive
+                false                                     // 9 forceSecure
             )
         } catch (t: Throwable) {
             Logger.w("cannot resurrect codec $name: ${t.message}")
             null
         }
-        return null
     }
 
     /** Diagnostic dump used in the error line, so a screenshot carries the facts. */
