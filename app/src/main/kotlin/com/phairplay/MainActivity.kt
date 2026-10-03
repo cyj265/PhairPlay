@@ -942,11 +942,26 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        // A new cast is the strongest possible reason to show the player.
+        // A new cast is the strongest possible reason to show the player — and
+        // it has to open it UNCONDITIONALLY, which is the whole difference
+        // between a 1 s and a 10 s start.
+        //
+        // [tryOpenPlayerForCast] asks "is it playing right now?", and on a cold
+        // cast that question is always no: the item has not reached ExoPlayer
+        // yet, so isDlnaPlaybackLive() is false and hasDlnaMedia() is false. The
+        // layer therefore stayed hidden, the surface never became real, and the
+        // receiver sat out its entire 10 s foreground wait before the fallback
+        // timer force-opened it. A fresh uri from the sender IS the evidence we
+        // were waiting for — the user just picked something on their phone.
+        //
+        // Still safe against the "user closed this cast" complaint: a dismissed
+        // cast stops emitting (same uri never re-arms) and the service clears
+        // the dismissal only for a genuinely new uri.
         lifecycleScope.launch {
             svc.dlnaCastArrived.collectLatest {
-                autoOpenUsedForCast = false
-                tryOpenPlayerForCast()
+                autoOpenUsedForCast = true
+                showDlnaPlayer()
+                com.phairplay.util.DebugLog.log("UI", "新投屏到达 → 立即显示播放层")
             }
         }
         // …and every change inside the player re-opens the question, which is

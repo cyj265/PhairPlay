@@ -1640,6 +1640,13 @@ class DlnaReceiver(
                     "DLNA",
                     "界面不在前台 → 先拉起播放器，确认前台后再起播（${FOREGROUND_WAIT_MS / 1000}s 兜底仅音频）"
                 )
+                // Ask for the layer now instead of letting the timeout be the
+                // thing that finally reveals it. Field log: the cast sat on the
+                // home screen for the full 10 s and then started on the very
+                // same frame the fallback fired — nothing was actually slow but
+                // the request to show the player.
+                onSurfaceProbeNeeded()
+                onPlaybackUiNeeded()
                 report(ProtocolState.CONNECTED)
                 return@post
             }
@@ -1655,6 +1662,12 @@ class DlnaReceiver(
                     "DLNA",
                     "播放层尚未就绪 → 暂缓起播（${SURFACE_WAIT_MS / 1000}s 内无界面则以仅音频起播）"
                 )
+                // Same reason as the foreground branch above: the layer is what
+                // makes the surface real, so request it immediately. Waiting for
+                // the fallback timer is what produced the 3 s "nothing happens"
+                // gap on a cast that started while the app was already open.
+                onSurfaceProbeNeeded()
+                onPlaybackUiNeeded()
                 report(ProtocolState.CONNECTED)
                 return@post
             }
