@@ -259,6 +259,18 @@ class PhairPlayService : Service() {
     private var ipRestarting = false
 
     /**
+     * The IP we are *waiting to see stay put*, and when it was first reported.
+     *
+     * A DHCP renewal that hands out a different address for a moment and then
+     * takes it back used to restart every receiver twice within 300 ms, cutting
+     * a live AirPlay/DLNA cast short. The window below is deliberately long
+     * because an SSDP `LOCATION` pointing at a dead address is harmless for a
+     * few seconds, while a cast being killed is not.
+     */
+    private var pendingStableIp: String? = null
+    private var pendingStableSinceMs = 0L
+
+    /**
      * Watches the box's LAN IPv4 and rebuilds the receivers when it changes.
      *
      * A TV box — notably a Phicomm N1 after a router change, a Wi-Fi reconnect
@@ -290,6 +302,10 @@ class PhairPlayService : Service() {
 
     private val ipWatcher = object : ConnectivityManager.NetworkCallback() {
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            // NOTE: this callback also fires when only the DNS server list
+            // changes, because LinkProperties treats DNS as part of the link.
+            // That is harmless here — the dedupe below is on the IPv4 address,
+            // so a DNS-only change never reaches the restart path.
             val addresses = linkProperties.linkAddresses
             val ip = addresses?.firstOrNull { ia ->
                 val a = ia.address
@@ -298,17 +314,47 @@ class PhairPlayService : Service() {
                         && !a.isLinkLocalAddress
             }?.address?.hostAddress
             if (ip.isNullOrBlank()) return
+
+            val now = System.currentTimeMillis()
             synchronized(ipRestartGuard) {
-                if (watchedIp == ip) return
-                watchedIp = ip
-                if (ipRestarting) return
-                ipRestarting = true
+                if (watchedIp == ip) {
+                    // Back to the address we are already advertising — cancel a
+                    // pending restart so a DHCP flap costs nothing.
+                    pendingStableIp = null
+                    return
+                }
+                if (pendingStableIp == ip) return   // already waiting on this one
+                pendingStableIp = ip
+                pendingStableSinceMs = now
+                Logger.i(
+                    "本地IPv4 变为 $ip → 等待 ${IP_STABLE_CONFIRM_MS / 1000}s 确认稳定" +
+                        "（期间若变回原地址则不重启，避免掐断正在播放的投屏）"
+                )
             }
-            Logger.i("本地IPv4 变化 -> $ip，重建接收链路（旧的发现记录指向已失效地址）")
+
             serviceScope.launch {
-                kotlinx.coroutines.delay(300)
-                synchronized(ipRestartGuard) { ipRestarting = false }
+                kotlinx.coroutines.delay(IP_STABLE_CONFIRM_MS.toLong())
+                val target: String
+                synchronized(ipRestartGuard) {
+                    // Re-read from the watcher: only act if the address we were
+                    // asked about is still the one we ended up with. A renewal
+                    // that flapped and came back lands here with no action.
+                    if (pendingStableIp != ip || watchedIp == ip) {
+                        pendingStableIp = null
+                        return@launch
+                    }
+                    target = ip
+                    pendingStableIp = null
+                    watchedIp = target
+                    if (ipRestarting) return@launch
+                    ipRestarting = true
+                }
+                Logger.i("本地IPv4 稳定为 $target，重建接收链路（旧的发现记录指向已失效地址）")
                 restartReceivers()
+                // Give the guard a moment before allowing another rebuild, so
+                // several callbacks arriving together cannot stack restarts.
+                kotlinx.coroutines.delay(IP_RESTART_SETTLE_MS.toLong())
+                synchronized(ipRestartGuard) { ipRestarting = false }
             }
         }
     }
@@ -767,6 +813,25 @@ class PhairPlayService : Service() {
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
         const val EXTRA_AUTO_FOREGROUND_REASON = "com.phairplay.extra.AUTO_FOREGROUND_REASON"
         const val AUTOFOREGROUND_THROTTLE_MS = 3_000L
+
+        /**
+         * How long a new LAN IPv4 must hold still before the receivers are
+         * rebuilt for it.
+         *
+         * A DHCP renewal can hand out a different address for a moment and then
+         * take the original back; restarting on the transient one killed a live
+         * AirPlay/DLNA cast twice inside 300 ms. The cost of waiting is an SSDP
+         * `LOCATION` that points at a dead address for a few seconds — harmless,
+         * because senders re-run M-SEARCH constantly. The cost of not waiting is
+         * a cast that dies for no reason, so the window is deliberately long.
+         *
+         * This deliberately does not compare subnets: a same-subnet address
+         * change invalidates the advertised `LOCATION` just as thoroughly.
+         */
+        const val IP_STABLE_CONFIRM_MS = 4_000L
+
+        /** Minimum gap between two consecutive receiver rebuilds. */
+        const val IP_RESTART_SETTLE_MS = 2_000L
     }
 }
 
