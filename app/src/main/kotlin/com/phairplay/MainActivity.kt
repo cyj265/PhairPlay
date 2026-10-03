@@ -36,7 +36,6 @@ import com.phairplay.service.ServiceController
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
-import com.phairplay.dlna.DecoderSlotGuard
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.NowPlayingScreen
 import com.phairplay.ui.PhotoScreen
@@ -44,7 +43,6 @@ import com.phairplay.ui.PinScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
 import com.phairplay.ui.TvDialogs
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -327,13 +325,6 @@ class MainActivity : AppCompatActivity() {
         isUiInForeground = true
         service?.onActivityResumed()
         service?.setDlnaUiForeground(true)
-        // Coming back from the system's force-stop screen: the slot may be free
-        // now, so retry at once instead of making the user wait out a cooldown
-        // that was sized for "somebody else still holds it".
-        if (pendingRetryAfterKill) {
-            pendingRetryAfterKill = false
-            service?.retryDlnaAfterSlotRelease()
-        }
     }
 
     override fun onPause() {
@@ -637,12 +628,6 @@ class MainActivity : AppCompatActivity() {
      */
     private var autoOpenUsedForCast = false
 
-    /** Name of the app the slot-blocker dialog was last shown for (no repeats). */
-    private var blockerDialogShownFor: String? = null
-
-    /** Set when we send the user to the system force-stop screen. */
-    private var pendingRetryAfterKill = false
-
     /**
      * Opens the player if a cast deserves it — and can be called as often as
      * the evidence changes.
@@ -683,7 +668,6 @@ class MainActivity : AppCompatActivity() {
      */
     private fun reopenDlnaByUser() {
         service?.clearDlnaDismissed()
-        blockerDialogShownFor = null
         autoOpenUsedForCast = false
         showDlnaPlayer()
     }
@@ -971,16 +955,10 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             svc.dlnaPlaybackTick.collectLatest { tryOpenPlayerForCast() }
         }
-        lifecycleScope.launch {
-            svc.dlnaSlotBlocker.collectLatest { blocker ->
-                if (blocker != null) maybeShowBlockerDialog(blocker)
-            }
-        }
-        // A decoder hint (e.g. "HEVC 解码器可能被其他应用占用") is the one
-        // message worth interrupting a black screen for: the user can act on
-        // it (close 当贝投屏 / IPTV) while the receiver cools down and
-        // retries on its own. Toast, not the card — the user is looking at
-        // the playback layer, not the home screen, when this fires.
+        // A decoder hint ("本盒 HEVC 硬解初始化失败") is worth interrupting a
+        // black screen for: it is the difference between "the box is broken"
+        // and silence. Toast, not the card — the user is looking at the
+        // playback layer, not the home screen, when this fires.
         lifecycleScope.launch {
             svc.dlnaHint.collectLatest { hint ->
                 if (!hint.isNullOrBlank()) {
@@ -1004,67 +982,6 @@ class MainActivity : AppCompatActivity() {
      * only. Kept as an overlay-style Toast rather than a dialog so it never
      * steals the D-pad from the player.
      */
-    /**
-     * Names the app that probably holds the box's HEVC slot and offers the one
-     * thing that works without root: the system's own force-stop screen.
-     *
-     * WHY NOT JUST A TOAST: the hint already says "close your other player" —
-     * but on a box the user often cannot tell which app that is, and even when
-     * they can, closing it means four remote clicks through a launcher.
-     * Naming it and landing on the button turns advice into an action.
-     *
-     * The holder cannot be queried (no API exists; `dumpsys media.codec` needs
-     * a signature permission), so this is an inference from what is running.
-     * Shown once per package — a slot that will not free up must not become a
-     * dialog the user cannot get out of.
-     */
-    private fun maybeShowBlockerDialog(blocker: DecoderSlotGuard.Suspect) {
-        if (blockerDialogShownFor == blocker.packageName) return
-        blockerDialogShownFor = blocker.packageName
-        val entries = ArrayList<Pair<String, () -> Unit>>()
-        entries.add(
-            "打开「${blocker.label}」的强制停止页面" to {
-                pendingRetryAfterKill = true
-                runCatching {
-                    startActivity(
-                        Intent(
-                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            android.net.Uri.parse("package:${blocker.packageName}")
-                        )
-                    )
-                }.onFailure {
-                    showTvToast("无法打开应用详情页：$blocker")
-                }
-            }
-        )
-        if (service?.rootAvailable?.value == true) {
-            entries.add("（root）立即停止它并重试" to { releaseSlotWithRoot() })
-        }
-        entries.add("现在就重试播放" to { service?.retryDlnaAfterSlotRelease() })
-        entries.add("知道了" to {})
-        TvDialogs.menu(this, "HEVC 硬解槽被占用", entries)
-    }
-
-    /**
-     * Root path: stop the holder ourselves, then retry.
-     *
-     * Off the main thread — `su` blocks, and on a box without root the exec
-     * alone can take seconds before it fails.
-     */
-    private fun releaseSlotWithRoot() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val released = service?.releaseDecoderSlot(allowRoot = true) == true
-            withContext(Dispatchers.Main) {
-                if (released) {
-                    service?.retryDlnaAfterSlotRelease()
-                    showTvToast("已释放硬解槽，正在重试播放")
-                } else {
-                    showTvToast("无法自动释放，请手动停止占用应用")
-                }
-            }
-        }
-    }
-
     @Suppress("DEPRECATION") // Toast.setView: still honoured for foreground toasts
     private fun showTvToast(message: String) {
         val density = resources.displayMetrics.density

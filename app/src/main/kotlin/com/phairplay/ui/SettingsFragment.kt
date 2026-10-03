@@ -298,18 +298,29 @@ class SettingsFragment : Fragment() {
      *  Hand-drawn via [TvDialogs.info] — same reason as the display-name dialog. */
     private fun showDebugInfoDialog() {
         val context = requireContext()
+        // The LAN address of the diagnostics port is the part the user has to
+        // retype on a laptop, so it is spelled out rather than left for them to
+        // work out from the interface list below.
+        val lanUrl = com.phairplay.util.NetworkUtils.getLocalIpv4()
+            ?.let { "http://$it:${com.phairplay.util.DiagnosticsServer.PORT}/" }
+            ?: "(未取得局域网地址)"
         TvDialogs.info(
             context = context,
             title = "调试信息",
-            textProvider = { com.phairplay.util.DebugLog.dump() },
+            textProvider = {
+                "电脑浏览器打开 $lanUrl 可查看本机日志（/log 为跨重启全文，/tail 为实时）\n\n" +
+                    com.phairplay.util.DebugLog.dump()
+            },
             actions = listOf(
                 "复制" to {
                     val clipboard = context.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE
                     ) as android.content.ClipboardManager
+                    // The URL goes too: "how do I get this off the box?" is the
+                    // first question after reading a log on a TV screen.
                     clipboard.setPrimaryClip(
                         android.content.ClipData.newPlainText(
-                            "PhairPlay debug", com.phairplay.util.DebugLog.dump()
+                            "PhairPlay debug", "$lanUrl\n\n${com.phairplay.util.DebugLog.dump()}"
                         )
                     )
                     android.widget.Toast.makeText(

@@ -21,6 +21,10 @@ class PhairPlayApp : Application() {
     override fun onCreate() {
         super.onCreate()
         initLogging()
+        // Before anything else logs anything: the file sink has to exist while
+        // the first line is written, and the receiver service can be started by
+        // a BOOT_COMPLETED broadcast with no Activity ever created.
+        com.phairplay.util.DebugLog.init(this)
     }
 
     /**

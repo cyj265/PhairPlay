@@ -1,20 +1,40 @@
 package com.phairplay.util
 
+import android.content.Context
+import java.io.File
 import java.net.NetworkInterface
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 /**
  * In-app debug log + live DLNA/SSDP diagnostics, shown in the Settings →
  * "调试信息" dialog. Lets us see on-device whether SSDP is announcing, whether
  * M-SEARCH queries arrive, and what the HTTP layer answers — without logcat
  * access on the user's device.
+ *
+ * Two sinks, because they answer different questions:
+ *
+ * 1. **The in-memory ring** ([MAX] lines) feeds the settings dialog.
+ * 2. **A file** (`filesDir/phairplay-debug.log`) survives the process and the
+ *    boot, so a failure can be read *after* it happened. This is the one that
+ *    matters in the field: the box is three metres away with no adb, and a
+ *    cast that failed ten minutes ago has already scrolled out of the ring.
+ *    Read it over LAN at `http://<box>:8099/log` — see [DiagnosticsServer].
+ *
+ * Rotation is one generation (`.1`), size-capped, and the file is appended
+ * across boots so a problem that only shows up every few days is still there.
  */
 object DebugLog {
 
-    private const val MAX = 140
+    private const val MAX = 250
+
+    /** Rotate once the live file passes this; keeps `.1` as the previous run. */
+    private const val MAX_FILE_BYTES = 512 * 1024
+    private const val FILE_NAME = "phairplay-debug.log"
+
     private val entries = CopyOnWriteArrayList<String>()
 
     @Volatile var ssdpStatus: String = "未启动"
@@ -47,6 +67,57 @@ object DebugLog {
     @Volatile var lastError: String = "—"
 
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private val stampFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    /**
+     * Single-threaded so writes land in the order they were logged, and so a
+     * log call never blocks on the filesystem (log() runs on the main thread).
+     */
+    private val sink = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "phairplay-log-sink").apply { isDaemon = true }
+    }
+
+    @Volatile private var file: File? = null
+
+    /**
+     * Live subscribers — [DiagnosticsServer] tails them to a LAN client.
+     * Copy-on-write because writes are rare (one per connected `curl`) and
+     * reads happen on every log line.
+     */
+    private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
+
+    /**
+     * Receives every future log line until the returned lambda is called.
+     *
+     * Used by `/tail`, so a diagnosis can be watched live from a laptop
+     * instead of reproduced, screenshotted and transcribed.
+     */
+    @JvmStatic
+    fun addListener(listener: (String) -> Unit): () -> Unit {
+        listeners.add(listener)
+        return { listeners.remove(listener) }
+    }
+
+    /** Installed once from [com.phairplay.PhairPlayApp]; safe to call twice. */
+    @Synchronized
+    @JvmStatic
+    fun init(context: Context) {
+        if (file != null) return
+        val f = File(context.filesDir, FILE_NAME)
+        file = f
+        val banner = buildString {
+            append("──────── PhairPlay 日志启动 ")
+            append(stampFmt.format(Date()))
+            append(" ────────\n")
+            append("设备: ").append(android.os.Build.MODEL)
+            append("  Android ").append(android.os.Build.VERSION.RELEASE)
+            append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n")
+        }
+        sink.execute {
+            runCatching { f.appendText(banner) }
+                .onFailure { Logger.w("debug log file unavailable: ${it.message}") }
+        }
+    }
 
     @Synchronized
     @JvmStatic
@@ -56,16 +127,49 @@ object DebugLog {
         while (entries.size > MAX) {
             entries.removeAt(0)
         }
+        val target = file
+        if (target != null) {
+            sink.execute { appendToFile(target, line) }
+        }
+        for (l in listeners) {
+            runCatching { l(line) }
+        }
+    }
+
+    private fun appendToFile(target: File, line: String) {
+        try {
+            if (target.length() > MAX_FILE_BYTES) {
+                val previous = File(target.parentFile, "$FILE_NAME.1")
+                runCatching { if (previous.exists()) previous.delete() }
+                runCatching { target.renameTo(previous) }
+            }
+            target.appendText(line + "\n")
+        } catch (t: Throwable) {
+            // A log that cannot be written must never take the receiver down.
+            Logger.w("debug log write failed: ${t.message}")
+        }
     }
 
     @JvmStatic
     fun clear() {
         entries.clear()
+        val target = file
+        if (target != null) {
+            sink.execute { runCatching { target.writeText("") } }
+        }
     }
 
     /** Current time as "HH:mm:ss" for the SSDP status fields. */
     @JvmStatic
     fun now(): String = fmt.format(Date())
+
+    /** The on-disk log, newest last. Empty string when it is not available. */
+    @JvmStatic
+    fun readFile(): String = file?.let { f ->
+        runCatching {
+            if (!f.exists()) "" else f.readText()
+        }.getOrDefault("")
+    } ?: ""
 
     /** Full diagnostic text shown in the settings dialog. */
     @JvmStatic

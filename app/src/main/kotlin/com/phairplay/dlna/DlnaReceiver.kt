@@ -82,11 +82,20 @@ class DlnaReceiver(
     private val onError: (String) -> Unit = {},
     /**
      * User-facing hint, fired (throttled) when a real-surface decoder init
-     * failure suggests the box's single HEVC slot is held by another app.
+     * failure means this box cannot decode the item.
      *
      * Distinct from [onError]: this one is not an app fault to flash red — it
-     * is actionable advice ("close 当贝投屏 / IPTV"), and the receiver keeps
-     * cooling down and retrying on its own either way.
+     * describes a box-level limitation ("this box's HEVC decoder refused to
+     * initialise"), and the receiver keeps cooling down and retrying on its
+     * own either way.
+     *
+     * WHAT IT USED TO SAY, AND WHY THAT WAS WRONG: it used to blame another
+     * app ("关闭当贝投屏 / IPTV"). Root取证 (2026-10-03) proved there is no
+     * other app: `dumpsys media.resource_manager` named only PhairPlay, and the
+     * failure was `media.codec` being killed by its own seccomp filter
+     * (`blocked syscall: sendto`) while creating the HEVC component. Telling
+     * the user to close an innocent app sent them hunting for something that
+     * was never there.
      */
     private val onDecoderHint: (String) -> Unit = {},
     /**
@@ -94,8 +103,8 @@ class DlnaReceiver(
      *
      * Without this the hint is a sticky value: the UI keeps it (deliberately,
      * so the user finds it on the screen they return to), but then a later
-     * rebind replays a hint about a decoder fight that is long over — the user
-     * gets told to close 当贝投屏 while a picture is playing.
+     * rebind replays a hint about a failure that is long over — the user gets
+     * told the decoder is broken while a picture is playing.
      */
     private val onDecoderHintCleared: () -> Unit = {},
     /**
@@ -128,13 +137,16 @@ class DlnaReceiver(
      */
     private val onPlaybackActivityChanged: () -> Unit = {},
     /**
-     * A slot probe came back occupied: something else on the box is holding
-     * the HEVC instance. Carries the raw failure detail for the debug log.
+     * The control point sent a real Stop (SOAP), as opposed to this app
+     * dropping the item because the user left the UI.
      *
-     * Fired instead of starting, so a retry that cannot possibly succeed does
-     * not spend another MediaCodec on finding that out.
+     * The service uses it to forget which uri it has already reacted to: a
+     * sender Stop is the only thing that turns "the same uri again" back into
+     * a *new* cast. Without this distinction a control point that polls
+     * SetAVTransportURI + Play every 10-30 s re-raises a cast the user just
+     * closed — see [PhairPlayService] for the bug it caused.
      */
-    private val onSlotBlocked: (String) -> Unit = {}
+    private val onSenderStop: () -> Unit = {}
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -220,14 +232,19 @@ class DlnaReceiver(
     /**
      * When a real-surface decoder init failed, and until when.
      *
-     * WHY: a failed `MediaCodec.configure()` does not always unwind cleanly in
-     * the Amlogic HAL — the instance can stay stuck holding the box's single
-     * hardware decoder slot. That slot is shared with every other app, so a
-     * receiver that keeps retrying does not merely fail to play: it takes the
-     * decoder away from the user's IPTV player too, and the box only recovers
-     * on reboot. So after a genuine (real-surface) failure we stop touching the
-     * decoder for [DECODER_COOLDOWN_MS] and let the slot breathe. The cast
-     * resumes by itself afterwards, or immediately when the UI comes back.
+     * WHY: every failed `MediaCodec.create/configure` leaves an instance behind
+     * that the Amlogic HAL does not always unwind, and this box has a single
+     * HEVC component. A control point polls SetAVTransportURI + Play every
+     * 10-30 s, so an ungated receiver builds (and leaks) a MediaCodec per poll
+     * — the field log shows eight in twenty seconds, after which nothing on the
+     * box would play. Cooling down caps the damage to a couple of patient
+     * retries; the cast resumes by itself afterwards, or immediately when the
+     * UI comes back.
+     *
+     * WHAT THIS IS NOT: it is not a wait for another app to release the slot.
+     * That theory was disproven on 2026-10-03 (see [onDecoderHint]) — the
+     * failures were `media.codec` dying inside its own seccomp filter, and no
+     * other app was involved.
      */
     @Volatile
     private var decoderCooldownUntilMs = 0L
@@ -300,47 +317,11 @@ class DlnaReceiver(
             mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
             return
         }
-        DebugLog.log("DLNA", "硬解冷却结束 → 先探一次硬解槽位，再决定是否起播")
-        // Probe first. Retrying blind is what burned eight MediaCodec instances
-        // in twenty seconds: if the slot is still held, another configure()
-        // failure tells us nothing new and returns nothing to the box. A probe
-        // is a few milliseconds and hands the instance straight back, so it
-        // costs one thread and nothing else.
-        //
-        // Off the main thread: create/configure/start reaches into the OMX HAL.
-        Thread {
-            val result = DecoderSlotGuard.probeHevcSlot(hevcCodecSelector.preferredName() ?: "")
-            mainHandler.post { onSlotProbed(uri, result) }
-        }.apply { name = "hevc-slot-probe"; start() }
+        DebugLog.log("DLNA", "硬解冷却结束 → 重新起播挂起的投屏")
+        resumeParkedCast(uri)
     }
 
-    /** What to do with a probe result for [uri] (see [onDecoderCooldownElapsed]). */
-    private fun onSlotProbed(uri: String, result: DecoderSlotGuard.ProbeResult) {
-        if (!started) return
-        when (result) {
-            is DecoderSlotGuard.ProbeResult.Free -> {
-                DebugLog.log("DLNA", "硬解槽位探活: 可用 → 起播")
-                resumeAfterProbe(uri)
-            }
-            is DecoderSlotGuard.ProbeResult.Occupied -> {
-                // Do not start: it would fail identically and hand the box
-                // another half-released instance. Say who to blame (the service
-                // resolves it to an app) and wait the cooldown out again — the
-                // user-facing path is what actually clears this.
-                DebugLog.log("DLNA", "硬解槽位探活: 被占用 (${result.detail}) → 本轮不起播")
-                onSlotBlocked(result.detail)
-                mainHandler.postDelayed(decoderCooldownRetry, decoderCooldownMs.toLong())
-            }
-            is DecoderSlotGuard.ProbeResult.Unsupported -> {
-                // Probing says nothing here; fall back to the old behaviour
-                // rather than stalling playback on a measurement we cannot make.
-                DebugLog.log("DLNA", "硬解槽位探活: 不可用 (${result.detail}) → 按原逻辑重试")
-                resumeAfterProbe(uri)
-            }
-        }
-    }
-
-    private fun resumeAfterProbe(uri: String) {
+    private fun resumeParkedCast(uri: String) {
         surfaceGeneration++
         hevcCodecSelector.resetFailures()
         consecutiveDecoderFailures = 0
@@ -356,21 +337,6 @@ class DlnaReceiver(
             // "cooldown elapsed" notices with no start after any of them.
             onSurfaceProbeNeeded()
             onPlaybackUiNeeded()
-        }
-    }
-
-    /**
-     * Called after the user has (or we have) freed the decoder slot: skip the
-     * remaining cooldown and try the parked item right now instead of making
-     * them wait out a backoff that no longer applies.
-     */
-    fun retryAfterSlotRelease() {
-        mainHandler.post {
-            val uri = pendingStartUri ?: return@post
-            decoderCooldownUntilMs = 0L
-            mainHandler.removeCallbacks(decoderCooldownRetry)
-            DebugLog.log("DLNA", "槽位已释放 → 立即重试挂起的投屏")
-            resumeAfterProbe(uri)
         }
     }
 
@@ -418,9 +384,9 @@ class DlnaReceiver(
         currentUri = null
         DebugLog.log(
             "DLNA",
-            "$reason → 交还硬解槽并冷却 ${backoff / 1000}s" +
-                "（第 $consecutiveCooldowns 次，连续失败会继续加长；" +
-                "期间不抢占解码器，否则会拖垮盒子上的其他播放器）"
+            "$reason → 停止并冷却 ${backoff / 1000}s" +
+                "（第 $consecutiveCooldowns 次，连续失败会继续加长）；" +
+                "冷却期间不再建 MediaCodec，否则发送端每轮 poll 都会泄漏一个实例"
         )
     }
 
@@ -431,10 +397,10 @@ class DlnaReceiver(
         }
         decoderCooldownMs = DECODER_COOLDOWN_MS
         consecutiveCooldowns = 0
-        // A picture is on screen, so any "decoder may be occupied" advice is
-        // now stale. Retract it: the UI holds the hint until told otherwise,
-        // and a hint that outlives the problem is worse than none (the user
-        // goes hunting for an app to close while playback is fine).
+        // A picture is on screen, so any "the decoder failed" advice is now
+        // stale. Retract it: the UI holds the hint until told otherwise, and a
+        // hint that outlives the problem is worse than none (the user reads a
+        // failure notice over a perfectly good picture).
         if (lastDecoderHintMs != 0L) {
             lastDecoderHintMs = 0L
             DebugLog.log("DLNA", "画面恢复 → 撤销解码器占用提示")
@@ -443,17 +409,18 @@ class DlnaReceiver(
     }
 
     /**
-     * One user-facing notice that the box's HEVC decoder may be held by
-     * another app, throttled to [DECODER_HINT_MIN_INTERVAL_MS] so the sender's
-     * 2-3 s poll cannot spam it into a Toast storm.
+     * One user-facing notice that this box's HEVC decoder refused to start,
+     * throttled to [DECODER_HINT_MIN_INTERVAL_MS] so the sender's 2-3 s poll
+     * cannot spam it into a Toast storm.
      *
-     * Why the cautionary "可能": the app cannot ask the system who owns the
-     * decoder slot, and a failed `MediaCodec.configure()` is also what a truly
-     * dead component looks like — but on this box (single HEVC component, no
-     * fallback) the actionable case is nearly always "当贝投屏 / IPTV is
-     * holding the slot", and the user can act on that even when it is not.
+     * The wording is deliberately about *this box*, not about other apps.
+     * Root-level取证 on the N1 (2026-10-03) showed the HEVC component dying
+     * inside `media.codec` (seccomp blocked `sendto` → SIGABRT) with the codec
+     * instance pool empty (`mNum=0, mMaxNum=9`) and no other app registered in
+     * `media.resource_manager`. Blaming a sibling player was not just
+     * inaccurate, it was unactionable.
      */
-    private fun maybeHintDecoderOccupied(text: String) {
+    private fun maybeHintDecoderProblem(text: String) {
         val now = System.currentTimeMillis()
         if (now - lastDecoderHintMs < DECODER_HINT_MIN_INTERVAL_MS) return
         lastDecoderHintMs = now
@@ -631,8 +598,7 @@ class DlnaReceiver(
     }
 
     /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
-    private val hevcCodecSelector =
-        HevcCodecSelector(context.applicationContext)
+    private val hevcCodecSelector = HevcCodecSelector()
 
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -1009,24 +975,21 @@ class DlnaReceiver(
                                     // this is the one case the user has to act
                                     // on, because nothing will fix itself.
                                     mainHandler.removeCallbacks(decoderCooldownRetry)
-                                    maybeHintDecoderOccupied(
-                                        "HEVC解码器不可用（${failedCodec ?: "?"}），已停止自动重试。" +
-                                            "请关闭其他正在播放视频的应用（如当贝投屏、IPTV）后重新投屏。"
+                                    maybeHintDecoderProblem(
+                                        "本盒 HEVC 硬解初始化失败（${failedCodec ?: "?"}），已停止自动重试。" +
+                                            "该片源为纯 H.265 且本机没有软解兜底，请换 H.264 片源或重投一次。"
                                     )
                                 } else {
                                     mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
-                                    // Field evidence: the very same component
-                                    // that fails here plays 1920x1080 on the
-                                    // first try after a reboot with no other apps
-                                    // open — so on this box a real-surface HEVC
-                                    // init failure usually means the box's single
-                                    // decoder slot is held by another app, not
-                                    // that the codec is dead. Tell the user what
-                                    // to do instead of leaving a black screen
-                                    // with no explanation.
-                                    maybeHintDecoderOccupied(
-                                        "HEVC解码器初始化失败，可能被其他应用占用（如当贝投屏、IPTV）。" +
-                                            "请关闭其他播放类应用，PhairPlay 正在冷却并会自动重试。"
+                                    // A real-surface init failure is a box-level
+                                    // condition, not a contest for the decoder:
+                                    // the component either comes back on the next
+                                    // attempt or it does not. Say what is
+                                    // happening instead of leaving a black
+                                    // screen with no explanation.
+                                    maybeHintDecoderProblem(
+                                        "本盒 HEVC 硬解初始化失败，正在冷却后自动重试。" +
+                                            "若反复出现，该片源为纯 H.265，本机无法解码。"
                                     )
                                 }
                             } else if (uri != null && retryCount < 2 && !decoderDead &&
@@ -1417,6 +1380,10 @@ class DlnaReceiver(
                 hevcCodecSelector.resetFailures()
                 consecutiveDecoderFailures = 0
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                // Only on the transition: this arrives on every probe tick
+                // while the UI is up, and a log line per tick buried the one
+                // line that mattered.
+                DebugLog.log("DLNA", "渲染面已可用（generation=$surfaceGeneration）")
             }
             flushPendingStart()
         }
@@ -1810,6 +1777,11 @@ class DlnaReceiver(
         mainHandler.post {
             if (!started) return@post
             clearPlayback("发送端 Stop (SOAP)")
+            // A control point Stop is the one event that makes "the same uri
+            // again" a genuinely new cast. The service forgets the uri here and
+            // nowhere else; forgetting it on our own UI stop is what let a
+            // polling sender resurrect a cast the user had just closed.
+            onSenderStop()
             report(ProtocolState.ADVERTISING)
         }
     }

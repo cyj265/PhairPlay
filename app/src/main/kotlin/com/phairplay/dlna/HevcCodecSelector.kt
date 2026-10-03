@@ -1,8 +1,5 @@
 package com.phairplay.dlna
 
-import android.content.Context
-import android.media.MediaCodec
-import android.media.MediaCodecList
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -10,53 +7,54 @@ import com.phairplay.util.DebugLog
 import com.phairplay.util.Logger
 
 /**
- * Chooses the H.265/HEVC decoder instead of blindly taking the first one the
- * firmware advertises.
+ * Keeps the usable H.265/HEVC decoder at the front of the list ExoPlayer
+ * walks, and pushes components that already refused to initialise to the back.
  *
- * WHY: the newtv live playlists are direct `H265-5500k-1080P` TS with no H.264
- * variant, and on this box ExoPlayer's stock pick dies with
- * `DecoderInitializationException … Decoder init failed:
- * OMX.amlogic.hevc.decoder.awawesome`. Yet the very same HEVC channel plays on
- * this box in ijkplayer-based players (当贝), which create the decoder through
- * `MediaCodec.createDecoderByType("video/hevc")` instead of asking for one
- * advertised component by name. That path can resolve to a different component
- * (`OMX.amlogic.hevc.decoder`, without the `awesome` suffix) — so the fix is to
- * (1) see the full component list the system really has, (2) try them for
- * real in the order this box prefers, (3) remember the ones that died so a
- * later attempt can never burn another MediaCodec on them.
+ * WHY: on the N1 the *only* HEVC component is
+ * `OMX.amlogic.hevc.decoder.awesome`, and for a long time creating it killed
+ * the whole `media.codec` process: the component calls `sendto` during init
+ * (reading a system property over a socket) and the box's
+ * `mediacodec-seccomp.policy` does not whitelist it, so libminijail blocked
+ * the syscall and the service died with SIGABRT. ExoPlayer sees that as
+ * `DecoderInitializationException`, retries on the sender's next poll, and
+ * kills it again.
  *
- * HOW: [MediaCodecSelector.getDecoderInfos] is the list ExoPlayer walks with
- * decoder fallback enabled. It is filled from three sources — media3's own
- * query (format-support checked), every `video/hevc` component
- * `MediaCodecList` knows about (so components media3's query silently drops
- * are still reachable), and the last known-good one — then filtered by what we
- * have already seen fail.
+ * That is a *firmware* bug and it is fixed on the system side (whitelist
+ * `sendto`, then `setprop ctl.restart mediacodec`). What this class does is
+ * make sure the app does not make it worse: remember which component failed,
+ * lead with the one that worked, and never hand ExoPlayer a component this
+ * box has already proven unusable while a working one is still available.
  *
- * The scan runs on a background thread: `MediaCodecList` does binder work and
- * must not sit in front of the first frame.
+ * WHAT WAS REMOVED HERE, AND WHY: an earlier version also re-listed
+ * components that media3's own query dropped, by scanning `MediaCodecList`
+ * and rebuilding media3 entries through `MediaCodecInfo.newInstance(...)`.
+ * That rested on a guess — "the firmware advertises a second, non-`awesome`
+ * component that media3 misses" — which the box disproved: it has exactly one
+ * HEVC component. The rebuild call was also the source of two real bugs
+ * (a positional-argument polarity inversion on `forceDisableAdaptive`, and a
+ * missing `return` that made the whole path a no-op). Deleted rather than
+ * debugged: it can only matter on a box that has a second component, and no
+ * such box has been observed.
+ *
+ * Also removed: an ordering rule that pushed the `awesome` component to the
+ * *back*. It was written when that component was the one that kept failing;
+ * now that it is known to be the only one (and to work), penalising it is
+ * pure downside.
  */
-class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
+class HevcCodecSelector : MediaCodecSelector {
 
     private val lock = Any()
 
-    /** First component that created successfully (only used to sort candidates). */
+    /** First component that created successfully — sorted to the front. */
     @Volatile
     private var workingName: String? = null
 
-    /** Components media3 refuses to use, already known to fail on this box. */
+    /** Components that refused to initialise on this box. */
     private val brokenNames = HashSet<String>()
-
-    /** Every `video/hevc` component the system advertises (name + capabilities). */
-    @Volatile
-    private var rawComponents: List<android.media.MediaCodecInfo> = emptyList()
 
     /** True once every candidate is known dead — the caller should stop retrying. */
     @Volatile
     private var allBroken = false
-
-    init {
-        scanAsync()
-    }
 
     // ─── Decoder list ──────────────────────────────────────────────────────
 
@@ -73,26 +71,17 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
 
         val working = workingName
         return synchronized(lock) {
-            val names = LinkedHashSet(stock.map { it.name })
-            // Components the system lists but media3's query dropped: exactly the
-            // ones worth a second look when the stock pick is broken.
-            rawComponents.map { it.name }.forEach { if (it !in brokenNames) names.add(it) }
-            val usable = names.filter { it !in brokenNames }
+            val usable = stock.filter { it.name !in brokenNames }
             // Recomputed, never latched: a verdict taken on one render surface
             // must not outlive it (see [resetFailures]).
             allBroken = usable.isEmpty()
-            // Remember the first candidate in the order we prefer, so later
-            // attempts put it first again.
             if (usable.isNotEmpty() && workingName == null) {
-                noteDecoderSuccess(usable.first())
+                noteDecoderSuccess(usable.first().name)
             }
-            usable.map { name ->
-                stock.firstOrNull { it.name == name } ?: candidateInfo(name)
-            }
-                .filterNotNull()
-                // Known-good first, then anything that is not the `awesome`
-                // Amlogic component (the one this box trips over), then the rest.
-                .sortedWith(compareBy({ if (it.name == working) 0 else preferenceOf(it.name) }, { it.name }))
+            // Known-good first, then whatever else the framework offered.
+            usable.sortedWith(
+                compareBy({ if (it.name == working) 0 else 1 }, { it.name })
+            )
         }
     }
 
@@ -104,21 +93,6 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
 
     /** True once every HEVC component on this box is known to fail. */
     fun isHevcBroken(): Boolean = allBroken && workingName == null
-
-    /**
-     * Which component to use when testing whether the hardware slot is free.
-     *
-     * The slot is a single shared resource on this box, so probing "some HEVC
-     * decoder" answers the question just as well as probing the exact one
-     * playback will pick — and it must be the known-good one when there is a
-     * known-good one, because a broken candidate would report "occupied" for
-     * a reason that has nothing to do with another app.
-     */
-    fun preferredName(): String? = synchronized(lock) {
-        workingName
-            ?: rawComponents.map { it.name }.firstOrNull { it !in brokenNames }
-            ?: safeDefaultNames().firstOrNull { it !in brokenNames }
-    }
 
     /**
      * True when [name] is the only HEVC component this box has left.
@@ -134,9 +108,7 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
     fun isSoleCandidate(name: String?): Boolean {
         if (name.isNullOrBlank()) return false
         return synchronized(lock) {
-            val others = (rawComponents.map { it.name } + safeDefaultNames())
-                .filter { it != name && it !in brokenNames }
-            others.isEmpty()
+            safeDefaultNames().none { it != name && it !in brokenNames }
         }
     }
 
@@ -165,7 +137,7 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
             DebugLog.log(
                 "DECODER",
                 "本机 HEVC 解码器全部不可用 → ${describeAvailable()}；" +
-                    "该片源为纯 H.265，无法出画面（换 H.264 片源或换固件）"
+                    "该片源为纯 H.265 且本机没有软解兜底，无法出画面"
             )
             DebugLog.lastError = "HEVC解码器不可用: $name"
         }
@@ -189,51 +161,13 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
         DebugLog.log("DECODER", "HEVC解码器名单已重置（渲染面已更换）")
     }
 
-    /** Records a component that initialised, and stops probing after that. */
+    /** Records a component that initialised, and keeps it at the front. */
     fun noteDecoderSuccess(name: String?) {
         if (name.isNullOrBlank() || name == workingName) return
         workingName = name
         synchronized(lock) { allBroken = false }
         Logger.i("HEVC decoder usable: $name")
         DebugLog.log("DECODER", "HEVC解码器可用: $name")
-    }
-
-    // ─── Background scans ──────────────────────────────────────────────────
-
-    private fun scanAsync() {
-        val thread = Thread({
-            try {
-                val list = MediaCodecList(MediaCodecList.ALL_CODECS)
-                // Called on the class on purpose: these are Java *static*
-                // methods, and Kotlin does not synthesise properties for them.
-                val count = MediaCodecList.getCodecCount()
-                val found = ArrayList<android.media.MediaCodecInfo>()
-                for (i in 0 until count) {
-                    val info = try {
-                        MediaCodecList.getCodecInfoAt(i)
-                    } catch (t: Throwable) {
-                        Logger.w("codecInfoAt($i) failed: ${t.message}")
-                        continue
-                    }
-                    val types: Array<String> =
-                        runCatching { info.supportedTypes }.getOrElse { emptyArray<String>() }
-                    if (types.any { it.equals(MimeTypes.VIDEO_H265, ignoreCase = true) }) {
-                        found.add(info)
-                    }
-                }
-                val names = found.map { it.name }
-                synchronized(lock) {
-                    rawComponents = found
-                }
-                DebugLog.log(
-                    "DECODER",
-                    "HEVC组件(系统枚举, ${found.size} 个): ${names.joinToString(", ").ifEmpty { "无" }}"
-                )
-            } catch (t: Throwable) {
-                Logger.w("HEVC component scan failed: ${t.message}")
-            }
-        }, "phairplay-codec-scan").apply { isDaemon = true }
-        thread.start()
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────
@@ -251,78 +185,14 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
         emptyList()
     }
 
-    /** Lower is tried first: known-good, then the plain Amlogic component. */
-    private fun preferenceOf(name: String): Int = when {
-        name.contains("awesome", true) -> 2
-        name.contains("hevc", true) || name.contains("h265", true) -> 1
-        else -> 3
-    }
-
-    /**
-     * Rebuilds a media3 codec entry for a component media3's own query does not
-     * return, so we can still offer it as a candidate.
-     *
-     * This is the whole point of scanning [rawComponents]: on this box media3
-     * lists one component, and a firmware that only ever advertised a *second*
-     * one (e.g. `OMX.amlogic.hevc.decoder` without the `awesome` suffix) would
-     * be invisible to the player no matter what [noteDecoderFailure] said.
-     * Returning the built instance is therefore essential — the caller drops
-     * nulls with `filterNotNull()`.
-     */
-    private fun candidateInfo(name: String): MediaCodecInfo? {
-        val raw = rawComponents.firstOrNull { it.name == name } ?: return null
-        val caps = runCatching { raw.getCapabilitiesForType(MimeTypes.VIDEO_H265) }.getOrNull()
-            ?: return null
-        val lower = name.lowercase(java.util.Locale.ROOT)
-        // Signature (media3 1.4.1), positionally — Kotlin refuses named
-        // arguments on Java methods, so the mapping is written out here:
-        //   1 name                2 mimeType            3 codecMimeType
-        //   4 capabilities        5 hardwareAccelerated 6 softwareOnly
-        //   7 vendor              8 forceDisableAdaptive 9 forceSecure
-        // Note the polarity of #8: it *disables* adaptive playback, so it must
-        // be true only when the codec does NOT support it. This used to pass
-        // isFeatureSupported(FEATURE_AdaptivePlayback) instead, which claimed
-        // the opposite and switched adaptive playback off on every resurrected
-        // component. A semantic inversion like that compiles perfectly, so the
-        // mapping is documented rather than left implicit.
-        val adaptiveSupported = caps.isFeatureSupported(
-            android.media.MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback
-        )
-        return try {
-            MediaCodecInfo.newInstance(
-                name,                                    // 1 name
-                MimeTypes.VIDEO_H265,                    // 2 mimeType
-                MimeTypes.VIDEO_H265,                    // 3 codecMimeType
-                caps,                                    // 4 capabilities
-                // #5 hardwareAccelerated / #6 softwareOnly. On API < 29 (this
-                // box ships 25) media3 decides by name alone, so use its rule
-                // instead of APIs that do not exist here.
-                lower.startsWith("omx.") && !lower.contains(".sw") && !lower.contains("software"),
-                lower.startsWith("omx.google") || lower.contains("software"),
-                name.startsWith("OMX."),                  // 7 vendor
-                !adaptiveSupported,                       // 8 forceDisableAdaptive
-                false                                     // 9 forceSecure
-            )
-        } catch (t: Throwable) {
-            Logger.w("cannot resurrect codec $name: ${t.message}")
-            null
-        }
-    }
-
     /** Diagnostic dump used in the error line, so a screenshot carries the facts. */
     fun describeAvailable(): String {
-        val names = runCatching {
-            synchronized(lock) { rawComponents.map { it.name } }
-        }.getOrElse { emptyList() }
-        val stock = runCatching {
-            MediaCodecSelector.DEFAULT.getDecoderInfos(MimeTypes.VIDEO_H265, false, false).map { it.name }
-        }.getOrElse { emptyList() }
+        val stock = runCatching { safeDefaultNames() }.getOrElse { emptyList() }
         val working = workingName
         return buildString {
-            append("HEVC组件[系统=")
-            append(names.joinToString(", ").ifEmpty { "无" })
-            append("] 媒体框架=")
+            append("HEVC组件[媒体框架=")
             append(stock.joinToString(", ").ifEmpty { "无" })
+            append("]")
             working?.let { append(" 可用=$it") }
             val broken = synchronized(lock) { brokenNames.joinToString(", ") }
             if (broken.isNotBlank()) append(" 已排除=$broken")
