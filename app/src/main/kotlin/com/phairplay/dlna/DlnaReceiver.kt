@@ -90,6 +90,15 @@ class DlnaReceiver(
      */
     private val onDecoderHint: (String) -> Unit = {},
     /**
+     * Takes the hint back down once a picture actually arrives.
+     *
+     * Without this the hint is a sticky value: the UI keeps it (deliberately,
+     * so the user finds it on the screen they return to), but then a later
+     * rebind replays a hint about a decoder fight that is long over — the user
+     * gets told to close 当贝投屏 while a picture is playing.
+     */
+    private val onDecoderHintCleared: () -> Unit = {},
+    /**
      * Asks the UI to look again for a render surface. Fired when an item is
      * parked because a decoder init failed with no real surface behind it —
      * only the Activity can say when a Surface appears.
@@ -311,6 +320,15 @@ class DlnaReceiver(
         }
         decoderCooldownMs = DECODER_COOLDOWN_MS
         consecutiveCooldowns = 0
+        // A picture is on screen, so any "decoder may be occupied" advice is
+        // now stale. Retract it: the UI holds the hint until told otherwise,
+        // and a hint that outlives the problem is worse than none (the user
+        // goes hunting for an app to close while playback is fine).
+        if (lastDecoderHintMs != 0L) {
+            lastDecoderHintMs = 0L
+            DebugLog.log("DLNA", "画面恢复 → 撤销解码器占用提示")
+            onDecoderHintCleared()
+        }
     }
 
     /**
@@ -324,15 +342,12 @@ class DlnaReceiver(
      * fallback) the actionable case is nearly always "当贝投屏 / IPTV is
      * holding the slot", and the user can act on that even when it is not.
      */
-    private fun maybeHintDecoderOccupied() {
+    private fun maybeHintDecoderOccupied(text: String) {
         val now = System.currentTimeMillis()
         if (now - lastDecoderHintMs < DECODER_HINT_MIN_INTERVAL_MS) return
         lastDecoderHintMs = now
-        val hint =
-            "HEVC解码器初始化失败，可能被其他应用占用（当贝投屏/IPTV 等）。" +
-                "请关闭其他播放类应用后重试，PhairPlay 正在冷却并会自动重试。"
-        DebugLog.log("DLNA", hint)
-        onDecoderHint(hint)
+        DebugLog.log("DLNA", "用户提示: $text")
+        onDecoderHint(text)
     }
 
     /**
@@ -857,17 +872,34 @@ class DlnaReceiver(
                                 pendingStartUri = uri
                                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
                                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
-                                mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
                                 onPlaybackUiNeeded()
-                                // Field evidence: the very same component that
-                                // fails here plays 1920x1080 on the first try after
-                                // a reboot with no other apps open — so on this
-                                // box a real-surface HEVC init failure usually
-                                // means the box's single decoder slot is held by
-                                // another app, not that the codec is dead. Tell
-                                // the user what to do instead of leaving a black
-                                // screen with no explanation.
-                                maybeHintDecoderOccupied()
+                                if (decoderDead) {
+                                    // The component is on the broken list, so
+                                    // cooling down and retrying only builds the
+                                    // next doomed MediaCodec. Say so outright —
+                                    // this is the one case the user has to act
+                                    // on, because nothing will fix itself.
+                                    mainHandler.removeCallbacks(decoderCooldownRetry)
+                                    maybeHintDecoderOccupied(
+                                        "HEVC解码器不可用（${failedCodec ?: "?"}），已停止自动重试。" +
+                                            "请关闭其他正在播放视频的应用（如当贝投屏、IPTV）后重新投屏。"
+                                    )
+                                } else {
+                                    mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
+                                    // Field evidence: the very same component
+                                    // that fails here plays 1920x1080 on the
+                                    // first try after a reboot with no other apps
+                                    // open — so on this box a real-surface HEVC
+                                    // init failure usually means the box's single
+                                    // decoder slot is held by another app, not
+                                    // that the codec is dead. Tell the user what
+                                    // to do instead of leaving a black screen
+                                    // with no explanation.
+                                    maybeHintDecoderOccupied(
+                                        "HEVC解码器初始化失败，可能被其他应用占用（如当贝投屏、IPTV）。" +
+                                            "请关闭其他播放类应用，PhairPlay 正在冷却并会自动重试。"
+                                    )
+                                }
                             } else if (uri != null && retryCount < 2 && !decoderDead &&
                                 !decoderCooldownActive()
                             ) {

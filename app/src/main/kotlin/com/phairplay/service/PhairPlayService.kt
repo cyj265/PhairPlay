@@ -509,6 +509,16 @@ class PhairPlayService : Service() {
                     _dlnaHint.value = hint
                     Logger.w("DLNA decoder hint surfaced to UI: $hint")
                 },
+                // A picture arrived, so the advice is stale: retract it. The
+                // UI keeps whatever it was last handed, and without this a
+                // later rebind replays "close your other player" over a
+                // perfectly good picture.
+                onDecoderHintCleared = {
+                    if (_dlnaHint.value != null) {
+                        _dlnaHint.value = null
+                        Logger.i("DLNA decoder hint retracted after recovery")
+                    }
+                },
                 onStateChanged = { state ->
                     _dlnaState.value = state
                     when (state) {

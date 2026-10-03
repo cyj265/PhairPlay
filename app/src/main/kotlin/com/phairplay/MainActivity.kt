@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.SurfaceView
 import android.view.TextureView
@@ -21,6 +22,7 @@ import androidx.core.content.ContextCompat
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -867,9 +869,42 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             svc.dlnaHint.collectLatest { hint ->
                 if (!hint.isNullOrBlank()) {
-                    android.widget.Toast.makeText(this@MainActivity, hint, android.widget.Toast.LENGTH_LONG).show()
+                    showTvToast(hint)
                 }
             }
+        }
+    }
+
+    /**
+     * A Toast the user can actually read from a sofa.
+     *
+     * WHY hand-drawn: the stock Toast is ~14sp pinned to the bottom edge of a
+     * 1080p screen — invisible from three metres away, and this hint is the
+     * only thing standing between the user and a silent black screen. Drawn
+     * with explicit colours/sizes for the same reason as TvDialogs: no theme
+     * can make the text disappear.
+     *
+     * A custom view is allowed here because this runs from the foreground
+     * Activity; Android 11+ blocks custom toasts posted from the background
+     * only. Kept as an overlay-style Toast rather than a dialog so it never
+     * steals the D-pad from the player.
+     */
+    @Suppress("DEPRECATION") // Toast.setView: still honoured for foreground toasts
+    private fun showTvToast(message: String) {
+        val density = resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val body = TextView(this).apply {
+            text = message
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 20f
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(0xF2101010.toInt())
+        }
+        Toast(this).apply {
+            view = body
+            duration = Toast.LENGTH_LONG
+            setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, (72 * density).toInt())
+            show()
         }
     }
 
