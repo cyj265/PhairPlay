@@ -146,6 +146,39 @@ class DlnaReceiver(
     @Volatile
     private var currentUri: String? = null
 
+    /**
+     * The item the renderer is holding, for callers that must tell a *new* cast
+     * from a sender re-polling the same one (a polling control point re-sends
+     * SetAVTransportURI + Play every 10-30 s with an identical URI).
+     */
+    val currentCastUri: String? get() = currentUri
+
+    /**
+     * Who emptied the player last.
+     *
+     * The field log's hardest case is a bare `播放器状态: IDLE` with no error
+     * and no stop message anywhere near it — the picture just stops and nothing
+     * says why. Every path that stops the player now names itself, and the IDLE
+     * transition prints the name, so "who killed it" is always in the log.
+     */
+    @Volatile
+    private var lastStopReason: String? = null
+
+    /**
+     * True while the renderer is really running something: playing, or
+     * buffering because the user asked it to.
+     *
+     * `ProtocolState.CONNECTED` is not enough — it survives a sender pause and
+     * a dead pipeline, and acting on it is what made the app open straight into
+     * a black player instead of the home screen.
+     */
+    fun isPlaybackLive(): Boolean {
+        val p = player ?: return pendingStartUri != null
+        if (p.isReleased) return false
+        return p.playbackState == Player.STATE_READY ||
+            (p.playbackState == Player.STATE_BUFFERING && p.playWhenReady)
+    }
+
     /** Retry counter for playback errors, reset on new media and on READY. */
     @Volatile
     private var retryCount = 0
@@ -301,6 +334,7 @@ class DlnaReceiver(
         // itself is not a scarce resource, and keeping it attached is what lets
         // the next attempt succeed.
         player?.let { p ->
+            lastStopReason = "硬解冷却: $reason"
             runCatching { p.stop() }
             runCatching { p.clearMediaItems() }
         }
@@ -661,6 +695,19 @@ class DlnaReceiver(
                                         report(ProtocolState.CONNECTED)
                                     }
                                 }
+                                Player.STATE_IDLE -> {
+                                    // A player that had an item and no longer
+                                    // does: the picture is gone, and until now
+                                    // nothing said who took it. `lastStopReason`
+                                    // is null only when ExoPlayer emptied itself
+                                    // (e.g. a fatal internal error) — which is
+                                    // itself the answer.
+                                    DebugLog.log(
+                                        "DLNA",
+                                        "播放器被清空 (IDLE) 原因=${lastStopReason ?: "ExoPlayer 自行清空（未见我方调用）"}"
+                                    )
+                                    lastStopReason = null
+                                }
                                 Player.STATE_ENDED -> {
                                     mainHandler.removeCallbacks(stallWatchdog)
                                     mainHandler.removeCallbacks(firstPictureWatchdog)
@@ -675,7 +722,7 @@ class DlnaReceiver(
                                             "DLNA",
                                             "媒体流自然结束 (STATE_ENDED) → 回到空闲，pos=${p.currentPosition / 1000}s"
                                         )
-                                        clearPlayback()
+                                        clearPlayback("媒体流自然结束 STATE_ENDED")
                                         // Let the control point see STOPPED instead
                                         // of a stuck PLAYING after the media ends.
                                         ManualDlnaHttp.notifyPlaybackEnded()
@@ -1183,6 +1230,7 @@ class DlnaReceiver(
         parkedForUi = null
         mainHandler.removeCallbacks(decoderCooldownRetry)
         mainHandler.removeCallbacks(firstPictureWatchdog)
+        lastStopReason = "接收器释放 releaseResources"
         // Drop the pending "wait for IP" watcher first: it fires once and
         // checks `started`, so leaving it registered can only resurrect a
         // socket after this receiver has been torn down.
@@ -1226,6 +1274,7 @@ class DlnaReceiver(
             // runCatching per step: one failure must not skip the next. Volume
             // first — it stops the sound even if stop()/release() throws.
             runCatching { p.volume = 0f }
+            lastStopReason = "接收器释放 releaseResources"
             runCatching { p.stop() }
             runCatching { p.clearMediaItems() }
             runCatching { p.release() }.onFailure {
@@ -1413,6 +1462,7 @@ class DlnaReceiver(
             p.clearVideoSurface()
             p.clearMediaItems()
             p.stop()
+            lastStopReason = "界面退到后台 pausePlaybackFromUi"
             if (resumeUri != null) {
                 parkedForUi = ParkedMedia(resumeUri, resumePos)
                 DebugLog.log(
@@ -1433,7 +1483,7 @@ class DlnaReceiver(
     @OptIn(UnstableApi::class)
     fun stopPlaybackFromUi() {
         mainHandler.post {
-            clearPlayback()
+            clearPlayback("用户退出界面 stopPlaybackFromUi")
             ManualDlnaHttp.notifyPlaybackEnded()
             report(ProtocolState.ADVERTISING)
         }
@@ -1677,7 +1727,7 @@ class DlnaReceiver(
     override fun stopPlayback() {
         mainHandler.post {
             if (!started) return@post
-            clearPlayback()
+            clearPlayback("发送端 Stop (SOAP)")
             report(ProtocolState.ADVERTISING)
         }
     }
@@ -1790,10 +1840,17 @@ class DlnaReceiver(
         DebugLog.log("DLNA", if (shown.isEmpty()) "投屏无附加请求头（默认浏览器UA）" else "应用投屏请求头: $shown")
     }
 
+    /**
+     * Drops the item and frees the decoder.
+     *
+     * @param reason written into [lastStopReason] so the IDLE transition that
+     *   follows can be attributed. Pass something a human can act on.
+     */
     @OptIn(UnstableApi::class)
-    private fun clearPlayback() {
+    private fun clearPlayback(reason: String) {
         currentUri = null
         pendingSeekMs = -1L
+        lastStopReason = reason
         DlnaMediaMeta.setActive(false)
         player?.let { p ->
             p.stop()

@@ -538,6 +538,19 @@ class PhairPlayService : Service() {
                             // The sender just pushed media. If the UI is not on
                             // screen a Surface is missing and ExoPlayer keeps
                             // decoding audio only — pull the app to the front.
+                            //
+                            // …unless the user already closed this cast. A
+                            // polling control point re-sends SetAVTransportURI
+                            // + Play every 10-30 s with the SAME uri, so
+                            // "CONNECTED" alone cannot tell a fresh cast from
+                            // an echo of one the user dismissed; comparing the
+                            // uri is what distinguishes them.
+                            val uri = dlnaReceiver?.currentCastUri
+                            if (uri != null && uri != lastSeenCastUri) {
+                                lastSeenCastUri = uri
+                                dlnaDismissedByUser = false
+                                Logger.i("New DLNA cast uri → auto-foreground allowed again")
+                            }
                             bringActivityToForeground("DLNA 播放")
                         }
                         ProtocolState.ADVERTISING,
@@ -610,10 +623,37 @@ class PhairPlayService : Service() {
     /**
      * Ends DLNA playback because the user closed the UI. Discovery stays up:
      * only the media stops, and the sender is told STOPPED.
+     *
+     * Also sets [dlnaDismissedByUser]: the sender keeps polling, and without
+     * this the app climbed back into the user's face a few seconds later —
+     * "opened PhairPlay and it went straight into the player, not the home
+     * screen" is that, seen from the outside.
      */
     fun stopDlnaPlayback() {
+        dlnaDismissedByUser = true
         dlnaReceiver?.stopPlaybackFromUi()
     }
+
+    /**
+     * The user asked for the picture back (nav pill, DLNA card). Clears the
+     * dismissal so a following auto-foreground is allowed again.
+     */
+    fun clearDlnaDismissed() {
+        dlnaDismissedByUser = false
+    }
+
+    /**
+     * True while the renderer is genuinely playing (not merely holding an
+     * item). The UI uses this to decide whether opening the app should land on
+     * the picture or on the home screen.
+     */
+    fun isDlnaPlaybackLive(): Boolean = dlnaReceiver?.isPlaybackLive() == true
+
+    /** Last DLNA uri seen, to tell a new cast from a sender poll (see [dlnaDismissedByUser]). */
+    @Volatile private var lastSeenCastUri: String? = null
+
+    /** Set when the user closes the UI; blocks auto-foreground for the same cast. */
+    @Volatile private var dlnaDismissedByUser = false
 
     // ─── Auto foreground (receiver → UI) ────────────────────────────────────
 
@@ -667,6 +707,14 @@ class PhairPlayService : Service() {
     fun bringActivityToForeground(reason: String) {
         if (activityResumed) {
             Logger.d("Auto-foreground skipped — UI already visible ($reason)")
+            return
+        }
+        // A cast the user already closed does not get to come back on its own.
+        // "DLNA 播放" is cleared by a *new* uri (see the CONNECTED handler); a
+        // retry of the same cast never is, so a dismissed session stays closed
+        // until the sender actually pushes something else.
+        if (dlnaDismissedByUser && reason.startsWith("DLNA")) {
+            Logger.i("Auto-foreground suppressed — user closed this cast ($reason)")
             return
         }
         val now = System.currentTimeMillis()
