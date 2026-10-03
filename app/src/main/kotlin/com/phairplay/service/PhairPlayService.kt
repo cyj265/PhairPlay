@@ -89,6 +89,17 @@ class PhairPlayService : Service() {
     private val _dlnaError = MutableStateFlow<String?>(null)
     val dlnaError: StateFlow<String?> = _dlnaError.asStateFlow()
 
+    /**
+     * Last user-facing DLNA hint (null when none), e.g. "HEVC 解码器可能被
+     * 其他应用占用". Deliberately separate from [dlnaError]: a decoder
+     * occupied by another app is not an app fault that should flash the card
+     * red — the receiver is cooling down and retrying on its own, and the
+     * hint exists so a black screen comes with "close 当贝投屏 / IPTV" instead
+     * of silence.
+     */
+    private val _dlnaHint = MutableStateFlow<String?>(null)
+    val dlnaHint: StateFlow<String?> = _dlnaHint.asStateFlow()
+
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
@@ -494,6 +505,10 @@ class PhairPlayService : Service() {
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
                 },
+                onDecoderHint = { hint ->
+                    _dlnaHint.value = hint
+                    Logger.w("DLNA decoder hint surfaced to UI: $hint")
+                },
                 onStateChanged = { state ->
                     _dlnaState.value = state
                     when (state) {
@@ -682,6 +697,7 @@ class PhairPlayService : Service() {
         _castState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED
         _dlnaError.value = null
+        _dlnaHint.value = null
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

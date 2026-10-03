@@ -859,6 +859,18 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        // A decoder hint (e.g. "HEVC 解码器可能被其他应用占用") is the one
+        // message worth interrupting a black screen for: the user can act on
+        // it (close 当贝投屏 / IPTV) while the receiver cools down and
+        // retries on its own. Toast, not the card — the user is looking at
+        // the playback layer, not the home screen, when this fires.
+        lifecycleScope.launch {
+            svc.dlnaHint.collectLatest { hint ->
+                if (!hint.isNullOrBlank()) {
+                    android.widget.Toast.makeText(this@MainActivity, hint, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     private fun updateOverlay() {

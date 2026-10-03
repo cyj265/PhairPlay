@@ -81,6 +81,15 @@ class DlnaReceiver(
     private val onStateChanged: (ProtocolState) -> Unit,
     private val onError: (String) -> Unit = {},
     /**
+     * User-facing hint, fired (throttled) when a real-surface decoder init
+     * failure suggests the box's single HEVC slot is held by another app.
+     *
+     * Distinct from [onError]: this one is not an app fault to flash red — it
+     * is actionable advice ("close 当贝投屏 / IPTV"), and the receiver keeps
+     * cooling down and retrying on its own either way.
+     */
+    private val onDecoderHint: (String) -> Unit = {},
+    /**
      * Asks the UI to look again for a render surface. Fired when an item is
      * parked because a decoder init failed with no real surface behind it —
      * only the Activity can say when a Surface appears.
@@ -139,6 +148,10 @@ class DlnaReceiver(
     /** Throttle for "this item's decoder is dead" notices (see [startPlayback]). */
     @Volatile
     private var lastHevcDeadNoticeMs = 0L
+
+    /** Throttle for the user-facing "decoder may be occupied" hint (see [onDecoderHint]). */
+    @Volatile
+    private var lastDecoderHintMs = 0L
 
     /**
      * When a real-surface decoder init failed, and until when.
@@ -298,6 +311,28 @@ class DlnaReceiver(
         }
         decoderCooldownMs = DECODER_COOLDOWN_MS
         consecutiveCooldowns = 0
+    }
+
+    /**
+     * One user-facing notice that the box's HEVC decoder may be held by
+     * another app, throttled to [DECODER_HINT_MIN_INTERVAL_MS] so the sender's
+     * 2-3 s poll cannot spam it into a Toast storm.
+     *
+     * Why the cautionary "可能": the app cannot ask the system who owns the
+     * decoder slot, and a failed `MediaCodec.configure()` is also what a truly
+     * dead component looks like — but on this box (single HEVC component, no
+     * fallback) the actionable case is nearly always "当贝投屏 / IPTV is
+     * holding the slot", and the user can act on that even when it is not.
+     */
+    private fun maybeHintDecoderOccupied() {
+        val now = System.currentTimeMillis()
+        if (now - lastDecoderHintMs < DECODER_HINT_MIN_INTERVAL_MS) return
+        lastDecoderHintMs = now
+        val hint =
+            "HEVC解码器初始化失败，可能被其他应用占用（当贝投屏/IPTV 等）。" +
+                "请关闭其他播放类应用后重试，PhairPlay 正在冷却并会自动重试。"
+        DebugLog.log("DLNA", hint)
+        onDecoderHint(hint)
     }
 
     /**
@@ -824,6 +859,15 @@ class DlnaReceiver(
                                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                                 mainHandler.postDelayed(decoderCooldownRetry, DECODER_COOLDOWN_MS.toLong())
                                 onPlaybackUiNeeded()
+                                // Field evidence: the very same component that
+                                // fails here plays 1920x1080 on the first try after
+                                // a reboot with no other apps open — so on this
+                                // box a real-surface HEVC init failure usually
+                                // means the box's single decoder slot is held by
+                                // another app, not that the codec is dead. Tell
+                                // the user what to do instead of leaving a black
+                                // screen with no explanation.
+                                maybeHintDecoderOccupied()
                             } else if (uri != null && retryCount < 2 && !decoderDead &&
                                 !decoderCooldownActive()
                             ) {
@@ -1854,6 +1898,16 @@ class DlnaReceiver(
          * is picked up once the slot is free again.
          */
         private const val COOLDOWN_RECHECK_MS = 1_000
+
+        /**
+         * Minimum gap between user-facing "decoder may be occupied" hints.
+         *
+         * The sender re-polls every 2-3 s and every poll can end in the same
+         * real-surface decoder failure — without this throttle the hint would
+         * fire a Toast every few seconds until the cooldown grew long enough to
+         * stop the retries.
+         */
+        private const val DECODER_HINT_MIN_INTERVAL_MS = 30_000
 
         // ── Buffering ──────────────────────────────────────────────────────
         // A live HLS window here holds only a few segments, and ExoPlayer's
