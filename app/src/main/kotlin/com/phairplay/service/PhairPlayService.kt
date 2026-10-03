@@ -25,6 +25,7 @@ import com.phairplay.MainActivity
 import com.phairplay.R
 import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.cast.CastReceiver
+import com.phairplay.dlna.DecoderSlotGuard
 import com.phairplay.dlna.DlnaReceiver
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
@@ -35,8 +36,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -99,6 +103,42 @@ class PhairPlayService : Service() {
      */
     private val _dlnaHint = MutableStateFlow<String?>(null)
     val dlnaHint: StateFlow<String?> = _dlnaHint.asStateFlow()
+
+    /**
+     * Bumped whenever the DLNA player's own state moves (IDLE/BUFFERING/READY)
+     * or a first frame is rendered.
+     *
+     * The UI needs this because `ProtocolState.CONNECTED` is emitted once and
+     * then never again, while "should we be showing a picture?" keeps changing
+     * after it. See [com.phairplay.MainActivity] for the bug this fixes.
+     */
+    private val _dlnaPlaybackTick = MutableStateFlow(0)
+    val dlnaPlaybackTick: StateFlow<Int> = _dlnaPlaybackTick.asStateFlow()
+
+    /**
+     * One-shot "a new cast arrived" signal — emitted only when the uri really
+     * changed, so a control point polling SetAVTransportURI every 10-30 s with
+     * the same uri cannot re-raise the player the user dismissed.
+     *
+     * NO replay by design: a replayed event would re-open the closed cast
+     * whenever the Activity is recreated. Late subscribers are covered by
+     * [dlnaPlaybackTick] plus "an item is loaded".
+     */
+    private val _dlnaCastArrived = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val dlnaCastArrived: SharedFlow<Unit> = _dlnaCastArrived.asSharedFlow()
+
+    /** Best guess at which app holds the HEVC slot (null when nothing obvious runs). */
+    private val _dlnaSlotBlocker = MutableStateFlow<DecoderSlotGuard.Suspect?>(null)
+    val dlnaSlotBlocker: StateFlow<DecoderSlotGuard.Suspect?> = _dlnaSlotBlocker.asStateFlow()
+
+    /**
+     * Whether `su` works on this box — null until probed.
+     *
+     * A flow, not a call: probing execs a process and can take seconds on a box
+     * without root, which is far too long to do while building a dialog.
+     */
+    private val _rootAvailable = MutableStateFlow<Boolean?>(null)
+    val rootAvailable: StateFlow<Boolean?> = _rootAvailable.asStateFlow()
 
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
@@ -513,7 +553,18 @@ class PhairPlayService : Service() {
                 // UI keeps whatever it was last handed, and without this a
                 // later rebind replays "close your other player" over a
                 // perfectly good picture.
+                // Every player state change must be able to re-open the
+                // question "should the picture be on screen?" — see
+                // [_dlnaPlaybackTick].
+                onPlaybackActivityChanged = { _dlnaPlaybackTick.value++ },
+                // A probe says the slot is held: go and find out by whom,
+                // off the main thread (it walks the process list).
+                onSlotBlocked = { detail ->
+                    Logger.w("HEVC slot probe refused: $detail")
+                    refreshDecoderBlocker()
+                },
                 onDecoderHintCleared = {
+                    _dlnaSlotBlocker.value = null
                     if (_dlnaHint.value != null) {
                         _dlnaHint.value = null
                         Logger.i("DLNA decoder hint retracted after recovery")
@@ -550,12 +601,21 @@ class PhairPlayService : Service() {
                                 lastSeenCastUri = uri
                                 dlnaDismissedByUser = false
                                 Logger.i("New DLNA cast uri → auto-foreground allowed again")
+                                // A genuinely new cast: tell the UI to show it.
+                                // One-shot, no replay — see [_dlnaCastArrived].
+                                _dlnaCastArrived.tryEmit(Unit)
                             }
                             bringActivityToForeground("DLNA 播放")
                         }
                         ProtocolState.ADVERTISING,
                         ProtocolState.DISABLED,
                         ProtocolState.ERROR       -> {
+                            // The cast ended, so re-casting the same uri must
+                            // count as a new one. Otherwise "stop, then cast
+                            // the same channel again" is treated as a poll echo
+                            // and never opens the player.
+                            lastSeenCastUri = null
+                            _dlnaSlotBlocker.value = null
                             _activeConnection.value = null
                             updateNotification(isRunning = state != ProtocolState.DISABLED &&
                                                            state != ProtocolState.ERROR)
@@ -648,6 +708,71 @@ class PhairPlayService : Service() {
      * the picture or on the home screen.
      */
     fun isDlnaPlaybackLive(): Boolean = dlnaReceiver?.isPlaybackLive() == true
+
+    // ─── Hardware decoder slot ──────────────────────────────────────────────
+
+    /**
+     * Works out which running app is the likely holder of the HEVC slot and
+     * rewrites the hint to name it.
+     *
+     * The owner cannot be queried — no API exists, and `dumpsys media.codec`
+     * needs a signature permission. So this is an inference from "which
+     * player-ish app is actually running right now", which on a box with one
+     * or two media apps is right often enough to be worth saying out loud.
+     */
+    fun refreshDecoderBlocker() {
+        serviceScope.launch {
+            _rootAvailable.value = DecoderSlotGuard.hasRoot()
+            val suspects = DecoderSlotGuard.findSuspects(this@PhairPlayService)
+            val top = suspects.firstOrNull()
+            _dlnaSlotBlocker.value = top
+            com.phairplay.util.DebugLog.log(
+                "DECODER",
+                top?.let { "疑似占用者: ${it.label} (${it.packageName}, 前台=${it.foreground})" }
+                    ?: "未发现运行中的播放类应用（可能是槽位泄漏，没有 App 可停）"
+            )
+            _dlnaHint.value =
+                top?.let {
+                    "HEVC 硬解槽疑似被「${it.label}」占用。停止该应用后会自动重试播放。"
+                } ?: "HEVC 硬解槽被占用，但没发现有播放类应用在运行" +
+                    "（可能是上次崩溃残留的槽位泄漏）。"
+        }
+    }
+
+    /**
+     * Tries to free the slot without the user, and reports whether it worked.
+     *
+     * Order: stop the named app (root only — plain apps cannot force-stop),
+     * otherwise nudge it out of the background, otherwise restart the media
+     * service, which is the only thing that clears a slot nobody owns.
+     *
+     * @return true when the slot was actually released and playback can be
+     * retried immediately; false when the user has to do it by hand.
+     */
+    fun releaseDecoderSlot(allowRoot: Boolean): Boolean {
+        val blocker = _dlnaSlotBlocker.value
+        if (blocker != null) {
+            DecoderSlotGuard.killBackground(this@PhairPlayService, blocker.packageName)
+            if (allowRoot && DecoderSlotGuard.forceStopWithRoot(blocker.packageName)) {
+                return true
+            }
+        }
+        // Nothing to blame: a leaked slot. Only a service restart clears it,
+        // and it interrupts whatever else is decoding — including us, so never
+        // do it while our own picture is up.
+        if (allowRoot && !isDlnaPlaybackLive()) {
+            if (DecoderSlotGuard.restartMediaService()) {
+                Thread.sleep(1500) // OMX instances are released asynchronously.
+                return true
+            }
+        }
+        return false
+    }
+
+    /** Skips the remaining decoder cooldown and retries the parked cast. */
+    fun retryDlnaAfterSlotRelease() {
+        dlnaReceiver?.retryAfterSlotRelease()
+    }
 
     /** Last DLNA uri seen, to tell a new cast from a sender poll (see [dlnaDismissedByUser]). */
     @Volatile private var lastSeenCastUri: String? = null
@@ -756,6 +881,7 @@ class PhairPlayService : Service() {
         _dlnaState.value = ProtocolState.DISABLED
         _dlnaError.value = null
         _dlnaHint.value = null
+        _dlnaSlotBlocker.value = null
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

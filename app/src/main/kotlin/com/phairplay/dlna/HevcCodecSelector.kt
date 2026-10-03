@@ -106,6 +106,21 @@ class HevcCodecSelector(private val appContext: Context) : MediaCodecSelector {
     fun isHevcBroken(): Boolean = allBroken && workingName == null
 
     /**
+     * Which component to use when testing whether the hardware slot is free.
+     *
+     * The slot is a single shared resource on this box, so probing "some HEVC
+     * decoder" answers the question just as well as probing the exact one
+     * playback will pick — and it must be the known-good one when there is a
+     * known-good one, because a broken candidate would report "occupied" for
+     * a reason that has nothing to do with another app.
+     */
+    fun preferredName(): String? = synchronized(lock) {
+        workingName
+            ?: rawComponents.map { it.name }.firstOrNull { it !in brokenNames }
+            ?: safeDefaultNames().firstOrNull { it !in brokenNames }
+    }
+
+    /**
      * True when [name] is the only HEVC component this box has left.
      *
      * WHY this matters: blacklisting is a *permanent* verdict, and on a box
