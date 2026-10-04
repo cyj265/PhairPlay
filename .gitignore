@@ -100,6 +100,8 @@ device-test-logs/
 /ntest_timeline.html
 /forks_analysis/
 /forks_html/
+/_probe_*.txt
+/box_pull_log.sh
 
 # Profiling
 *.hprof

@@ -157,8 +157,32 @@ class DlnaReceiver(
      * left the box sounding while the user sat on the home screen they
      * deliberately chose.
      */
-    private val isCastDismissed: (String?) -> Boolean = { false }
+    private val isCastDismissed: (String?) -> Boolean = { false },
+    /**
+     * v98: a Play instruction reached the renderer.
+     *
+     * The sender asking for playback is the one piece of evidence we never
+     * have to guess at, so it outranks any earlier "user closed this".
+     * Phone apps re-push the *same* SetAVTransportURI + Play every 10-30 s
+     * while they poll whether playback really started; treating those
+     * re-pushes as a resurrection of something the user dismissed shut the
+     * channel for the whole DISMISS window (field log 13:04:31 -> 13:06:13
+     * of a douyin cast that only started once the sender changed uri).
+     */
+    private val onCastPlayIntent: (String) -> Unit = {}
 ) : DlnaPlayerControl {
+
+    /**
+     * v98: set while a cast the user closed is being (re)started.
+     *
+     * It gates the *presentation* only — the receiver keeps playing, it just
+     * must not put the playback layer in front of the user. Keeping the two
+     * apart is what the old single dismissal flag got wrong: it stopped the
+     * pipeline too, so a user who pressed Back got a box that sounded while
+     * the picture stayed behind the home screen, with no way and no reason
+     * to come back.
+     */
+    private var uiGateBlocked = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -1318,8 +1342,9 @@ class DlnaReceiver(
      * first bytes of the body are enough to tell those cases apart.
      */
     private fun probeSourceAsync(uri: String) {
-        Thread {
+            Thread {
             var conn: java.net.HttpURLConnection? = null
+            val probeStartedAt = System.currentTimeMillis()
             try {
                 conn = java.net.URL(uri).openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
@@ -1340,14 +1365,33 @@ class DlnaReceiver(
                 } catch (e: Exception) {
                     "(读取响应体失败: ${e.message})"
                 }
-                DebugLog.log("DLNA", "源探测: HTTP $code, Content-Type=$type")
+                // v98 C: the first-byte latency is what separates "the source
+                // is slow" from "the player is not playing" in the log, without
+                // having to reach a laptop for a curled copy of the stream.
+                val probeMs = System.currentTimeMillis() - probeStartedAt
+                DebugLog.log("DLNA", "源探测: HTTP $code, Content-Type=$type, 首字节 ${probeMs}ms")
                 DebugLog.log("DLNA", "源前200字节: $head")
                 // v97: remember that the far end is answering, so the
                 // "READY but 0x0" watchdog can tell a slow source from a dead
                 // decoder instead of cooling down on every live channel.
                 if (code in 200..299) {
-                    lastProbeOkMs = System.currentTimeMillis()
-                    lastProbeCode = code
+                    if (looksLikeMediaPayload(type, head)) {
+                        lastProbeOkMs = System.currentTimeMillis()
+                        lastProbeCode = code
+                    } else {
+                        // v98 F4 — a 200 only means the far end is alive, not
+                        // that it is the media. The app's own relay answers
+                        // with its index page (text/plain, an ASCII banner) for
+                        // anything it cannot resolve. Believing that kept the
+                        // watchdog retrying a source that was never the source:
+                        // the point-by-point cast took 21 s to its first frame
+                        // against 1 s for a plain numeric-IP stream.
+                        lastProbeOkMs = 0L
+                        DebugLog.log(
+                            "DLNA",
+                            "源探测: HTTP 200 但不是媒体载荷（Content-Type=$type）→ 判为假成功，不计入源健康"
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 DebugLog.log("DLNA", "源探测失败: ${e.javaClass.simpleName} ${e.message}")
@@ -1355,6 +1399,35 @@ class DlnaReceiver(
                 conn?.disconnect()
             }
         }.apply { isDaemon = true; name = "dlna-source-probe" }.start()
+    }
+
+    /**
+     * v98 F4 — is the far end actually serving media, or just answering?
+     *
+     * A 200 with a text/plain body is the app's own relay telling us it could
+     * not resolve anything and is showing its index page instead. The field log
+     * (13:07:58) caught exactly that: `HTTP 200, Content-Type=text/plain`
+     * whose first bytes were an ASCII banner, while the very same cast took
+     * 21 s to its first frame. [probeSourceAsync] now refuses to call that
+     * "the source is healthy", so the READY-but-0x0 watchdog stops retrying
+     * against a source that was never the source.
+     */
+    private fun looksLikeMediaPayload(contentType: String, firstBytes: String): Boolean {
+        val type = contentType.lowercase()
+        // A textual answer is only acceptable when it really is a playlist.
+        if (type.contains("text/plain") || type.contains("text/html")) {
+            return firstBytes.trimStart().startsWith("#EXTM3U")
+        }
+        return type.isBlank() ||
+            type.contains("mpegurl") ||
+            type.contains("x-mpegurl") ||
+            type.contains("video/") ||
+            type.contains("audio/") ||
+            type.contains("application/octet-stream") ||
+            type.contains("flv") ||
+            type.contains("mp4") ||
+            type.contains("mpeg") ||
+            type.contains("matroska")
     }
 
     // ───────────────────────── MediaItem construction ─────────────────────────
@@ -1779,22 +1852,37 @@ class DlnaReceiver(
 
             val p = player ?: return@post
 
-            // The user closed this one. Park nothing, wait for nothing, start
-            // nothing: an item that is accepted here plays on in the background
-            // while the home screen stays up, and that is precisely the
-            // "拉起来了却只有声音" state the dismissal exists to prevent. A
-            // genuinely new uri (another episode, another channel) is not
-            // dismissed and walks straight past this gate.
-            if (isCastDismissed(uri)) {
+            // v98 F2 — a Play instruction is the sender plainly asking for
+            // playback, so it outranks whatever we remembered about this uri.
+            // Sender apps re-push the very same SetAVTransportURI + Play every
+            // 10-30 s while they poll whether playback really started; the old
+            // gate treated those re-pushes as a resurrection of a cast the
+            // user had closed, and the channel stayed shut for the whole
+            // DISMISS window (field log 13:04:31 -> 13:06:13 of a douyin cast
+            // that only started once the sender changed uri).
+            onCastPlayIntent(uri)
+
+            // v98 F1 — a dismissal closes the *foreground* path only. The
+            // pipeline keeps running and the audio keeps going, which is what
+            // turns "you closed it" into a one-tap recovery instead of a dead
+            // channel. Stopping playback as well (what this gate used to do)
+            // is what produced the only-sounds-without-picture report.
+            uiGateBlocked = isCastDismissed(uri)
+            if (uiGateBlocked) {
                 DebugLog.log(
                     "DLNA",
-                    "该投屏已被用户关闭 → 不暂存、不起播（等发送端推新 uri 或超时后自动恢复）"
+                    "该投屏已被用户关闭 → 本次不把播放层摆到前台（播放照常进行，随时可回看）: ${uri.take(64)}…"
                 )
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
-                mainHandler.removeCallbacks(decoderCooldownRetry)
-                pendingStartUri = null
                 report(ProtocolState.ADVERTISING)
+            }
+
+            // Something is already queued behind a missing render surface: the
+            // sender is polling the very item we could not start yet, so stay
+            // armed instead of replacing the pending attempt.
+            if (pendingStartUri == uri && !surfaceReady) {
+                report(ProtocolState.CONNECTED)
                 return@post
             }
 
@@ -1847,20 +1935,30 @@ class DlnaReceiver(
             if (!uiForeground && !realSurfacePresent) {
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
-                mainHandler.postDelayed(
-                    foregroundTimeoutRunnable, FOREGROUND_WAIT_MS.toLong()
-                )
-                DebugLog.log(
-                    "DLNA",
-                    "界面不在前台 → 先拉起播放器，确认前台后再起播（${FOREGROUND_WAIT_MS / 1000}s 兜底仅音频）"
-                )
-                // Ask for the layer now instead of letting the timeout be the
-                // thing that finally reveals it. Field log: the cast sat on the
-                // home screen for the full 10 s and then started on the very
-                // same frame the fallback fired — nothing was actually slow but
-                // the request to show the player.
-                onSurfaceProbeNeeded()
-                onPlaybackUiNeeded()
+                if (!uiGateBlocked) {
+                    mainHandler.postDelayed(
+                        foregroundTimeoutRunnable, FOREGROUND_WAIT_MS.toLong()
+                    )
+                    DebugLog.log(
+                        "DLNA",
+                        "界面不在前台 → 先拉起播放器，确认前台后再起播（${FOREGROUND_WAIT_MS / 1000}s 兜底仅音频）"
+                    )
+                    // Ask for the layer now instead of letting the timeout be the
+                    // thing that finally reveals it. Field log: the cast sat on the
+                    // home screen for the full 10 s and then started on the very
+                    // same frame the fallback fired — nothing was actually slow but
+                    // the request to show the player.
+                    onSurfaceProbeNeeded()
+                    onPlaybackUiNeeded()
+                } else {
+                    // The user closed this cast: wait for the foreground to come
+                    // back on its own (the Activity's own resume path) instead of
+                    // dragging the player over the home screen.
+                    DebugLog.log(
+                        "DLNA",
+                        "该投屏已被用户关闭 → 等前台自然恢复，不主动拉起播放器"
+                    )
+                }
                 report(ProtocolState.CONNECTED)
                 return@post
             }
@@ -1871,19 +1969,37 @@ class DlnaReceiver(
             if (!surfaceReady) {
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
-                mainHandler.postDelayed(surfaceTimeoutRunnable, SURFACE_WAIT_MS.toLong())
-                DebugLog.log(
-                    "DLNA",
-                    "播放层尚未就绪 → 暂缓起播（${SURFACE_WAIT_MS / 1000}s 内无界面则以仅音频起播）"
-                )
-                // Same reason as the foreground branch above: the layer is what
-                // makes the surface real, so request it immediately. Waiting for
-                // the fallback timer is what produced the 3 s "nothing happens"
-                // gap on a cast that started while the app was already open.
-                onSurfaceProbeNeeded()
-                onPlaybackUiNeeded()
+                if (!uiGateBlocked) {
+                    mainHandler.postDelayed(
+                        surfaceTimeoutRunnable, SURFACE_WAIT_MS.toLong()
+                    )
+                    DebugLog.log(
+                        "DLNA",
+                        "播放层尚未就绪 → 暂缓起播（${SURFACE_WAIT_MS / 1000}s 内无界面则以仅音频起播）"
+                    )
+                    // Same reason as the foreground branch above: the layer is what
+                    // makes the surface real, so request it immediately. Waiting for
+                    // the fallback timer is what produced the 3 s "nothing happens"
+                    // gap on a cast that started while the app was already open.
+                    onSurfaceProbeNeeded()
+                    onPlaybackUiNeeded()
+                }
                 report(ProtocolState.CONNECTED)
                 return@post
+            }
+
+            // v98 A — a real render surface is up, so the only thing missing is
+            // the intent to play. An earlier pause here (the old "only audio"
+            // fallbacks below, or a surface the Activity lost while the user sat
+            // in another app) used to leave playWhenReady=false permanently: the
+            // data kept flowing but nothing rendered, which is the
+            // black-screen-with-sound report. Surface present => play, plainly.
+            if (!p.playWhenReady) {
+                DebugLog.log(
+                    "DLNA",
+                    "渲染面已就绪 → 无条件恢复播放 playWhenReady=true"
+                )
+                p.play()
             }
 
             // Past the surface gate, so `surfaceReady` can only have been set by

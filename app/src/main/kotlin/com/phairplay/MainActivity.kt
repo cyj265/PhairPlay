@@ -130,7 +130,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun hasCastToPaint(): Boolean {
         val svc = service ?: return false
-        return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive() || svc.hasPendingCast()
+        // v98 F3: only a cast that is really producing something may put the
+        // playback layer over the home screen. A merely pending item (queued,
+        // waiting for a surface) used to qualify, and that is the black
+        // rectangle over the home screen with sound coming out of it: the
+        // picture was never there but the layer claimed to be showing one.
+        // hasDlnaMedia() stays as the fallback so a paused cast keeps its
+        // layer and the "back to playback" pill keeps working.
+        return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive()
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -476,7 +483,8 @@ class MainActivity : AppCompatActivity() {
             // itself keeps running and stays discoverable). The Back-key path
             // already called stopDlnaPlayback(); this covers every other way
             // the Activity can finish.
-            service?.stopDlnaPlayback()
+            // v98: real user action — the only kind that may record a dismissal.
+            service?.stopDlnaPlayback(true)
         } else {
             // Pause DLNA playback before the Surface is destroyed so the
             // MediaCodec renderer never writes into a dead Surface (avoids
@@ -1561,7 +1569,8 @@ class MainActivity : AppCompatActivity() {
                     // having asked for the home screen, they must not be dragged
                     // back by the sender's next poll.
                     autoOpenUsedForCast = true
-                    service?.stopDlnaPlayback()
+                    // v98: real user action — the only kind that may record a dismissal.
+                    service?.stopDlnaPlayback(true)
                     val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                     target.requestFocus()
                     return true
@@ -1576,7 +1585,8 @@ class MainActivity : AppCompatActivity() {
                 // user rejecting this cast, and writing that down for two
                 // minutes is what made the next cast of the same channel silent.
                 if (uiWindowFocused) {
-                    service?.stopDlnaPlayback()
+                    // v98: real user action — the only kind that may record a dismissal.
+                    service?.stopDlnaPlayback(true)
                 } else {
                     com.phairplay.util.DebugLog.log(
                         "UI", "Back：窗口无焦点（黑屏）→ 不判定为用户关闭投屏"

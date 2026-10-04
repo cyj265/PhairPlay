@@ -533,6 +533,12 @@ class PhairPlayService : Service() {
                     bringActivityToForeground("DLNA 重试")
                 },
                 isCastDismissed = { uri -> dismissalStillInsideWindow(uri) },
+                // v98 F2: a Play instruction is the sender plainly asking to play,
+                // which outranks whatever we remembered about this uri. Without
+                // this the receiver's gate and this one disagreed: the receiver
+                // had already let the item play while the service still held the
+                // dismissal, and the two halves had to agree on one answer.
+                onCastPlayIntent = { clearDlnaDismissed() },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
@@ -768,20 +774,23 @@ class PhairPlayService : Service() {
      * uri the user never dismissed blocks that channel for the next two
      * minutes.
      */
-    fun stopDlnaPlayback() {
+    /**
+     * v98: [fromUserGesture] separates the two things that used to be one.
+     *
+     * Only a stop the user asked for records a dismissal, and a dismissal now
+     * only keeps the playback layer off the screen — it no longer stops the
+     * pipeline. Anything automatic (the Activity finishing on its own, a cast
+     * that ended by itself, any future path) passes false and writes nothing,
+     * so the next cast of that channel never inherits a gate it did not earn.
+     */
+    fun stopDlnaPlayback(fromUserGesture: Boolean = false) {
         val onScreen = dlnaReceiver?.currentCastUri
-        // Only a dismissal recorded in front of the user's eyes counts as "they
-        // closed this cast". Pressing Back while the window is a black
-        // rectangle is the user leaving an app they never saw — and pinning
-        // the same uri shut for the next two minutes then made the very next
-        // cast of that channel silent (the 00:31 report all over again, only
-        // with a timestamp on it).
-        if (onScreen != null) {
+        if (fromUserGesture && onScreen != null) {
             dismissedCastUri = onScreen
             dismissedAtMs = System.currentTimeMillis()
             com.phairplay.util.DebugLog.log(
                 "DLNA",
-                "用户退出播放层 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动拉前台: ${onScreen.take(64)}…"
+                "用户退出播放层 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动摆到前台（播放照常进行）: ${onScreen.take(64)}…"
             )
         }
         dlnaReceiver?.stopPlaybackFromUi()
@@ -1249,7 +1258,12 @@ class PhairPlayService : Service() {
          * [dismissedCastUri]. The sender polls every 10–30 s, so this window
          * covers the echo or two right after Back and no more.
          */
-        const val DISMISS_TTL_MS = 2 * 60_000L
+        // v98: 20 s instead of 120 s. Only the second line of defence now — the
+        // primary fix is that a Play instruction clears the dismissal outright
+        // and the dismissal itself never stops playback, so this window only
+        // covers the rare case where the sender keeps replaying without ever
+        // asking again.
+        const val DISMISS_TTL_MS = 20 * 1000L
 
         /**
          * A launch the system refused is usually a race, so it is worth one
