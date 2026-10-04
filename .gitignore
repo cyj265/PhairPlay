@@ -27,14 +27,13 @@ out/
 *.keystore
 keystore.properties
 release.properties
-# Exception: PhairPlay unified signing keystore (personal sideloaded app,
-# committed on purpose so local + CI builds all share one signature).
-!app/phairplay-signing.jks
 release.env
 .release.env
 
-# Local configuration files
-local.defaults.properties
+# Local configuration files. local.properties (real keystore passwords) stays
+# ignored; the committed template below is the only properties file tracked.
+local.properties
+!local.defaults.properties
 
 # Generated files
 app/src/main/assets/
@@ -71,6 +70,32 @@ $RECYCLE.BIN/
 test-results/
 lint-results/
 device-test-logs/
+
+# One-off device forensics: adb/dmesg captures, upstream-fork clones and the
+# throwaway scripts that produced them. Regenerable, so keep them out of git.
+/dmesg.txt
+/kernel_log.txt
+/ancestor.txt
+/ancestor2.txt
+/archiver.txt
+/auth_check.txt
+/diag1.txt
+/diff_v97.txt
+/fetch_up.txt
+/forks_p1.txt
+/heads.txt
+/hwprobe*.sh
+/box_getprop.txt
+/watch_net.sh
+/ls_test.txt
+/rate.txt
+/v82diff.txt
+/v94diff.txt
+/watch_debug.ps1
+/fork_analysis.html
+/ntest_timeline.html
+/forks_analysis/
+/forks_html/
 
 # Profiling
 *.hprof

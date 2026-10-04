@@ -1,3 +1,5 @@
+import java.util.Properties
+
 // App module build configuration for PhairPlay.
 //
 // Two product flavors are defined from the start:
@@ -18,6 +20,41 @@ val castAppId: String =
     (providers.gradleProperty("phairplay.castAppId").orNull
         ?: providers.environmentVariable("PHAIRPLAY_CAST_APP_ID").orNull
         ?: "").trim()
+
+// Keystore settings: environment first, then the git-ignored local.properties.
+// This is the only place the signing key can come from — the values are never
+// written into this file, and app/phairplay-signing.jks is not tracked.
+// Read eagerly, not as a `by lazy` delegate: delegated top-level properties do
+// not resolve in a Gradle .kts script, and the keystore is only touched here.
+val localKeystoreProperties: Map<String, String> = run {
+    val props = Properties()
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { props.load(it) }
+    }
+    props.entries.associate { it.key.toString() to it.value.toString() }
+}
+
+fun signingSetting(name: String): String? {
+    System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    return localKeystoreProperties[name]?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+/** False when this machine has no keystore: debug/release then fall back to the stock debug key. */
+val hasPhairplayKeystore: Boolean = signingSetting("KEYSTORE_PASSWORD") != null
+
+// Debug and release must always select the SAME config between them, otherwise a
+// release APK could not cover-install over a debug one.
+val signingConfigName = if (hasPhairplayKeystore) "phairplay" else "debug"
+
+if (!hasPhairplayKeystore) {
+    logger.warn(
+        "PhairPlay: no keystore configured (KEYSTORE_PASSWORD unset and absent from " +
+            "local.properties). Falling back to the stock debug signing config, so APKs " +
+            "built here will NOT over-install an existing PhairPlay build. Copy " +
+            "local.defaults.properties to local.properties and fill in the keystore."
+    )
+}
 
 android {
     namespace = "com.phairplay"
@@ -68,23 +105,32 @@ android {
         }
     }
 
-    // Unified signing: ONE committed keystore signs ALL builds (debug + release),
-    // on every machine and in CI, so any APK can cover-install over any other.
-    // Personal sideloaded app — keystore + password are intentionally in-repo.
-    // Env vars (KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD) may override.
+    // Unified signing: every APK this project produces shares one signature, so
+    // any APK can cover-install over any other on the box.
+    //
+    // The keystore lives outside version control on purpose. It is read from an
+    // environment variable first, then from the git-ignored local.properties
+    // (see local.defaults.properties for the full list of keys). Nothing is
+    // hard-coded here: a published password lets anyone re-sign the same
+    // package name and cover-install over an installed copy of your app.
+    //
+    // On a machine without those settings both debug and release fall back to
+    // the stock debug signing config, so the build still runs (and CI stays
+    // green) — it just produces a different, non-upgradeable signature. The
+    // configuration phase prints a warning when that happens.
     signingConfigs {
         create("phairplay") {
-            storeFile = file("phairplay-signing.jks")
-            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "phairplay-sign"
-            keyAlias = System.getenv("KEY_ALIAS") ?: "phairplay"
-            keyPassword = System.getenv("KEY_PASSWORD") ?: "phairplay-sign"
+            storeFile = file(signingSetting("KEYSTORE_FILE") ?: "phairplay-signing.jks")
+            storePassword = signingSetting("KEYSTORE_PASSWORD").orEmpty()
+            keyAlias = signingSetting("KEY_ALIAS").orEmpty()
+            keyPassword = signingSetting("KEY_PASSWORD").orEmpty()
         }
     }
 
     buildTypes {
         debug {
             isDebuggable = true
-            signingConfig = signingConfigs.getByName("phairplay")
+            signingConfig = signingConfigs.getByName(signingConfigName)
         }
         release {
             isMinifyEnabled = true
@@ -93,7 +139,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("phairplay")
+            signingConfig = signingConfigs.getByName(signingConfigName)
         }
     }
 
