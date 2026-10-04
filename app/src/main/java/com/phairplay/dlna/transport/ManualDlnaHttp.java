@@ -157,6 +157,21 @@ public final class ManualDlnaHttp {
     }
 
     /**
+     * v101-③ — the user pressed Back inside the picture: paused, not ended.
+     *
+     * PAUSED_PLAYBACK rather than STOPPED, and this is the whole point of the
+     * change. STOPPED told the sender the cast was over (field log: 25 re-pushes
+     * of the same URI while it tried to work out what happened), and PLAYING
+     * would be a lie - nothing is decoding. PAUSED_PLAYBACK is the one answer
+     * that is both true and actionable: the phone shows a pause button, so the
+     * user can also resume from there.
+     */
+    public static void markPaused() {
+        transportState = "PAUSED_PLAYBACK";
+        GenaNotifier.push();
+    }
+
+    /**
      * v99-④ — SetAVTransportURI with no Play behind it: start anyway.
      *
      * Guards, all of which the field log made necessary:
@@ -563,6 +578,19 @@ public final class ManualDlnaHttp {
                 transportState = "STOPPED";
                 positionSeconds = 0;
                 DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
+                // v101-⑦: while the user has this exact item paused, a re-send
+                // of the same URI is the sender confirming state, not a new
+                // item. Acting on it would (a) flip the transport to STOPPED,
+                // which is what the sender then tries to "fix" by re-sending,
+                // and (b) schedule the 3 s auto-start - so the picture the user
+                // just paused would come back by itself. A Play for the same
+                // URI is still honoured; only the Set is ignored. A different
+                // URI is a genuine change of item and goes through.
+                com.phairplay.dlna.renderer.DlnaPlayerControl pausedCheck = DlnaPlayerBridge.get();
+                if (pausedCheck != null && pausedCheck.isUserPaused(uri)) {
+                    DebugLog.INSTANCE.log("SOAP", "暂停中收到同 URI SetAVTransportURI → 忽略（不重置状态、不调度自动起播）");
+                    return avtResponse("SetAVTransportURIResponse", "");
+                }
                 // DIDL-Lite metadata (title/artist/cover) — the only place the
                 // sender tells us what this item IS. Without it an audio cast
                 // can only show a black screen, and the UI has no way to offer

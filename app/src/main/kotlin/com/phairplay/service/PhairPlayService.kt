@@ -539,6 +539,16 @@ class PhairPlayService : Service() {
                 // had already let the item play while the service still held the
                 // dismissal, and the two halves had to agree on one answer.
                 onCastPlayIntent = { clearDlnaDismissed() },
+                // v101-⑧: the pause is holding the only hardware decoder, and
+                // the idle sweep will take it back after a minute. Say so, or
+                // the user has no idea why the slot went quiet.
+                onPauseIdleWarning = {
+                    _dlnaHint.value = "已暂停，闲置一分钟会释放解码资源（随时可回播放继续）"
+                },
+                // v101-⑩: a source that serves an anti-scraping page instead of
+                // a manifest will never fix itself, so it gets a line on screen
+                // rather than a black rectangle and no explanation.
+                onSourceHint = { text -> _dlnaHint.value = text },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
@@ -790,7 +800,7 @@ class PhairPlayService : Service() {
             dismissedAtMs = System.currentTimeMillis()
             com.phairplay.util.DebugLog.log(
                 "DLNA",
-                "用户退出播放层 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动摆到前台（播放照常进行）: ${onScreen.take(64)}…"
+                "用户结束投屏 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动摆到前台: ${onScreen.take(64)}…"
             )
         }
         dlnaReceiver?.stopPlaybackFromUi()
@@ -831,6 +841,38 @@ class PhairPlayService : Service() {
      * of the very layer that was owed to that item.
      */
     fun hasPendingCast(): Boolean = dlnaReceiver?.hasPendingCast() == true
+
+    /**
+     * v101-② — Back inside the playback layer: pause and keep the cast.
+     *
+     * The dismissal is still recorded, because the user's actual complaint is
+     * about the foreground: whatever the sender does next, the picture must not
+     * come back over the home screen on its own. A real Play still clears it
+     * ([onCastPlayIntent]) — that is the user asking for playback again, either
+     * from the phone or by tapping the card.
+     */
+    fun pauseDlnaForUser() {
+        val onScreen = dlnaReceiver?.currentCastUri
+        if (onScreen != null) {
+            dismissedCastUri = onScreen
+            dismissedAtMs = System.currentTimeMillis()
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "用户在播放中按返回 → 暂停并保留投屏（首页可继续，发送端不会自动抢回界面）: ${onScreen.take(64)}…"
+            )
+        }
+        dlnaReceiver?.pauseForUser()
+    }
+
+    /** True when the cast is paused by the user and waiting to be resumed. */
+    fun isCastPausedByUser(): Boolean = dlnaReceiver?.isCastPausedByUser == true
+
+    /** v101-⑤ — the user asked for the picture back from the home screen. */
+    fun resumeDlnaFromUserPause() {
+        dismissedCastUri = null
+        dismissedAtMs = 0L
+        dlnaReceiver?.resumeFromUserPause()
+    }
 
     /**
      * v99-② — a pending item young enough to still deserve the playback layer.

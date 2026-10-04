@@ -27,6 +27,18 @@ public interface DlnaPlayerControl {
      */
     void startPlaybackAuto(String uri);
 
+    /**
+     * v101-⑦ — has the user paused exactly this item?
+     *
+     * The SOAP layer asks before it touches its own state on
+     * SetAVTransportURI. While a cast is paused, a re-send of the same URI is
+     * the sender confirming state, not a new item, and acting on it would
+     * reset the transport to STOPPED and schedule an auto-start — which is how
+     * "the picture came back on its own" used to happen. A Play for the same
+     * URI is still honoured; only the Set is ignored.
+     */
+    boolean isUserPaused(String uri);
+
     /** Pause the current playback. */
     void pausePlayback();
 

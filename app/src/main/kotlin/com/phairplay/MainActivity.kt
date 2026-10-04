@@ -924,8 +924,13 @@ class MainActivity : AppCompatActivity() {
      * the user had never asked.
      */
     private fun reopenDlnaByUser() {
+        // v101-⑤: the card is now also the way back from a user pause, so it
+        // has to clear the pause itself - clearing the dismissal alone would
+        // show a player that is still sitting at playWhenReady=false.
+        service?.resumeDlnaFromUserPause()
         service?.clearDlnaDismissed()
         autoOpenUsedForCast = false
+        refreshResumePillText()
         showDlnaPlayer()
     }
 
@@ -958,6 +963,20 @@ class MainActivity : AppCompatActivity() {
     private var lastHiddenPlaybackHintUri: String? = null
     private var lastHiddenPlaybackHintAtMs = 0L
 
+    /**
+     * v101-⑤ — the pill has to say which of the two it will do.
+     *
+     * "返回播放" for a cast that is still running, "继续播放（已暂停）" for one
+     * the user paused: after a Back the difference is the whole point, and a
+     * pill that says the same thing in both states is the UI equivalent of the
+     * log line that used to promise playback while stopping it.
+     */
+    private fun refreshResumePillText() {
+        val pill = resumePillView ?: return
+        val paused = service?.isCastPausedByUser() == true
+        pill.text = if (paused) "▶  继续播放（已暂停）" else "▶  返回播放"
+    }
+
     /** Re-opens full-screen playback — how a TV remote gets back after Back. */
     fun returnToDlnaPlayback() {
         if (hasDlnaMedia()) {
@@ -968,6 +987,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Pill shown in the nav panel while media plays behind the app UI. */
+    private var resumePillView: android.widget.TextView? = null
+
     private fun setupResumePill() {
         val panel = findViewById<android.view.ViewGroup>(R.id.nav_panel) ?: return
         val pill = TextView(this).apply {
@@ -991,6 +1012,7 @@ class MainActivity : AppCompatActivity() {
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = (16 * resources.displayMetrics.density).toInt() }
         panel.addView(pill, lp)
+        resumePillView = pill
         resumePlaybackPill = pill
     }
 
@@ -1590,24 +1612,22 @@ class MainActivity : AppCompatActivity() {
             // 生效" report.
             if (event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) {
                 if (dlna) {
-                    // Back inside full-screen playback ends the cast — picture
-                    // *and* sound.
+                    // v101-① — Back inside the picture means "pause", not "end".
                     //
-                    // WHY A STOP AND NOT JUST A HIDE: hiding the layer left the
-                    // renderer playing behind the home screen, so the box went on
-                    // speaking while the user stared at a picture-less app — the
-                    // "只有声音，图像在首页" report. Hiding is not an answer the
-                    // user can act on; silence is. The receiver service keeps
-                    // running and stays discoverable, so the sender can still
-                    // push again, and [PhairPlayService.stopDlnaPlayback]
-                    // records the dismissal that keeps that next push out.
+                    // Until v100 this called stopDlnaPlayback(true): the item,
+                    // the position and the cast session were all gone, so the
+                    // only way back to the home screen also ended the cast. The
+                    // user asked for a pause that can be undone from the home
+                    // screen, and only a *second* Back there ends it.
                     //
-                    // This is a user gesture, so it spends the auto-open quota:
-                    // having asked for the home screen, they must not be dragged
-                    // back by the sender's next poll.
+                    // The dismissal is still recorded (inside the service) so
+                    // the sender's next poll cannot drag the picture back over
+                    // the home screen; a real Play still clears it.
                     autoOpenUsedForCast = true
-                    // v98: real user action — the only kind that may record a dismissal.
-                    service?.stopDlnaPlayback(true)
+                    service?.pauseDlnaForUser()
+                    // The layer goes away, the session does not.
+                    hideDlnaPlayer()
+                    refreshResumePillText()
                     val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                     target.requestFocus()
                     return true

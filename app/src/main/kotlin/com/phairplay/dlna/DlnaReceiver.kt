@@ -169,7 +169,19 @@ class DlnaReceiver(
      * channel for the whole DISMISS window (field log 13:04:31 -> 13:06:13
      * of a douyin cast that only started once the sender changed uri).
      */
-    private val onCastPlayIntent: (String) -> Unit = {}
+    private val onCastPlayIntent: (String) -> Unit = {},
+    /**
+     * v101-⑧ — the idle sweep gave the hardware slot back while paused, so
+     * the UI can say "暂停中，闲置 X 秒后释放" instead of letting the user
+     * wonder why the slot went quiet.
+     */
+    private val onPauseIdleWarning: () -> Unit = {},
+    /**
+     * v101-⑩ — the far end served something that is not media (anti-scraping
+     * page, expired ticket). Worth one line on screen: retrying cannot help,
+     * and silence made users blame the app.
+     */
+    private val onSourceHint: (String) -> Unit = {}
 ) : DlnaPlayerControl {
 
     /**
@@ -780,6 +792,12 @@ class DlnaReceiver(
     @Volatile
     private var lastProbeUri: String? = null
 
+    /** v101-⑨ — guard so one item never has two probes in flight. */
+    private val probeLock = Any()
+
+    @Volatile
+    private var probeInFlightUri: String? = null
+
     /**
      * v100-③ — has *this* uri been proven not to be media, recently?
      *
@@ -1035,6 +1053,23 @@ class DlnaReceiver(
                             // The frames, not just the summary: a cause-only line is what
                             // made the HLS assertion look like a CDN problem.
                             DebugLog.throwable("DLNA", error)
+                            // v101-⑩ — a manifest we cannot parse is not a flaky
+                            // network, and it is not our bug either: the far end
+                            // answered 200 with an anti-scraping page (field log
+                            // 21:11-44, `Input does not start with the #EXTM3U
+                            // header`, body `<pre> _oo0oo_`). Retrying will not
+                            // help, and the old behaviour - log it and show a
+                            // black rectangle - left the user assuming the app
+                            // was broken. Say what actually happened, in words
+                            // they can act on.
+                            if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED) {
+                                DebugLog.log(
+                                    "DLNA",
+                                    "判定：源站返回的不是媒体清单（反爬/限流/票据失效）→ 提示用户换源，" +
+                                        "不再把它当成可自恢复的网络抖动"
+                                )
+                                onSourceHint("该点播源返回非媒体内容（可能反爬/限流），请换源或稍后再试")
+                            }
                             DebugLog.log(
                                 "DLNA",
                                 "错误根因: ${cause ?: "(无 cause)"} 超时/网络=${error.errorCode / 1000}"
@@ -1442,7 +1477,22 @@ class DlnaReceiver(
      * first bytes of the body are enough to tell those cases apart.
      */
     private fun probeSourceAsync(uri: String) {
-            Thread {
+        // v101-⑨ — one probe in flight per item.
+        //
+        // The threshold below dropped from 15 s to 5 s, so the same cast now
+        // asks three times as often. Against an anti-scraping source that is
+        // not free: the 21:11-21:12 field log already shows 37 probes all
+        // coming back as the challenge page, and tripling the rate would be us
+        // helping the far end throttle the box. Re-probing the same uri while
+        // one is running cannot produce a different answer anyway.
+        synchronized(probeLock) {
+            if (probeInFlightUri == uri) {
+                DebugLog.log("DLNA", "源探测：同一 URI 已有探测在飞 → 跳过本次（避免替源站加倍限流）")
+                return
+            }
+            probeInFlightUri = uri
+        }
+        Thread {
             var conn: java.net.HttpURLConnection? = null
             val probeStartedAt = System.currentTimeMillis()
             try {
@@ -1516,6 +1566,9 @@ class DlnaReceiver(
                 DebugLog.log("DLNA", "源探测失败: ${e.javaClass.simpleName} ${e.message}")
             } finally {
                 conn?.disconnect()
+                synchronized(probeLock) {
+                    if (probeInFlightUri == uri) probeInFlightUri = null
+                }
             }
         }.apply { isDaemon = true; name = "dlna-source-probe" }.start()
     }
@@ -1938,6 +1991,184 @@ class DlnaReceiver(
      * sender has to see STOPPED instead of a stuck PLAYING.
      */
     @OptIn(UnstableApi::class)
+    // ─── v101: Back inside the playback layer means pause, not end ───────────
+
+    /**
+     * v101-② — the user pressed Back while the picture was on screen.
+     *
+     * Until v100 this was `stopPlaybackFromUi()`: the item was cleared, the
+     * position gone, and the log cheerfully said "播放照常进行" while the
+     * decoder was released — the promise and the behaviour disagreed, and the
+     * user had to end the whole cast just to get back to the home screen.
+     *
+     * Now it pauses. The item, the position and the cast session all stay, the
+     * far end is told `PAUSED_PLAYBACK` (so the phone shows a pause button
+     * instead of thinking the cast ended), and nothing but the user's own
+     * "resume" or "end" changes it. This is a stronger signal than the
+     * 20 s dismissal: a dismissal means "do not steal the foreground", a pause
+     * means "stop playing until I say so", so the two are kept apart.
+     */
+    @Volatile
+    private var userPaused = false
+
+    @Volatile
+    private var userPausedUri: String? = null
+
+    @Volatile
+    private var userPausedPositionMs = 0L
+
+    /**
+     * v101-⑧ — set when the idle sweep already gave the hardware slot back,
+     * so the resume has to rebuild instead of just un-pausing.
+     */
+    @Volatile
+    private var pauseReleasedSlot = false
+
+    /** True while the user has this exact item paused. */
+    override fun isUserPaused(uri: String): Boolean = userPaused && uri == userPausedUri
+
+    /**
+     * v101-⑧ — the box has one hardware decoder and the pause is holding it.
+     *
+     * Holding it forever would starve every other app, so an idle pause gives
+     * it back — but only the slot: the media, the position and the session stay,
+     * so "resume" still lands on the frame the user left. UI says so before it
+     * happens ([onPauseIdleWarning]); silence would look like a bug.
+     */
+    private val pauseIdleRunnable: Runnable = Runnable {
+        if (!userPaused) return@Runnable
+        val p = player ?: return@Runnable
+        val uri = userPausedUri
+        runCatching {
+            p.clearVideoSurface()
+            p.stop()
+        }
+        lastStopReason = "暂停闲置超时 → 释放硬解槽"
+        pauseReleasedSlot = true
+        // No removeCallbacks here: this runnable does not reschedule itself, and
+        // referencing itself from inside its own initializer is what made the
+        // compiler give up on the type ("must be initialized").
+        DebugLog.log(
+            "DLNA",
+            "暂停闲置 ${PAUSE_IDLE_RELEASE_MS / 1000}s → 释放硬解槽（位置 ${userPausedPositionMs / 1000}s 已保留，" +
+                "首页仍可继续）: ${uri?.take(64)}…"
+        )
+        onPauseIdleWarning()
+    }
+
+    /**
+     * v101-② — pause on a user Back, keeping the cast resumable.
+     *
+     * Deliberately does **not** stop the player: a stop releases the hardware
+     * slot and drops the decoder, which is exactly the cost the 60 s idle sweep
+     * is there to pay later, on a budget, rather than on every Back.
+     */
+    fun pauseForUser() {
+        mainHandler.post {
+            val p = player ?: return@post
+            val uri = currentUri ?: return@post
+            if (userPaused) return@post
+            userPaused = true
+            userPausedUri = uri
+            pauseReleasedSlot = false
+            userPausedPositionMs = runCatching { p.currentPosition }.getOrDefault(0L)
+            runCatching { p.pause() }
+            // ParkedMedia is the existing hand-off for "the picture is gone but
+            // the item is not"; resumePlaybackFromUi() already knows how to
+            // rebuild from it with the position intact.
+            parkedForUi = ParkedMedia(uri, userPausedPositionMs)
+            ManualDlnaHttp.markPaused()
+            mainHandler.removeCallbacks(pauseIdleRunnable)
+            mainHandler.postDelayed(pauseIdleRunnable, PAUSE_IDLE_RELEASE_MS.toLong())
+            DebugLog.log(
+                "DLNA",
+                "用户按返回 → 暂停并保留投屏会话（首页可继续，闲置 ${PAUSE_IDLE_RELEASE_MS / 1000}s 后释放解码槽）" +
+                    ": ${uri.take(64)}…"
+            )
+        }
+    }
+
+    /**
+     * v101-⑥⑦ — a Play for the paused item is the user asking for it back.
+     *
+     * Checked *before* the duplicate-Play guard, because that guard only fires
+     * while playWhenReady is true and a paused player is false by definition.
+     *
+     * Whether a re-push means "resume" or "the sender is polling" is not
+     * decidable from the protocol: both are Set+Play. The field data settles
+     * it - during healthy playback the sender only asks for
+     * GetTransportInfo/GetPositionInfo and never re-sends Set+Play (measured
+     * 21:09-21:12), while the 25 re-pushes all happened while the source was
+     * failing. So a Play arriving while we are paused is treated as intent.
+     */
+    private fun resumeIfPaused(uri: String): Boolean {
+        if (!isUserPaused(uri)) return false
+        val at = userPausedPositionMs
+        userPaused = false
+        userPausedUri = null
+        userPausedPositionMs = 0
+        mainHandler.removeCallbacks(pauseIdleRunnable)
+        ManualDlnaHttp.markPlaying()
+        if (pauseReleasedSlot) {
+            // The idle sweep already stopped the player; rebuild through the
+            // existing parked-media path so the position survives.
+            pauseReleasedSlot = false
+            parkedForUi = ParkedMedia(uri, at)
+            DebugLog.log(
+                "DLNA",
+                "暂停中收到同 URI Play（解码槽已释放）→ 重建并从 ${at / 1000}s 继续: ${uri.take(64)}…"
+            )
+            resumePlaybackFromUi()
+            return true
+        }
+        pendingSeekMs = at
+        DebugLog.log(
+            "DLNA",
+            "暂停中收到同 URI Play → 从暂停位置 ${at / 1000}s 继续: ${uri.take(64)}…"
+        )
+        return false
+    }
+
+    /** True once the cast has been paused by the user and not resumed. */
+    val isCastPausedByUser: Boolean get() = userPaused
+
+    /**
+     * v101-⑤ — the user tapped the card (or the pill) to come back.
+     *
+     * Two paths, because the idle sweep may have taken the slot in between:
+     * while the player is merely paused the decoder and the media item are
+     * still alive, so this is a `play()` plus a fresh surface — instant. After
+     * the sweep it is a rebuild through the parked-media path, which costs a
+     * second or two and still lands on the frame the user left.
+     */
+    fun resumeFromUserPause() {
+        mainHandler.post {
+            if (!userPaused) return@post
+            val p = player ?: return@post
+            val uri = userPausedUri ?: currentUri ?: return@post
+            val at = userPausedPositionMs
+            userPaused = false
+            userPausedUri = null
+            userPausedPositionMs = 0
+            mainHandler.removeCallbacks(pauseIdleRunnable)
+            ManualDlnaHttp.markPlaying()
+            if (pauseReleasedSlot) {
+                pauseReleasedSlot = false
+                parkedForUi = ParkedMedia(uri, at)
+                DebugLog.log("DLNA", "用户点「继续播放」→ 解码槽已释放，重建并从 ${at / 1000}s 继续")
+                resumePlaybackFromUi()
+                return@post
+            }
+            pendingSeekMs = at
+            runCatching { p.play() }
+            // The playback layer was hidden on Back, so its Surface is new;
+            // ask the UI to hand it over again.
+            onSurfaceProbeNeeded()
+            onPlaybackUiNeeded()
+            DebugLog.log("DLNA", "用户点「继续播放」→ 从 ${at / 1000}s 恢复播放（解码器未释放，秒回）")
+        }
+    }
+
     fun stopPlaybackFromUi() {
         mainHandler.post {
             // v100-② — the user just closed this item, so every auto-start
@@ -1951,6 +2182,12 @@ class DlnaReceiver(
             // every timer in flight in one move, instead of relying on each
             // one happening to notice the dismissal in time.
             ManualDlnaHttp.cancelPendingAutoStart()
+            // v101: a real end also ends the pause, whatever it was holding.
+            userPaused = false
+            userPausedUri = null
+            userPausedPositionMs = 0
+            pauseReleasedSlot = false
+            mainHandler.removeCallbacks(pauseIdleRunnable)
             clearPlayback("用户退出界面 stopPlaybackFromUi")
             ManualDlnaHttp.notifyPlaybackEnded()
             report(ProtocolState.ADVERTISING)
@@ -2028,6 +2265,13 @@ class DlnaReceiver(
             if (!started) return@post
 
             val p = player ?: return@post
+
+            // v101-⑥⑦ — a Play for the item the user paused is a request to
+            // come back. Checked before the duplicate guard below, which only
+            // fires while playWhenReady is true and a paused player is false.
+            // If the idle sweep already stopped the player this hands off to
+            // the parked-media rebuild and the rest of this function is skipped.
+            if (!fromAutoStart && resumeIfPaused(uri)) return@post
 
             // v99-④ — the same URI is already playing: do not build it again.
             //
@@ -2631,6 +2875,13 @@ class DlnaReceiver(
          *  the teardown. Only the wait is bounded; the teardown itself is not. */
         private const val STOP_MAIN_THREAD_TIMEOUT_MS = 3_000
 
+        /**
+         * v101-⑧ — how long a user pause may hold the one hardware decoder
+         * before it is handed back. The item, the position and the session all
+         * survive; only the slot goes.
+         */
+        private const val PAUSE_IDLE_RELEASE_MS = 60_000L
+
         /** How long [startPlayback] may wait for the playback UI before it
          *  accepts "sound only". The view only reports a real surface after
          *  the next layout; that is a fraction of a second in practice, so
@@ -2650,7 +2901,18 @@ class DlnaReceiver(
         private const val HEVC_ATTEMPT_LIMIT = 3
 
         /** How long a source may stay silent before we probe it ourselves. */
-        private const val STALL_TIMEOUT_MS = 15_000
+        /**
+         * v101-⑨ — 5 s, down from 15 s.
+         *
+         * The probe itself answers in ~43 ms, and it does not interrupt the
+         * start (the field log shows the first frame still landing after it
+         * fired). So the 15 s wait bought nothing except a slower answer for
+         * the user staring at a black rectangle: on a throttled source, five
+         * seconds is the difference between "this source is refusing us" and
+         * "this app is broken". [firstPictureWatchdog] is a different question
+         * (started, but no picture) and keeps its own 12 s.
+         */
+        private const val STALL_TIMEOUT_MS = 5_000
 
         /**
          * How long the receiver stays off the hardware decoder after a failed
