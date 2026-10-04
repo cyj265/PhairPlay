@@ -955,8 +955,15 @@ class MainActivity : AppCompatActivity() {
     /** Pill visible only when media is playing but the player is not on screen. */
     private fun updateResumePill() {
         val pill = resumePlaybackPill ?: return
+        // The old guard asked only for media metadata, which the user saw as "no
+        // button at all": a cast that was already sounding while the layer was
+        // hidden (or one still waiting for its surface) has a picture owed to it
+        // but no way back except re-casting. Any of the three states in
+        // [hasCastToPaint] means there is something to look at — the same
+        // three-state question the show/hide decision asks, so the pill can
+        // never disagree with the layer.
         pill.visibility =
-            if (hasDlnaMedia() && !isDlnaPlayerVisible) View.VISIBLE else View.GONE
+            if (!isDlnaPlayerVisible && hasCastToPaint()) View.VISIBLE else View.GONE
     }
 
     /**
@@ -1206,8 +1213,6 @@ class MainActivity : AppCompatActivity() {
         // the dismissal only for a genuinely new uri.
         lifecycleScope.launch {
             svc.dlnaCastArrived.collectLatest {
-                autoOpenUsedForCast = true
-                autoOpenedForCast = true
                 // The service only postpones an auto-foreground launch for a
                 // dismissed cast; showing the player is a UI decision made
                 // here, and this collector used to take it unconditionally —
@@ -1219,6 +1224,12 @@ class MainActivity : AppCompatActivity() {
                     )
                     return@collectLatest
                 }
+                // Spent only once the cast actually gets the picture. A
+                // dismissal is spent on nothing, so closing one cast and then
+                // casting another still leaves the second one free to open the
+                // player instead of waiting for the user to reach for it.
+                autoOpenUsedForCast = true
+                autoOpenedForCast = true
                 showDlnaPlayer()
                 com.phairplay.util.DebugLog.log("UI", "新投屏到达 → 立即显示播放层")
             }
@@ -1338,6 +1349,25 @@ class MainActivity : AppCompatActivity() {
                 lastShowBlockedMs = now
                 com.phairplay.util.DebugLog.log(
                     "UI", "showDlnaPlayer 被挡下：手上既没有 uri 也没有待播（空播放器=黑屏）"
+                )
+            }
+            hideDlnaPlayer()
+            return
+        }
+        // A cast the user closed must not climb back into the picture. The
+        // [dlnaCastArrived] collector checks this too, but that flow is
+        // one-shot: a sender that keeps polling the same uri re-arms
+        // `hasPendingCast()` on its own, and the recompute triggered by a
+        // window-focus change (or the 2 Hz tick) reached this method through a
+        // completely different door. Field log 11:03:17: the layer was shown,
+        // a picture rendered, and it was still the user's own dismissal that
+        // was holding the home screen — the door the dismissal never guarded.
+        if (svc != null && svc.isCastDismissed(svc.dlnaCurrentUri())) {
+            val now = System.currentTimeMillis()
+            if (now - lastShowBlockedMs > SHOW_BLOCKED_LOG_INTERVAL_MS) {
+                lastShowBlockedMs = now
+                com.phairplay.util.DebugLog.log(
+                    "UI", "showDlnaPlayer 被挡下：该投屏已被用户关闭（dismissal 闸门）"
                 )
             }
             hideDlnaPlayer()
@@ -1515,14 +1545,23 @@ class MainActivity : AppCompatActivity() {
             // 生效" report.
             if (event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) {
                 if (dlna) {
-                    // Back inside full-screen playback drops to the app UI first
-                    // (that UI is reachable and stays usable); AirPlay semantics.
+                    // Back inside full-screen playback ends the cast — picture
+                    // *and* sound.
+                    //
+                    // WHY A STOP AND NOT JUST A HIDE: hiding the layer left the
+                    // renderer playing behind the home screen, so the box went on
+                    // speaking while the user stared at a picture-less app — the
+                    // "只有声音，图像在首页" report. Hiding is not an answer the
+                    // user can act on; silence is. The receiver service keeps
+                    // running and stays discoverable, so the sender can still
+                    // push again, and [PhairPlayService.stopDlnaPlayback]
+                    // records the dismissal that keeps that next push out.
                     //
                     // This is a user gesture, so it spends the auto-open quota:
                     // having asked for the home screen, they must not be dragged
                     // back by the sender's next poll.
                     autoOpenUsedForCast = true
-                    hideDlnaPlayer()
+                    service?.stopDlnaPlayback()
                     val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                     target.requestFocus()
                     return true

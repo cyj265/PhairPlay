@@ -146,7 +146,18 @@ class DlnaReceiver(
      * SetAVTransportURI + Play every 10-30 s re-raises a cast the user just
      * closed — see [PhairPlayService] for the bug it caused.
      */
-    private val onSenderStop: () -> Unit = {}
+    private val onSenderStop: () -> Unit = {},
+    /**
+     * Answers "the user closed this uri and it must not come back".
+     *
+     * The service keeps the dismissal (uri + expiry) for the foreground gate;
+     * the receiver needs the same answer *before* it parks an item, because
+     * the two things a dismissed cast used to do on the next sender poll were
+     * both wrong — it showed the picture again, or it started playback and
+     * left the box sounding while the user sat on the home screen they
+     * deliberately chose.
+     */
+    private val isCastDismissed: (String?) -> Boolean = { false }
 ) : DlnaPlayerControl {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -601,6 +612,43 @@ class DlnaReceiver(
         val uri = currentUri
         if (p == null || uri == null) return@Runnable
         if (p.videoSize.width > 0 && p.videoSize.height > 0) return@Runnable
+        // v97: READY-but-0x0 is only a decoder problem if the source actually
+        // answered. Boxes here resolve public CDN hostnames through a link-local
+        // IPv6 resolver first, so a live source can take 20+s to hand over its
+        // first SPS — long enough to trip this watchdog and drop the decoder
+        // slot, after which the next start pays the same 20+s *again*. Cooling
+        // down on a slow source is what turned "one slow channel" into a
+        // two-minute black screen. If the probe says the far end is fine, retry
+        // the item instead of taking the decoder away.
+        val probeFresh =
+            lastProbeOkMs > 0 && System.currentTimeMillis() - lastProbeOkMs < PROBE_FRESHNESS_MS
+        if (probeFresh && sourceSlowRetries < SOURCE_SLOW_RETRY_LIMIT) {
+            sourceSlowRetries++
+            DebugLog.log(
+                "DLNA",
+                "READY 后 ${FIRST_PICTURE_TIMEOUT_MS / 1000}s 仍无画面（视频轨 0x0），" +
+                    "但源探测 $lastProbeCode 正常 → 判为源侧慢，不交还硬解槽，" +
+                    "${SOURCE_SLOW_RETRY_MS / 1000}s 后重试起播（第 $sourceSlowRetries/$SOURCE_SLOW_RETRY_LIMIT 次）"
+            )
+            surfaceGeneration++
+            hevcCodecSelector.resetFailures()
+            consecutiveDecoderFailures = 0
+            mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+            mainHandler.postDelayed(
+                { resumeParkedCast(uri) },
+                SOURCE_SLOW_RETRY_MS
+            )
+            onSurfaceProbeNeeded()
+            onPlaybackUiNeeded()
+            return@Runnable
+        }
+        if (sourceSlowRetries >= SOURCE_SLOW_RETRY_LIMIT) {
+            DebugLog.log(
+                "DLNA",
+                "同一片源已因慢重试 $SOURCE_SLOW_RETRY_LIMIT 次仍无画面 → 交还硬解槽并冷却"
+            )
+            sourceSlowRetries = 0
+        }
         DebugLog.log(
             "DLNA",
             "READY 后 ${FIRST_PICTURE_TIMEOUT_MS / 1000}s 仍无画面（视频轨 0x0）" +
@@ -621,6 +669,21 @@ class DlnaReceiver(
 
     /** Prefers a HEVC decoder that actually initialises (see [HevcCodecSelector]). */
     private val hevcCodecSelector = HevcCodecSelector()
+
+    // ── v97: "is the picture late because the source is slow, or because the
+    // decoder is dead?" — the question [firstPictureWatchdog] has to answer
+    // before it may take the decoder slot away.
+
+    /** Guards against two [runStart] calls for one item inside a single second. */
+    private var lastRunStartUri: String? = null
+    private var lastRunStartMs = 0L
+
+    /** Last time [probeSourceAsync] saw a healthy answer from the far end. */
+    private var lastProbeOkMs = 0L
+
+    private var lastProbeCode = 0
+
+    private var sourceSlowRetries = 0
 
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -1279,6 +1342,13 @@ class DlnaReceiver(
                 }
                 DebugLog.log("DLNA", "源探测: HTTP $code, Content-Type=$type")
                 DebugLog.log("DLNA", "源前200字节: $head")
+                // v97: remember that the far end is answering, so the
+                // "READY but 0x0" watchdog can tell a slow source from a dead
+                // decoder instead of cooling down on every live channel.
+                if (code in 200..299) {
+                    lastProbeOkMs = System.currentTimeMillis()
+                    lastProbeCode = code
+                }
             } catch (e: Exception) {
                 DebugLog.log("DLNA", "源探测失败: ${e.javaClass.simpleName} ${e.message}")
             } finally {
@@ -1709,6 +1779,25 @@ class DlnaReceiver(
 
             val p = player ?: return@post
 
+            // The user closed this one. Park nothing, wait for nothing, start
+            // nothing: an item that is accepted here plays on in the background
+            // while the home screen stays up, and that is precisely the
+            // "拉起来了却只有声音" state the dismissal exists to prevent. A
+            // genuinely new uri (another episode, another channel) is not
+            // dismissed and walks straight past this gate.
+            if (isCastDismissed(uri)) {
+                DebugLog.log(
+                    "DLNA",
+                    "该投屏已被用户关闭 → 不暂存、不起播（等发送端推新 uri 或超时后自动恢复）"
+                )
+                mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+                mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+                mainHandler.removeCallbacks(decoderCooldownRetry)
+                pendingStartUri = null
+                report(ProtocolState.ADVERTISING)
+                return@post
+            }
+
             // Something is already queued behind a missing render surface: the
             // sender is polling the very item we could not start yet, so stay
             // armed instead of replacing the pending attempt.
@@ -1870,9 +1959,31 @@ class DlnaReceiver(
             if (!started) return@post
             val p = player ?: return@post
 
+            // v97: two paths can reach [runStart] for the same item inside the
+            // same second — the cooldown retry ([onDecoderCooldownElapsed]) and
+            // the "foreground ready" callback. The second pass stopped and
+            // cleared the item the first one had just built, which the log
+            // reported as `播放器被清空 (IDLE) 原因=ExoPlayer 自行清空（未见我方调用）`:
+            // the MediaCodec the user had just got was thrown away, and because
+            // the whole connect handshake runs again, the picture came back a
+            // whole rebuild later. Collapse the duplicates instead.
+            val nowMs = System.currentTimeMillis()
+            if (uri == lastRunStartUri && nowMs - lastRunStartMs < REPEAT_RUN_START_MS) {
+                DebugLog.log(
+                    "DLNA",
+                    "同一 ${REPEAT_RUN_START_MS}ms 内已为该 uri 起播过 → 跳过重复 runStart（不拆掉刚建好的解码器）"
+                )
+                return@post
+            }
+            lastRunStartUri = uri
+            lastRunStartMs = nowMs
+
             currentUri = uri
             retryCount = 0
             consecutiveDecoderFailures = 0
+            // A start that got as far as loading an item is a start the source
+            // served; the next stall on this item is measured from here.
+            sourceSlowRetries = 0
             startedOnRealSurface = !audioOnly
             pendingSeekMs = -1L
             mainHandler.removeCallbacks(surfaceTimeoutRunnable)
@@ -2135,6 +2246,23 @@ class DlnaReceiver(
     }
 
     companion object {
+        // ── v97: "is the picture late because the source is slow, or because
+        // the decoder is dead?" — these constant belong here, next to the
+        // one [firstPictureWatchdog] has to consult before it takes the
+        // hardware decoder slot away.
+
+        /** Two [runStart] calls for one uri closer than this are one start. */
+        private const val REPEAT_RUN_START_MS = 1500L
+
+        /** How long a "the source answered 2xx" verdict still applies. */
+        private const val PROBE_FRESHNESS_MS = 60_000L
+
+        /** Gap used when re-driving a start after a healthy source probe. */
+        private const val SOURCE_SLOW_RETRY_MS = 3000L
+
+        /** Slow-source retries before falling back to the decoder cooldown. */
+        private const val SOURCE_SLOW_RETRY_LIMIT = 3
+
         /** How long [startPlayback] waits for the UI to be on screen. */
         private const val FOREGROUND_WAIT_MS = 10_000
 

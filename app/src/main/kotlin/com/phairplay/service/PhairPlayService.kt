@@ -532,6 +532,7 @@ class PhairPlayService : Service() {
                     requestDlnaSurfaceProbe()
                     bringActivityToForeground("DLNA 重试")
                 },
+                isCastDismissed = { uri -> dismissalStillInsideWindow(uri) },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
@@ -559,12 +560,23 @@ class PhairPlayService : Service() {
                 // as a new cast while a poll echo of a dismissed one does not.
                 onSenderStop = {
                     lastSeenCastUri = null
-                    // A real Stop is the sender itself telling us the session is
-                    // over: everything the user dismissed since is moot, and a
-                    // later cast of the same channel is a new cast, not an echo.
-                    dismissedCastUri = null
-                    dismissedAtMs = 0L
-                    Logger.i("Sender Stop → the same uri counts as a new cast again")
+                    // Deliberately does NOT clear [dismissedCastUri].
+                    //
+                    // A control-point Stop is not a clean "session over": a
+                    // sender that re-casts (a live stream that dropped, a
+                    // re-pick on the phone) sends Stop, then
+                    // SetAVTransportURI, then Play again with the SAME uri
+                    // inside a couple of seconds. Field log 11:48:59 / 11:49:03:
+                    // the user pressed Back, the 120 s dismissal was wiped by
+                    // the very next Stop, and four seconds later the same
+                    // stream climbed back into full-screen playback — which is
+                    // exactly the "I had to press Back ten times" cycle.
+                    //
+                    // The dismissal is what the user asked for, so only time
+                    // ([DISMISS_TTL_MS]) or a genuinely different uri may lift
+                    // it. [stoppedSince] below answers the "cast the same
+                    // channel again later" question on its own.
+                    Logger.i("Sender Stop → lastSeenCastUri forgotten, dismissal kept")
                 },
                 onStateChanged = { state ->
                     _dlnaState.value = state
@@ -610,19 +622,41 @@ class PhairPlayService : Service() {
                                 val stoppedSince = lastSeenCastUri == null
                                 lastSeenCastUri = uri
                                 if (newUri || stoppedSince) {
-                                    // A genuinely different item — or the
-                                    // sender really stopping. Either one is a
-                                    // fresh action, so whatever the user
-                                    // dismissed a moment ago no longer counts.
-                                    dismissedCastUri = null
-                                    dismissedAtMs = 0L
-                                    Logger.i(
-                                        "DLNA cast re-armed (newUri=$newUri stoppedSince=$stoppedSince)"
-                                    )
-                                    // A genuinely new cast: tell the UI to show
-                                    // it. One-shot, no replay —
-                                    // see [_dlnaCastArrived].
-                                    _dlnaCastArrived.tryEmit(Unit)
+                                    // A sender that re-casts sends Stop and
+                                    // then the same uri again, so [stoppedSince]
+                                    // is NOT proof that the user's dismissal
+                                    // went away — only that the sender spoke.
+                                    // A dismissal still inside its window wins:
+                                    // no re-arm, no castArrived, no picture.
+                                    // The item is parked by [startPlayback] too,
+                                    // so this stays silent instead of audible.
+                                    if (dismissalStillInsideWindow(uri)) {
+                                        // No re-arm, no castArrived, no
+                                        // picture. [startPlayback] parks the
+                                        // item as well, so this stays quiet
+                                        // instead of audible, and
+                                        // [bringActivityToForeground] below
+                                        // refuses too through the same check.
+                                        com.phairplay.util.DebugLog.log(
+                                            "DLNA",
+                                            "发送端重投（Stop→SetURI→Play）但用户已关闭该投屏 → 不算新投屏，不拉前台"
+                                        )
+                                    } else {
+                                        // A genuinely different item — or the
+                                        // sender really stopping. Either one
+                                        // is a fresh action, so whatever the
+                                        // user dismissed a moment ago no
+                                        // longer counts.
+                                        dismissedCastUri = null
+                                        dismissedAtMs = 0L
+                                        Logger.i(
+                                            "DLNA cast re-armed (newUri=$newUri stoppedSince=$stoppedSince)"
+                                        )
+                                        // A genuinely new cast: tell the UI to
+                                        // show it. One-shot, no replay —
+                                        // see [_dlnaCastArrived].
+                                        _dlnaCastArrived.tryEmit(Unit)
+                                    }
                                 }
                             }
                             bringActivityToForeground("DLNA 播放")
@@ -725,8 +759,16 @@ class PhairPlayService : Service() {
      * The dismissal carries a timestamp and only holds while the UI is in the
      * foreground, so it survives the two or three poll echoes right after
      * Back without becoming permanent — see [dismissalApplies].
+     *
+     * Recording a dismissal is deliberately unconditional: no caller today has
+     * a stop path that reaches the user's eyes without them having closed the
+     * picture themselves, so the flag never had a false caller. A stop path
+     * added later (a remote's exit key, a cast that ended on its own) has to
+     * say so here rather than counting on this defaulting to off — pinning a
+     * uri the user never dismissed blocks that channel for the next two
+     * minutes.
      */
-    fun stopDlnaPlayback(rememberDismissal: Boolean = true) {
+    fun stopDlnaPlayback() {
         val onScreen = dlnaReceiver?.currentCastUri
         // Only a dismissal recorded in front of the user's eyes counts as "they
         // closed this cast". Pressing Back while the window is a black
@@ -734,7 +776,7 @@ class PhairPlayService : Service() {
         // the same uri shut for the next two minutes then made the very next
         // cast of that channel silent (the 00:31 report all over again, only
         // with a timestamp on it).
-        if (rememberDismissal && onScreen != null) {
+        if (onScreen != null) {
             dismissedCastUri = onScreen
             dismissedAtMs = System.currentTimeMillis()
             com.phairplay.util.DebugLog.log(
@@ -974,10 +1016,33 @@ class PhairPlayService : Service() {
         }
         val now = System.currentTimeMillis()
         if (now - lastForegroundLaunchMs < AUTOFOREGROUND_THROTTLE_MS) {
+            // Re-queue instead of dropping. A dropped request is what made the
+            // "偶尔投屏只出声" reports: the receiver had already parked the
+            // item and was sitting on its 10 s fallback, the launch never left,
+            // and the app either stayed in the background or came up only later
+            // — by which time the sender's item was already audible behind the
+            // home screen. Re-sending once lands the app inside the same
+            // window the fallback runs in, and the retry cannot loop because
+            // the delay lands exactly on the throttle edge.
+            val waitMs = AUTOFOREGROUND_THROTTLE_MS - (now - lastForegroundLaunchMs)
             com.phairplay.util.DebugLog.log(
                 "DLNA",
-                "自动前台被限流（$reason，距上次启动仅 ${(now - lastForegroundLaunchMs) / 1000}s）"
+                "自动前台被限流（$reason，${waitMs / 1000}s 后补发一次）"
             )
+            mainHandler.postDelayed({
+                // Re-check at landing time, not when the request was queued:
+                // the sender may have stopped or moved on during the wait, and
+                // dragging an empty app into front then buys nothing but a
+                // home screen the user never asked for.
+                if (reason.startsWith("DLNA") && !hasDlnaMedia() && !hasPendingCast()) {
+                    com.phairplay.util.DebugLog.log(
+                        "DLNA",
+                        "限流补发作废：等待期间投屏已结束（$reason）"
+                    )
+                    return@postDelayed
+                }
+                bringActivityToForeground(reason)
+            }, waitMs)
             return
         }
         val attemptedAt = now
