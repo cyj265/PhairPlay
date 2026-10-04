@@ -86,6 +86,7 @@ device-test-logs/
 /heads.txt
 /hwprobe*.sh
 /box_getprop.txt
+/box_ps*.txt
 /watch_net.sh
 /ls_test.txt
 /rate.txt
