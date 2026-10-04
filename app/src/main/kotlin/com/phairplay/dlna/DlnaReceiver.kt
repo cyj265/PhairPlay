@@ -768,6 +768,30 @@ class DlnaReceiver(
      *  cooldown — an hour-old "unproven" is not evidence about today. */
     private var lastProbeAtMs = 0L
 
+    /**
+     * v100-③ — which item [lastProbeVerdict] is a verdict about.
+     *
+     * Without this the verdict outlives the item: a cast that starts in a
+     * second never reaches `firstPictureWatchdog`, so it is never probed, and
+     * the previous item's `INVALID` would still be sitting there. Reading that
+     * as "this new source is proven junk" and skipping its auto-start is how a
+     * fix for "a bad source starts too eagerly" turns into "nothing starts".
+     */
+    @Volatile
+    private var lastProbeUri: String? = null
+
+    /**
+     * v100-③ — has *this* uri been proven not to be media, recently?
+     *
+     * Only a fresh, same-item INVALID counts. Anything else (never probed,
+     * a verdict about a different uri, an expired one, healthy or unproven)
+     * answers false and the auto-start is free to run.
+     */
+    fun isSourceProvenInvalid(uri: String): Boolean =
+        lastProbeVerdict == PROBE_INVALID &&
+            lastProbeUri == uri &&
+            System.currentTimeMillis() - lastProbeAtMs <= PROBE_FRESHNESS_MS
+
     private var sourceSlowRetries = 0
 
     private var upnpService: UpnpService? = null
@@ -1452,6 +1476,8 @@ class DlnaReceiver(
                 // decoder instead of cooling down on every live channel.
                 if (code in 200..299) {
                     lastProbeAtMs = System.currentTimeMillis()
+                    // v100-③: a verdict has to say which item it is about.
+                    lastProbeUri = uri
                     when (classifyProbePayload(type, head)) {
                         PROBE_HEALTHY -> {
                             lastProbeOkMs = System.currentTimeMillis()
@@ -1590,6 +1616,7 @@ class DlnaReceiver(
         lastProbeVerdict = PROBE_NONE
         lastProbeAtMs = 0L
         lastProbeOkMs = 0L
+        lastProbeUri = null
         parkedForUi = null
         mainHandler.removeCallbacks(decoderCooldownRetry)
         mainHandler.removeCallbacks(firstPictureWatchdog)
@@ -1913,6 +1940,17 @@ class DlnaReceiver(
     @OptIn(UnstableApi::class)
     fun stopPlaybackFromUi() {
         mainHandler.post {
+            // v100-② — the user just closed this item, so every auto-start
+            // timer still in flight has to die with it.
+            //
+            // Field log 14:49:38-39: the user pressed Back, and one second
+            // later a timer scheduled at 14:49:36 woke up and pulled the
+            // channel back. The exit had already put `transportState` back to
+            // STOPPED, which is what disarmed the timer's third guard — the
+            // exit did the timer's work for it. Bumping the generation voids
+            // every timer in flight in one move, instead of relying on each
+            // one happening to notice the dismissal in time.
+            ManualDlnaHttp.cancelPendingAutoStart()
             clearPlayback("用户退出界面 stopPlaybackFromUi")
             ManualDlnaHttp.notifyPlaybackEnded()
             report(ProtocolState.ADVERTISING)
@@ -1960,6 +1998,32 @@ class DlnaReceiver(
 
     @OptIn(UnstableApi::class)
     override fun startPlayback(uri: String) {
+        startPlaybackInternal(uri, fromAutoStart = false)
+    }
+
+    /**
+     * v100-① — the auto-start's own entry, and the reason it is a separate
+     * function rather than a flag inside the SOAP layer.
+     *
+     * `scheduleAutoStart` fires three seconds after a SetAVTransportURI that
+     * was never followed by a Play. That Play is **our guess**, not the
+     * sender's instruction, and the field log of 14:49:36-39 showed what
+     * happens when a guess is allowed to behave like the real thing: the user
+     * pressed Back at 14:49:38, the exit put `transportState` back to STOPPED,
+     * and the timer woke at 14:49:39 with all three of its guards satisfied and
+     * pulled the channel back — five exits, five resurrections.
+     *
+     * So the guess is marked as a guess all the way down: it does not clear
+     * the dismissal (that is reserved for a real Play), and it refuses to run
+     * at all when the user has just closed this item or the source has already
+     * been proven not to be media.
+     */
+    override fun startPlaybackAuto(uri: String) {
+        startPlaybackInternal(uri, fromAutoStart = true)
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun startPlaybackInternal(uri: String, fromAutoStart: Boolean) {
         mainHandler.post {
             if (!started) return@post
 
@@ -1984,6 +2048,27 @@ class DlnaReceiver(
                 return@post
             }
 
+            if (fromAutoStart) {
+                // v100-①③ — three seconds of silence from the sender is not a
+                // decision to play, and it must not touch anything the user or
+                // the probe established.
+                if (isCastDismissed(uri)) {
+                    DebugLog.log(
+                        "DLNA",
+                        "用户已关闭该投屏 → 跳过自动起播（不猜、不清禁、不弹层）: ${uri.take(64)}…"
+                    )
+                    ManualDlnaHttp.markStoppedByUser()
+                    return@post
+                }
+                if (isSourceProvenInvalid(uri)) {
+                    DebugLog.log(
+                        "DLNA",
+                        "该源已判确凿非媒体（探针结论仍有效）→ 跳过自动起播: ${uri.take(64)}…"
+                    )
+                    return@post
+                }
+            }
+
             // v98 F2 — a Play instruction is the sender plainly asking for
             // playback, so it outranks whatever we remembered about this uri.
             // Sender apps re-push the very same SetAVTransportURI + Play every
@@ -1992,7 +2077,10 @@ class DlnaReceiver(
             // user had closed, and the channel stayed shut for the whole
             // DISMISS window (field log 13:04:31 -> 13:06:13 of a douyin cast
             // that only started once the sender changed uri).
-            onCastPlayIntent(uri)
+            //
+            // v100-①: an auto-start is not that — it is our own three-second
+            // guess — so it does not get to clear the dismissal.
+            if (!fromAutoStart) onCastPlayIntent(uri)
 
             // v98 F1 — a dismissal closes the *foreground* path only. The
             // pipeline keeps running and the audio keeps going, which is what

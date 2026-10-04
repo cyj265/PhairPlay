@@ -133,6 +133,30 @@ public final class ManualDlnaHttp {
     }
 
     /**
+     * v100-② — void every auto-start timer currently in flight.
+     *
+     * One generation bump makes all of them fail their first guard, so the
+     * user closing an item cannot be followed by our own three-second timer
+     * restarting it. Called on every exit path (see
+     * {@code DlnaReceiver#stopPlaybackFromUi}).
+     */
+    public static void cancelPendingAutoStart() {
+        setUriGeneration.incrementAndGet();
+    }
+
+    /**
+     * v100-① — the auto-start declined to run because the user closed this
+     * item, so the far end must be told playback is not happening.
+     *
+     * Without this the sender keeps polling a transport state that still says
+     * PLAYING, and eventually re-sends Set/Play — which is the loop we are
+     * trying to break.
+     */
+    public static void markStoppedByUser() {
+        transportState = "STOPPED";
+    }
+
+    /**
      * v99-④ — SetAVTransportURI with no Play behind it: start anyway.
      *
      * Guards, all of which the field log made necessary:
@@ -163,7 +187,10 @@ public final class ManualDlnaHttp {
                             + "s 未收到 Play → 自动起播: " + uri);
                     com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
                     if (c != null) {
-                        c.startPlayback(uri);
+                        // v100-①: the auto-start entry, not startPlayback. The
+                        // receiver refuses it outright when the user has closed
+                        // this item, and it never clears a dismissal.
+                        c.startPlaybackAuto(uri);
                     }
                     transportState = "PLAYING";
                     GenaNotifier.push();

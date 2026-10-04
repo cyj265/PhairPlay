@@ -102,6 +102,10 @@ device-test-logs/
 /forks_html/
 /_probe_*.txt
 /box_pull_log.sh
+# Editor / tooling backups of the coordination doc (one showed up as
+# docs/…-2026-10-04.md.bak-1520); never part of the build.
+/docs/*.bak-*
+*.bak
 
 # Profiling
 *.hprof

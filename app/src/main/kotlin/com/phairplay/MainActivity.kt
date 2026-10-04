@@ -929,6 +929,35 @@ class MainActivity : AppCompatActivity() {
         showDlnaPlayer()
     }
 
+    /**
+     * v100-④ — say something when the picture is deliberately not being shown.
+     *
+     * The sender re-pushes Set+Play while it waits, and after a Back that is
+     * a real instruction; the item therefore starts and keeps playing while
+     * the playback layer stays down (dismissal closes the foreground path
+     * only — see the F1 note in DlnaReceiver). That is the right behaviour and
+     * a terrible experience: from the sofa it looks like the tap did nothing.
+     *
+     * One line, once per item, pointing at the entry that already exists:
+     * [reopenDlnaByUser] is what the "回播放" pill calls, so the promise in the
+     * toast is a promise the UI already keeps.
+     */
+    private fun maybeHintPlaybackBehindLayer() {
+        val svc = service ?: return
+        val uri = svc.dlnaCurrentUri() ?: return
+        if (!svc.isDlnaPlaybackLive()) return
+        if (!svc.isCastDismissed(uri)) return
+        val now = System.currentTimeMillis()
+        if (uri == lastHiddenPlaybackHintUri && now - lastHiddenPlaybackHintAtMs < 8000) return
+        lastHiddenPlaybackHintUri = uri
+        lastHiddenPlaybackHintAtMs = now
+        com.phairplay.util.DebugLog.log("UI", "dismissal 生效中但已在播放 → 提示一次「点回播放查看」")
+        showTvToast("已在后台播放，点「回播放」查看")
+    }
+
+    private var lastHiddenPlaybackHintUri: String? = null
+    private var lastHiddenPlaybackHintAtMs = 0L
+
     /** Re-opens full-screen playback — how a TV remote gets back after Back. */
     fun returnToDlnaPlayback() {
         if (hasDlnaMedia()) {
@@ -1251,7 +1280,10 @@ class MainActivity : AppCompatActivity() {
         // what v82 could not do: it evaluated the same question once, too
         // early, and then never again.
         lifecycleScope.launch {
-            svc.dlnaPlaybackTick.collectLatest { tryOpenPlayerForCast() }
+            svc.dlnaPlaybackTick.collectLatest {
+                tryOpenPlayerForCast()
+                maybeHintPlaybackBehindLayer()
+            }
         }
         // A decoder hint ("本盒 HEVC 硬解初始化失败") is worth interrupting a
         // black screen for: it is the difference between "the box is broken"

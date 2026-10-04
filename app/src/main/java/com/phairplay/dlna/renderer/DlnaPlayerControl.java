@@ -14,6 +14,19 @@ public interface DlnaPlayerControl {
     /** Start (or restart) playback of the given media URI. */
     void startPlayback(String uri);
 
+    /**
+     * v100-① — start playback on our own initiative, not on a sender's Play.
+     *
+     * Called by the three-second auto-start that follows a
+     * SetAVTransportURI which was never followed by a Play. The receiver
+     * treats this differently on purpose: it does not clear a dismissal, and
+     * it declines to run at all when the user has just closed this item or the
+     * source is already proven to be non-media. Treating a guess like a real
+     * instruction is what made a channel the user had just closed come back
+     * on its own one second later (field log 14:49:38-39).
+     */
+    void startPlaybackAuto(String uri);
+
     /** Pause the current playback. */
     void pausePlayback();
 
