@@ -137,7 +137,12 @@ class MainActivity : AppCompatActivity() {
         // picture was never there but the layer claimed to be showing one.
         // hasDlnaMedia() stays as the fallback so a paused cast keeps its
         // layer and the "back to playback" pill keeps working.
-        return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive()
+        //
+        // v99-②: pending is back, but with a 3 s deadline. Dropping it
+        // outright cured the lying layer and left the 1-3 s between SetURI
+        // and the first real surface with no way back at all — press Back
+        // there and there is nothing to return to. The 3 s deadline covers that wait; a cast that never starts stops holding the layer.
+        return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive() || svc.hasRecentPendingCast()
     }
 
     private val serviceConnection = object : ServiceConnection {

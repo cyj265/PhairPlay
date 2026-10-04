@@ -832,6 +832,15 @@ class PhairPlayService : Service() {
      */
     fun hasPendingCast(): Boolean = dlnaReceiver?.hasPendingCast() == true
 
+    /**
+     * v99-② — a pending item young enough to still deserve the playback layer.
+     *
+     * The difference from [hasPendingCast] is the deadline: a cast parked for
+     * a moment while the surface is being laid out is worth showing, one that
+     * has been parked for a minute is not.
+     */
+    fun hasRecentPendingCast(): Boolean = dlnaReceiver?.hasRecentPendingCast() == true
+
     /** Last DLNA uri seen, to tell a new cast from a sender poll (see [dismissedCastUri]). */
     @Volatile private var lastSeenCastUri: String? = null
 
@@ -908,6 +917,22 @@ class PhairPlayService : Service() {
 
     /** Guards against a sender hammering Play (polling every 10–30 s). */
     @Volatile private var lastForegroundLaunchMs = 0L
+
+    /**
+     * v99-③ — how many times this service has dragged the Activity up in the
+     * current minute, and when that minute started.
+     *
+     * [AUTOFOREGROUND_THROTTLE_MS] only spaces launches 3 s apart, which a
+     * sender polling every 10-30 s never notices. What it cannot stop is the
+     * pattern the field log actually showed at 13:04:31-37 — window focus
+     * flipping false -> true every 2-3 s, and a fresh MainActivity each time,
+     * with the user never having asked for any of it. F2 makes this reachable
+     * on purpose (a Play instruction clears the dismissal outright), so the
+     * counterpart has to be a budget, not a delay: past the budget the cast
+     * still plays, it just stops dragging the user back to the home screen.
+     */
+    private var autoForegroundWindowStartMs = 0L
+    private var autoForegroundCountInWindow = 0
 
     /** How often a refused auto-foreground launch has been retried. */
     private var foregroundLaunchRetries = 0
@@ -1024,6 +1049,26 @@ class PhairPlayService : Service() {
             return
         }
         val now = System.currentTimeMillis()
+        // v99-③ — the per-minute budget, checked before the 3 s throttle so a
+        // minute of "every poll gets a fresh Activity" is bounded even when
+        // each individual launch is far enough apart to pass it.
+        if (now - autoForegroundWindowStartMs >= AUTOFOREGROUND_BUDGET_WINDOW_MS) {
+            autoForegroundWindowStartMs = now
+            autoForegroundCountInWindow = 0
+        }
+        if (autoForegroundCountInWindow >= AUTOFOREGROUND_BUDGET_MAX) {
+            // Over budget: play, do not drag. Same courtesy the dismissal path
+            // extends — the receiver stops waiting for a UI that is not coming
+            // and starts on its own, so the user hears the cast instead of
+            // watching an app they left keep pulling itself into view.
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "自动前台总闸：60s 内已拉起 $autoForegroundCountInWindow 次（上限 $AUTOFOREGROUND_BUDGET_MAX）" +
+                    "→ 本次只播不拉前台（$reason）。播放正常，界面不再自动抢"
+            )
+            dlnaReceiver?.cancelForegroundWaitAndStartAudio()
+            return
+        }
         if (now - lastForegroundLaunchMs < AUTOFOREGROUND_THROTTLE_MS) {
             // Re-queue instead of dropping. A dropped request is what made the
             // "偶尔投屏只出声" reports: the receiver had already parked the
@@ -1076,6 +1121,7 @@ class PhairPlayService : Service() {
             // one and the throttle would suppress the retry that might work.
             lastForegroundLaunchMs = attemptedAt
             foregroundLaunchRetries = 0
+            autoForegroundCountInWindow++
             com.phairplay.util.DebugLog.log("DLNA", "自动前台：已发出 MainActivity（$reason）")
         }.onFailure { err ->
             // A launch refused in the same second is usually a race with the
@@ -1252,6 +1298,16 @@ class PhairPlayService : Service() {
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
         const val EXTRA_AUTO_FOREGROUND_REASON = "com.phairplay.extra.AUTO_FOREGROUND_REASON"
         const val AUTOFOREGROUND_THROTTLE_MS = 3_000L
+
+        /**
+         * v99-③ — per-minute auto-foreground budget. Past this many launches
+         * the cast keeps playing and the UI stops being pulled up. The window
+         * is a minute because that is the senders' polling period.
+         */
+        const val AUTOFOREGROUND_BUDGET_WINDOW_MS = 60_000L
+
+        /** How many auto-foreground launches one minute buys. */
+        const val AUTOFOREGROUND_BUDGET_MAX = 3
 
         /**
          * How long a dismissal keeps withholding the picture — see

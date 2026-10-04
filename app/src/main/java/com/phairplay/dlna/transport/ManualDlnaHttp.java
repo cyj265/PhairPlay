@@ -94,11 +94,87 @@ public final class ManualDlnaHttp {
     private static volatile long positionSeconds = 0;
     private static volatile int volume = 50;
 
+    /**
+     * v99-④ — bumped by every SetAVTransportURI so the auto-start timer below
+     * can tell "still the item the sender just set" from "that item was
+     * replaced ten minutes ago".
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger setUriGeneration =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * v99-④ — how long a sender may leave an item set and never send Play.
+     *
+     * The field log at 13:10 shows four SetAVTransportURI with no Play after
+     * them and nothing at all in response: we accepted the URI, the control
+     * point waited, and the user saw a box that had been told what to play
+     * and did nothing. Most senders follow up immediately, so a short grace
+     * period costs nothing when Play does arrive.
+     */
+    private static final long SET_URI_AUTOSTART_DELAY_MS = 3000L;
+
     private ManualDlnaHttp() {
     }
 
     public static String getTransportState() {
         return transportState;
+    }
+
+    /**
+     * v99-④ — the player really started, so say so before anyone asks.
+     *
+     * A sender polls TransportState and stops re-sending Set/Play once it
+     * sees PLAYING. Telling it at the moment playback actually begins (rather
+     * than only when the Play action arrives) is what closes that loop.
+     */
+    public static void markPlaying() {
+        transportState = "PLAYING";
+        GenaNotifier.push();
+    }
+
+    /**
+     * v99-④ — SetAVTransportURI with no Play behind it: start anyway.
+     *
+     * Guards, all of which the field log made necessary:
+     * <ul>
+     *   <li>generation — a newer SetAVTransportURI replaced this one;</li>
+     *   <li>uri — the media changed under us;</li>
+     *   <li>state — a Play did arrive inside the grace period, so this timer
+     *       is redundant and starting a second time is exactly the duplicate
+     *       MediaCodec the decoder-slot work spent a week trying to stop.</li>
+     * </ul>
+     */
+    private static void scheduleAutoStart(final String uri, final int generation) {
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(SET_URI_AUTOSTART_DELAY_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                try {
+                    if (generation != setUriGeneration.get()) return;
+                    if (!uri.equals(currentUri)) return;
+                    if ("PLAYING".equals(transportState)) return;
+                    DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI 后 "
+                            + (SET_URI_AUTOSTART_DELAY_MS / 1000)
+                            + "s 未收到 Play → 自动起播: " + uri);
+                    com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
+                    if (c != null) {
+                        c.startPlayback(uri);
+                    }
+                    transportState = "PLAYING";
+                    GenaNotifier.push();
+                } catch (Throwable ignored) {
+                    // The player is the receiver's problem now; failing here
+                    // must never take the HTTP server down.
+                }
+            }
+        }, "dlna-seturi-autostart");
+        t.setDaemon(true);
+        t.start();
     }
 
     public static boolean isDeviceDesc(String path) {
@@ -476,6 +552,9 @@ public final class ManualDlnaHttp {
                 com.phairplay.dlna.DlnaMediaMeta.setMeta(
                     (title != null && !title.isEmpty()) ? title : guessTitle(uri),
                     artist, artUri);
+                // v99-④: a sender that sets an item and never says Play should
+                // still get playback, three seconds after it stopped talking.
+                scheduleAutoStart(uri, setUriGeneration.incrementAndGet());
                 return avtResponse("SetAVTransportURIResponse", "");
             }
             case "Play": {

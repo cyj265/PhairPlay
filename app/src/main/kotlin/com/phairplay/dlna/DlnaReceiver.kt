@@ -518,6 +518,29 @@ class DlnaReceiver(
     private var pendingStartUri: String? = null
 
     /**
+     * v99-② — when [pendingStartUri] was parked, so "pending" can expire.
+     *
+     * v98's F3 dropped [hasPendingCast] from the UI's paint decision, which
+     * cured the layer that lies about having a picture but also left the 1-3 s
+     * between SetURI and the first real surface with no way back at all. The
+     * fix is not to restore that permanently but to restore it with a deadline:
+     * long enough to cover the wait, short enough that a genuinely stuck cast
+     * stops claiming there is something to watch.
+     */
+    @Volatile
+    private var pendingStartAtMs = 0L
+
+    /** The single place a pending item is recorded, so the clock starts here. */
+    private fun holdPending(uri: String?) {
+        // Nullable on purpose: two of the callers sit in the player-error
+        // handler, where currentUri may already be gone. Parking nothing is
+        // the right answer there — the sender's next Play brings the uri back.
+        if (uri.isNullOrEmpty()) return
+        pendingStartUri = uri
+        pendingStartAtMs = System.currentTimeMillis()
+    }
+
+    /**
      * The item the UI must reveal even though nothing has started yet.
      *
      * [currentCastUri] is deliberately NOT the answer to "is there something to
@@ -533,6 +556,19 @@ class DlnaReceiver(
 
     /** True while an item the sender pushed is still waiting to start. */
     fun hasPendingCast(): Boolean = pendingStartUri != null
+
+    /**
+     * v99-② — a pending item that is still young enough to be worth a layer.
+     *
+     * Both sides agreed (round 5/6 of the coordination doc) that F3 was about
+     * a layer claiming to show something for good, not about the seconds while
+     * the surface is still being laid out.
+     */
+    fun hasRecentPendingCast(): Boolean {
+        val parked = pendingStartUri ?: return false
+        if (parked.isEmpty()) return false
+        return System.currentTimeMillis() - pendingStartAtMs <= PENDING_CAST_ENTRY_MS
+    }
 
     /** True while the Activity really is in the foreground (see [setUiForeground]). */
     @Volatile
@@ -644,14 +680,22 @@ class DlnaReceiver(
         // down on a slow source is what turned "one slow channel" into a
         // two-minute black screen. If the probe says the far end is fine, retry
         // the item instead of taking the decoder away.
+        val probeAge = System.currentTimeMillis() - lastProbeAtMs
         val probeFresh =
-            lastProbeOkMs > 0 && System.currentTimeMillis() - lastProbeOkMs < PROBE_FRESHNESS_MS
-        if (probeFresh && sourceSlowRetries < SOURCE_SLOW_RETRY_LIMIT) {
+            lastProbeVerdict == PROBE_HEALTHY && probeAge < PROBE_FRESHNESS_MS
+        // v99-①: "we could not classify the answer" is not "the source is
+        // dead". It retries the item like a slow source does and, like a slow
+        // source, never takes the decoder slot away on its own. Only a proven
+        // non-media answer (or never having probed at all) may cool down.
+        val probeUnproven =
+            lastProbeVerdict == PROBE_UNPROVEN && probeAge < PROBE_FRESHNESS_MS
+        if ((probeFresh || probeUnproven) && sourceSlowRetries < SOURCE_SLOW_RETRY_LIMIT) {
             sourceSlowRetries++
             DebugLog.log(
                 "DLNA",
                 "READY 后 ${FIRST_PICTURE_TIMEOUT_MS / 1000}s 仍无画面（视频轨 0x0），" +
-                    "但源探测 $lastProbeCode 正常 → 判为源侧慢，不交还硬解槽，" +
+                    (if (probeFresh) "但源探测 $lastProbeCode 正常" else "但源探测未确证（不判死）") +
+                    " → 判为源侧慢，不交还硬解槽，" +
                     "${SOURCE_SLOW_RETRY_MS / 1000}s 后重试起播（第 $sourceSlowRetries/$SOURCE_SLOW_RETRY_LIMIT 次）"
             )
             surfaceGeneration++
@@ -706,6 +750,23 @@ class DlnaReceiver(
     private var lastProbeOkMs = 0L
 
     private var lastProbeCode = 0
+
+    /**
+     * v99-① — what the last probe actually proved.
+     *
+     * [lastProbeOkMs] cannot carry this on its own any more: "the far end
+     * answered with something we do not understand" and "we never got to
+     * ask" both leave it at 0, and [firstPictureWatchdog] reads that 0 as
+     * "the source is dead, take the decoder slot back". Keeping the verdict
+     * separate is what lets an unproven answer retry the item instead of
+     * cooling it down.
+     */
+    private var lastProbeVerdict = PROBE_NONE
+
+    /** When the last 2xx probe landed, whatever its verdict. A verdict older
+     *  than [PROBE_FRESHNESS_MS] stops protecting the source from the
+     *  cooldown — an hour-old "unproven" is not evidence about today. */
+    private var lastProbeAtMs = 0L
 
     private var sourceSlowRetries = 0
 
@@ -818,6 +879,14 @@ class DlnaReceiver(
                                     // the next item instead of carrying a verdict
                                     // that only ever applied to the one that hung.
                                     consecutiveDecoderFailures = 0
+                                    // v99-④: an audio item never renders a first
+                                    // frame, so READY is where its proof of life
+                                    // happens. Without this a music cast stayed
+                                    // "STOPPED" in the sender's eyes and was
+                                    // re-pushed until it gave up.
+                                    if (DlnaMediaMeta.audioOnly) {
+                                        ManualDlnaHttp.markPlaying()
+                                    }
                                     // READY only means the *audio* pipeline is
                                     // healthy. With a video item and no frames
                                     // (视频轨 0x0) it is still a black screen, and
@@ -901,6 +970,13 @@ class DlnaReceiver(
                             // The box can hand its decoder back: reset the backoff so
                             // the next hiccup starts from the short delay again.
                             notePlaybackHealthy()
+                            // v99-④ — pixels on screen is the moment the sender has
+                            // been waiting for. Saying PLAYING here (rather than
+                            // only when the Play action arrived) is what lets a
+                            // polling control point stop re-sending Set/Play, which
+                            // is how the same URI used to be re-pushed every 10-30 s
+                            // and re-entered every gate on the way.
+                            ManualDlnaHttp.markPlaying()
                             // v86: retract an "audio only" verdict once real pixels
                             // land. READY saw videoSize 0x0 *because there was no
                             // surface yet*, not because the item is music, and
@@ -1092,7 +1168,7 @@ class DlnaReceiver(
                                     "无渲染面导致的解码失败 → 重新等待播放层，不再盲目重试: ${uri?.take(72)}…"
                                 )
                                 enterDecoderCooldown("本次起播没有真实渲染面")
-                                pendingStartUri = uri
+                                holdPending(uri)
                                 surfaceReady = false
                                 realSurfacePresent = false
                                 surfaceGeneration++
@@ -1113,7 +1189,7 @@ class DlnaReceiver(
                                 // instance is what takes the hardware decoder away
                                 // from every other app on the box until reboot.
                                 enterDecoderCooldown("解码器初始化失败(${failedCodec ?: "?"})")
-                                pendingStartUri = uri
+                                holdPending(uri)
                                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
                                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                                 onPlaybackUiNeeded()
@@ -1375,22 +1451,39 @@ class DlnaReceiver(
                 // "READY but 0x0" watchdog can tell a slow source from a dead
                 // decoder instead of cooling down on every live channel.
                 if (code in 200..299) {
-                    if (looksLikeMediaPayload(type, head)) {
-                        lastProbeOkMs = System.currentTimeMillis()
-                        lastProbeCode = code
-                    } else {
-                        // v98 F4 — a 200 only means the far end is alive, not
-                        // that it is the media. The app's own relay answers
-                        // with its index page (text/plain, an ASCII banner) for
-                        // anything it cannot resolve. Believing that kept the
-                        // watchdog retrying a source that was never the source:
-                        // the point-by-point cast took 21 s to its first frame
-                        // against 1 s for a plain numeric-IP stream.
-                        lastProbeOkMs = 0L
-                        DebugLog.log(
-                            "DLNA",
-                            "源探测: HTTP 200 但不是媒体载荷（Content-Type=$type）→ 判为假成功，不计入源健康"
-                        )
+                    lastProbeAtMs = System.currentTimeMillis()
+                    when (classifyProbePayload(type, head)) {
+                        PROBE_HEALTHY -> {
+                            lastProbeOkMs = System.currentTimeMillis()
+                            lastProbeCode = code
+                            lastProbeVerdict = PROBE_HEALTHY
+                        }
+                        PROBE_UNPROVEN -> {
+                            // v99-①: the far end answered, but with a type we do
+                            // not know. That is not evidence of a dead source, so
+                            // it must neither count as healthy nor reach the
+                            // cooldown: the first frame gets to decide. v98 wrote
+                            // lastProbeOkMs = 0L here, which firstPictureWatchdog
+                            // reads as "source is dead" — one unrecognised
+                            // Content-Type and the real source froze for a minute.
+                            lastProbeVerdict = PROBE_UNPROVEN
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: HTTP 200 但类型未确证（Content-Type=$type）→ 探测未确证，" +
+                                    "不计入源健康，也不作为冷却依据"
+                            )
+                        }
+                        else -> {
+                            // The only answer allowed to cool the source down:
+                            // text that is not a playlist really is the relay
+                            // showing its index page (field log 13:07:58).
+                            lastProbeVerdict = PROBE_INVALID
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: HTTP 200 但确凿非媒体（Content-Type=$type，首字节非 #EXTM3U）" +
+                                    "→ 判为确凿非媒体，允许冷却"
+                            )
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -1402,24 +1495,35 @@ class DlnaReceiver(
     }
 
     /**
-     * v98 F4 — is the far end actually serving media, or just answering?
+     * v99-① — what did the probe actually prove? Three answers, not two.
      *
-     * A 200 with a text/plain body is the app's own relay telling us it could
-     * not resolve anything and is showing its index page instead. The field log
-     * (13:07:58) caught exactly that: `HTTP 200, Content-Type=text/plain`
-     * whose first bytes were an ASCII banner, while the very same cast took
-     * 21 s to its first frame. [probeSourceAsync] now refuses to call that
-     * "the source is healthy", so the READY-but-0x0 watchdog stops retrying
-     * against a source that was never the source.
+     * v98 asked a yes/no question ("is this media?") and a "no" was treated as
+     * a dead source, which is how an unknown Content-Type ended up freezing a
+     * real source. The split that matters:
+     *
+     * - [PROBE_HEALTHY] a playlist, or a container type we recognise
+     * - [PROBE_INVALID] **proven** not to be media: text/plain or text/html
+     *   whose body does not start with `#EXTM3U`. The field log (13:07:58)
+     *   caught exactly this — the app's own relay answering with an ASCII
+     *   index page while that same cast took 21 s to its first frame.
+     * - [PROBE_UNPROVEN] anything else. A CDN is free to answer `video/MP2T`,
+     *   `binary/octet-stream`, or nothing at all; that is a gap in our
+     *   knowledge, not a verdict on the source.
      */
-    private fun looksLikeMediaPayload(contentType: String, firstBytes: String): Boolean {
-        val type = contentType.lowercase()
+    private fun classifyProbePayload(contentType: String, firstBytes: String): Int {
+        val type = contentType.trim().lowercase()
         // A textual answer is only acceptable when it really is a playlist.
         if (type.contains("text/plain") || type.contains("text/html")) {
-            return firstBytes.trimStart().startsWith("#EXTM3U")
+            return if (firstBytes.trimStart().startsWith("#EXTM3U")) {
+                PROBE_HEALTHY
+            } else {
+                PROBE_INVALID
+            }
         }
-        return type.isBlank() ||
-            type.contains("mpegurl") ||
+        // No Content-Type at all: plenty of stream endpoints omit it, and the
+        // placeholder the probe substitutes for null must land here too.
+        if (type.isBlank() || type.startsWith("(无")) return PROBE_HEALTHY
+        if (type.contains("mpegurl") ||
             type.contains("x-mpegurl") ||
             type.contains("video/") ||
             type.contains("audio/") ||
@@ -1428,6 +1532,10 @@ class DlnaReceiver(
             type.contains("mp4") ||
             type.contains("mpeg") ||
             type.contains("matroska")
+        ) {
+            return PROBE_HEALTHY
+        }
+        return PROBE_UNPROVEN
     }
 
     // ───────────────────────── MediaItem construction ─────────────────────────
@@ -1477,6 +1585,11 @@ class DlnaReceiver(
         decoderCooldownUntilMs = 0L
         decoderCooldownMs = DECODER_COOLDOWN_MS
         consecutiveCooldowns = 0
+        // v99-①: a verdict belongs to one item. Carrying it into the next
+        // cast would let yesterday's "healthy" excuse today's silence.
+        lastProbeVerdict = PROBE_NONE
+        lastProbeAtMs = 0L
+        lastProbeOkMs = 0L
         parkedForUi = null
         mainHandler.removeCallbacks(decoderCooldownRetry)
         mainHandler.removeCallbacks(firstPictureWatchdog)
@@ -1827,7 +1940,7 @@ class DlnaReceiver(
             // Deliberately routed through the surface gate: preparing here
             // without a real Surface is what wedged the decoder in the first place.
             if (!uiForeground && !realSurfacePresent) {
-                pendingStartUri = parked.uri
+                holdPending(parked.uri)
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                 mainHandler.postDelayed(
                     foregroundTimeoutRunnable, FOREGROUND_WAIT_MS.toLong()
@@ -1835,7 +1948,7 @@ class DlnaReceiver(
             } else if (surfaceReady) {
                 runStart(parked.uri)
             } else {
-                pendingStartUri = parked.uri
+                holdPending(parked.uri)
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
                 mainHandler.postDelayed(surfaceTimeoutRunnable, SURFACE_WAIT_MS.toLong())
             }
@@ -1851,6 +1964,25 @@ class DlnaReceiver(
             if (!started) return@post
 
             val p = player ?: return@post
+
+            // v99-④ — the same URI is already playing: do not build it again.
+            //
+            // Senders re-push SetAVTransportURI + Play every 10-30 s to find out
+            // whether playback began, so this branch runs dozens of times for
+            // one cast. Every one of them used to walk the whole gate chain and
+            // reach runStart, and one MediaCodec leaked per visit — the failure
+            // mode the decoder-slot work spent a week tracking down. Once the
+            // item is READY with playWhenReady, the answer is known: say
+            // PLAYING so the sender stops asking, and go no further.
+            if (uri == currentUri && p.playWhenReady && p.playbackState == Player.STATE_READY) {
+                DebugLog.log(
+                    "DLNA",
+                    "同一 URI 已在播放 → 忽略重复的 Play（幂等，不重建播放器）: ${uri.take(64)}…"
+                )
+                ManualDlnaHttp.markPlaying()
+                report(ProtocolState.CONNECTED)
+                return@post
+            }
 
             // v98 F2 — a Play instruction is the sender plainly asking for
             // playback, so it outranks whatever we remembered about this uri.
@@ -1886,14 +2018,6 @@ class DlnaReceiver(
                 return@post
             }
 
-            // Something is already queued behind a missing render surface: the
-            // sender is polling the very item we could not start yet, so stay
-            // armed instead of replacing the pending attempt.
-            if (pendingStartUri == uri && !surfaceReady) {
-                report(ProtocolState.CONNECTED)
-                return@post
-            }
-
             // ── Respect the decoder cooldown ───────────────────────────────────
             // A brand new SetAVTransportURI + Play arrives while the box is still
             // cooling down from a failed init must NOT start immediately. That is
@@ -1904,6 +2028,12 @@ class DlnaReceiver(
             // the same treatment, because the slot is a box-wide resource, not
             // per-channel.
             if (decoderCooldownActive()) {
+                // v99-②: deliberately a plain assignment, not holdPending().
+                // This is the same item waiting out a cooldown, not a new
+                // promise, and the sender polls here every 10-30 s — renewing
+                // the 3 s entry window on every poll would keep the playback
+                // layer on the home screen for the whole cooldown, which is
+                // the v97 black-rectangle report all over again.
                 pendingStartUri = uri
                 mainHandler.removeCallbacks(decoderCooldownRetry)
                 mainHandler.postDelayed(decoderCooldownRetry, COOLDOWN_RECHECK_MS.toLong())
@@ -1933,7 +2063,7 @@ class DlnaReceiver(
             // surface overrides the flag; [uiForeground] only decides whether we
             // need to *wait* for one.
             if (!uiForeground && !realSurfacePresent) {
-                pendingStartUri = uri
+                holdPending(uri)
                 mainHandler.removeCallbacks(foregroundTimeoutRunnable)
                 if (!uiGateBlocked) {
                     mainHandler.postDelayed(
@@ -1967,7 +2097,7 @@ class DlnaReceiver(
             // The UI is on screen but the revealed PlayerView may not have a
             // real Surface yet. [SURFACE_WAIT_MS] keeps a hard cap.
             if (!surfaceReady) {
-                pendingStartUri = uri
+                holdPending(uri)
                 mainHandler.removeCallbacks(surfaceTimeoutRunnable)
                 if (!uiGateBlocked) {
                     mainHandler.postDelayed(
@@ -2378,6 +2508,33 @@ class DlnaReceiver(
 
         /** Slow-source retries before falling back to the decoder cooldown. */
         private const val SOURCE_SLOW_RETRY_LIMIT = 3
+
+        // ── v99-①: the probe gets four verdicts instead of two. v98 answered
+        // "healthy / definitely not media", and the second one fed
+        // firstPictureWatchdog's cooldown directly (it zeroes lastProbeOkMs),
+        // so a single unknown Content-Type froze the real source for
+        // 8 -> 16 -> 32 -> 60 s. "Unproven" is now its own answer: not
+        // healthy, not a reason to take the decoder away either.
+
+        /** Never probed. Keeps the v97 behaviour: no answer, no mercy. */
+        private const val PROBE_NONE = 0
+
+        /** Proven media: a playlist, or a container type we know. */
+        private const val PROBE_HEALTHY = 1
+
+        /** Answered, but the Content-Type is one we do not recognise. */
+        private const val PROBE_UNPROVEN = 2
+
+        /** Proven not to be media: text that is not a playlist. */
+        private const val PROBE_INVALID = 3
+
+        /**
+         * v99-② — how long a parked item still counts as "there is something
+         * worth showing". SetURI to first real surface is normally well under a
+         * second; 3 s is the slack both sides agreed on, short enough that a
+         * cast which never starts stops holding the playback layer open.
+         */
+        private const val PENDING_CAST_ENTRY_MS = 3_000L
 
         /** How long [startPlayback] waits for the UI to be on screen. */
         private const val FOREGROUND_WAIT_MS = 10_000
