@@ -88,6 +88,7 @@ device-test-logs/
 /box_getprop.txt
 /box_ps*.txt
 /box_mounts*.txt
+/box_log*.txt
 /watch_net.sh
 /deploy_autostart.sh
 /ls_test.txt
