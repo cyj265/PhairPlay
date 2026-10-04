@@ -141,7 +141,9 @@ class MainActivity : AppCompatActivity() {
         // v99-②: pending is back, but with a 3 s deadline. Dropping it
         // outright cured the lying layer and left the 1-3 s between SetURI
         // and the first real surface with no way back at all — press Back
-        // there and there is nothing to return to. The 3 s deadline covers that wait; a cast that never starts stops holding the layer.
+        // there and there is nothing to return to. The deadline is for that
+        // wait only: long enough to cover it, short enough that a cast which
+        // never starts stops holding the playback layer open.
         return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive() || svc.hasRecentPendingCast()
     }
 
