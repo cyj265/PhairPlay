@@ -22,6 +22,8 @@ PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed be
 
 The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
 
+The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from scratch rather than on top of a UPnP stack library — and is validated on Amlogic Android TV hardware (Fire TV, N1 boxes) for live TV and on-demand video.
+
 Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
 
 ## Features
@@ -39,6 +41,15 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - AirPlay photo receiver — JPEG/PNG from iOS Photos app displayed full-screen
 - Access-control lockout after repeated failed pairing attempts
 
+### DLNA / UPnP (fully implemented)
+- Self-written SSDP + SOAP control plane — no third-party UPnP stack, so the device description and the AVTransport actions are ours to get right (SCPD completeness, `ssdp:all` replies, notification of the `1900` port)
+- Live TV and on-demand video: HLS, FLV and MPEG-TS, including the relay/proxy URLs Chinese phone apps hand out
+- HEVC (H.265) hardware decode on Amlogic boxes, with a decoder-slot guard that hands the slot back instead of freezing when a stream fails
+- **Back key built for a TV remote:** Back pauses the cast and returns to the home screen, the session stays alive, and a second Back ends it — the picture never comes back on its own
+- Sender-aware playback: a Play instruction resumes from the pause point, a repeated Set of the same item is ignored, and the picture is never dragged back over the home screen by a polling sender
+- Source diagnostics: a source that answers with a challenge page instead of a media manifest is reported as such on screen, instead of leaving a black rectangle
+- Live diagnostic port (`8099`) exposing the running log for field debugging without a USB cable
+
 ### App & Platform
 - Android TV / Fire TV app shell with foreground service and status UI
 - Mirror audio toggle and PIN-auth toggle in Settings
@@ -55,6 +66,7 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
 - **Cloud/remote streaming** — local network only
 - **Miracast / Cast media playback** — control plane is ready; media decode integration is in progress
+- **DRM-protected streaming** (DRM-protected HLS, e.g. some IPTV/OTT portals) — the source serves an encrypted stream, so no receiver can play it
 
 ---
 
@@ -174,6 +186,8 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 3. Select your TV from the list (it should appear as your TV's name).
 4. Your Mac's screen will appear on the TV instantly.
 5. To stop: click the AirPlay icon on your Mac and select "Turn Off AirPlay Mirroring", or just quit PhairPlay on the TV.
+
+**Casting from a phone or tablet (DLNA):** open the app's cast button and pick your TV. While a video is playing, press **Back** to pause and return to the home screen — the cast stays alive, and the *继续播放* pill (or the DLNA card) brings the picture back from the same position. Press **Back** again from the home screen to end the cast.
 
 ---
 
