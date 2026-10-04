@@ -800,7 +800,7 @@ class PhairPlayService : Service() {
             dismissedAtMs = System.currentTimeMillis()
             com.phairplay.util.DebugLog.log(
                 "DLNA",
-                "用户结束投屏 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动摆到前台: ${onScreen.take(64)}…"
+                "用户结束投屏 → 已停止播放，${DISMISS_TTL_MS / 1000}s 内不再自动拉起前台: ${onScreen.take(64)}…"
             )
         }
         dlnaReceiver?.stopPlaybackFromUi()

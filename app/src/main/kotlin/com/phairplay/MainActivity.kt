@@ -1610,7 +1610,17 @@ class MainActivity : AppCompatActivity() {
             // reached stopDlnaPlayback, the item merely got paused in onStop, and
             // re-entering the app resumed it. That is the "退出 App 停止媒体没有
             // 生效" report.
-            if (event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) {
+            // v101: action matters, not just the key code.
+            // dispatchKeyEvent sees ACTION_DOWN and ACTION_UP for one press,
+            // and both carry repeatCount 0. Without this guard the first event
+            // paused and hid the player (so isDlnaPlayerVisible became false)
+            // and the second one fell through to the "really end it" branch —
+            // one Back, both behaviours, session dead (field log 22:35:17:
+            // pause, pause, "用户结束投屏" in the same second).
+            if (event.keyCode == KeyEvent.KEYCODE_BACK &&
+                event.action == KeyEvent.ACTION_DOWN &&
+                event.repeatCount == 0
+            ) {
                 if (dlna) {
                     // v101-① — Back inside the picture means "pause", not "end".
                     //

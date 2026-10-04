@@ -169,6 +169,12 @@ public final class ManualDlnaHttp {
     public static void markPaused() {
         transportState = "PAUSED_PLAYBACK";
         GenaNotifier.push();
+        // v101-③ verification: this used to leave no trace, so "no PAUSED_PLAYBACK
+        // in the log" could not be told apart from "never called". The state
+        // itself is observable from the outside - a GetTransportInfo during a
+        // pause returns it - but the sender stops polling once it sees the
+        // pause, so in practice it is the only place it shows up.
+        DebugLog.INSTANCE.log("SOAP", "markPaused → transportState=PAUSED_PLAYBACK，GENA 推送已发");
     }
 
     /**
