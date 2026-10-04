@@ -87,7 +87,9 @@ device-test-logs/
 /hwprobe*.sh
 /box_getprop.txt
 /box_ps*.txt
+/box_mounts*.txt
 /watch_net.sh
+/deploy_autostart.sh
 /ls_test.txt
 /rate.txt
 /v82diff.txt
