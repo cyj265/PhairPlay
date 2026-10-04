@@ -136,6 +136,33 @@ object DebugLog {
         }
     }
 
+    /**
+     * Records a throwable — its type, message and the frames that got here.
+     *
+     * **Why this exists:** the ring/log used to keep only a one-line summary of
+     * a `PlaybackException`'s cause, and the real stack stayed in logcat. On
+     * this box logcat is only reachable over ADB, and a cast that fails every
+     * thirty seconds dies long before anyone can reproduce it with a cable
+     * attached. The `IllegalArgumentException @ SampleQueue.commitSample` in
+     * particular was being reported as "source glitch" from its summary line
+     * alone, which pointed the whole investigation at the CDN.
+     */
+    @JvmStatic
+    fun throwable(tag: String, t: Throwable, maxFrames: Int = 10) {
+        log(tag, "异常 ${t.javaClass.name}: ${t.message}")
+        var current: Throwable? = t
+        // Follow the cause chain too: media3 wraps the interesting exception in
+        // PlaybackException, and the frames we need are one or two levels down.
+        var links = 0
+        while (current != null && links <= 2) {
+            for (frame in current.stackTrace.take(maxFrames)) {
+                log(tag, "    at $frame")
+            }
+            current = current.cause
+            links++
+        }
+    }
+
     private fun appendToFile(target: File, line: String) {
         try {
             if (target.length() > MAX_FILE_BYTES) {

@@ -482,6 +482,23 @@ class DlnaReceiver(
     @Volatile
     private var pendingStartUri: String? = null
 
+    /**
+     * The item the UI must reveal even though nothing has started yet.
+     *
+     * [currentCastUri] is deliberately NOT the answer to "is there something to
+     * paint?": it is only written in [runStart], which runs *after* the surface
+     * gate. A cast that is still waiting for its layer therefore reported
+     * "no uri", the UI refused to show the player, the surface never appeared,
+     * the fallback fired and the box played sound behind a home screen — the
+     * reported symptom, and a deadlock created by the guard meant to prevent
+     * it. Play is a firm promise that an item follows; showing the layer is
+     * what makes that promise real.
+     */
+    val pendingCastUri: String? get() = pendingStartUri
+
+    /** True while an item the sender pushed is still waiting to start. */
+    fun hasPendingCast(): Boolean = pendingStartUri != null
+
     /** True while the Activity really is in the foreground (see [setUiForeground]). */
     @Volatile
     private var uiForeground = false
@@ -509,11 +526,16 @@ class DlnaReceiver(
      *  [startedOnRealSurface]). */
     private val surfaceTimeoutRunnable = Runnable {
         val uri = pendingStartUri ?: return@Runnable
+        // Same reasoning as [foregroundTimeoutRunnable]: the layer that owns
+        // the Surface is what the Activity must show, and if it is hidden the
+        // next poll finds the same state. Ask before giving up; the audio-only
+        // start below remains the guarantee that sound happens either way.
+        onSurfaceProbeNeeded()
         pendingStartUri = null
         surfaceReady = true
         DebugLog.log(
             "DLNA",
-            "等待播放层 ${SURFACE_WAIT_MS / 1000}s 未就绪 → 按仅音频起播: $uri"
+            "等待播放层 ${SURFACE_WAIT_MS / 1000}s 未就绪 → 再请求一次界面，按仅音频起播: $uri"
         )
         if (started) runStart(uri, audioOnly = true)
     }
@@ -792,6 +814,25 @@ class DlnaReceiver(
                             // The box can hand its decoder back: reset the backoff so
                             // the next hiccup starts from the short delay again.
                             notePlaybackHealthy()
+                            // v86: retract an "audio only" verdict once real pixels
+                            // land. READY saw videoSize 0x0 *because there was no
+                            // surface yet*, not because the item is music, and
+                            // nothing ever retracted it — so the decorative music
+                            // card stayed stretched over a working picture: the
+                            // "music UI on top, video underneath" report. The UI
+                            // refreshes at 2 Hz, so one tick drops the card.
+                            mainHandler.post {
+                                val size = player?.videoSize
+                                if (DlnaMediaMeta.audioOnly &&
+                                    size != null && size.width > 0 && size.height > 0
+                                ) {
+                                    DlnaMediaMeta.audioOnly = false
+                                    DebugLog.log(
+                                        "DLNA",
+                                        "首帧已渲染且视频轨有效 → 撤销仅音频标记（收起音乐卡片）"
+                                    )
+                                }
+                            }
                             DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
                             // The strongest possible "there is a picture now".
                             onPlaybackActivityChanged()
@@ -804,6 +845,9 @@ class DlnaReceiver(
                             val msg = "DLNA播放失败: ${error.errorCodeName ?: error.errorCode} ${error.message}"
                             Logger.e("DLNA playback error: $msg", error)
                             DebugLog.log("DLNA", msg)
+                            // The frames, not just the summary: a cause-only line is what
+                            // made the HLS assertion look like a CDN problem.
+                            DebugLog.throwable("DLNA", error)
                             DebugLog.log(
                                 "DLNA",
                                 "错误根因: ${cause ?: "(无 cause)"} 超时/网络=${error.errorCode / 1000}"
@@ -894,7 +938,25 @@ class DlnaReceiver(
                             // one is real and needs the card to say so.
                             val sourceGlitch = error.errorCode / 1000 == 2
                             if (sourceGlitch) {
-                                DebugLog.log("DLNA", "源端瞬时抖动（可自恢复），不向界面报错")
+                                // v88: an IllegalArgumentException from inside
+                                // media3's `SampleQueue.commitSample` also lands
+                                // in this bucket (errorCode 1000+2, cause
+                                // IllegalArgumentException), so the old "source
+                                // glitch" wording sent every reader straight to
+                                // the CDN. Say which of the two it actually is —
+                                // the assertion is a player-internal sample
+                                // ordering problem and cannot be fixed upstream.
+                                val internal =
+                                    error.cause is IllegalArgumentException ||
+                                        error.cause?.cause is IllegalArgumentException
+                                DebugLog.log(
+                                    "DLNA",
+                                    if (internal)
+                                        "错误根因=播放器内部断言（Media3 SampleQueue.commitSample：样本偏移回退，非网络/源端）" +
+                                            "，不向界面报错（此类异常被 catch 不住，靠下一次重建自愈）"
+                                    else
+                                        "源端瞬时抖动（可自恢复），不向界面报错"
+                                )
                             } else {
                                 onError(msg)
                             }
@@ -1414,6 +1476,31 @@ class DlnaReceiver(
     }
 
     /**
+     * Declares the Activity on its way without cancelling the audio-only
+     * fallback.
+     *
+     * The service pulls the app up from its own thread when a cast arrives
+     * while the Activity sits in the background. That launch lands a good
+     * second or two *after* the receiver already decided "no foreground,
+     * wait and then start audio-only" — the cast we saw spend the whole
+     * [FOREGROUND_WAIT_MS] on a launch that was in fact already running.
+     * Confirming the foreground early stops that wait, but the fallback must
+     * survive: if the Activity is refused (user in another app, low memory)
+     * the timeout is the only thing that ever makes a sound.
+     */
+    fun setUiForegroundPending(foreground: Boolean) {
+        mainHandler.post {
+            uiForeground = foreground
+            if (foreground) {
+                DebugLog.log(
+                    "DLNA",
+                    "服务侧已确认前台（Activity 启动中）→ 不再等满 ${FOREGROUND_WAIT_MS / 1000}s，转等渲染面"
+                )
+            }
+        }
+    }
+
+    /**
      * Safety net for a cast that must make *some* sound: if the Activity never
      * reaches the foreground (launch refused, user in another app) the item is
      * started without a picture instead of staying silent forever.
@@ -1427,11 +1514,13 @@ class DlnaReceiver(
      * start on it rather than throwing the picture away — that is the whole
      * difference between 10 wasted seconds and an instant start.
      */
+
     private val foregroundTimeoutRunnable = Runnable {
         val uri = pendingStartUri ?: return@Runnable
-        pendingStartUri = null
-        surfaceReady = true
+
         if (realSurfacePresent) {
+            pendingStartUri = null
+            surfaceReady = true
             DebugLog.log(
                 "DLNA",
                 "等待前台期间渲染面已就绪 → 直接在真实渲染面上起播（不再等满 ${FOREGROUND_WAIT_MS / 1000}s）"
@@ -1439,11 +1528,47 @@ class DlnaReceiver(
             if (started) runStart(uri)
             return@Runnable
         }
-        DebugLog.log(
-            "DLNA",
-            "等待前台 ${FOREGROUND_WAIT_MS / 1000}s 未成功 → 按仅音频起播: $uri"
-        )
+
+        // v88: ask for the picture once more BEFORE falling back to sound.
+        // The cast-time request was the only one, and if a gate refused it
+        // there (a suppressed dismissal, a refused launch) nothing asked
+        // again for the whole 10 s — which is exactly the field report
+        // "cast while the app is in the background: 10 s of nothing, then it
+        // only sounds". The launch may now succeed and the layer appear on
+        // its own; the audio-only start below stays as the guarantee that
+        // something is audible.
+        DebugLog.log("DLNA", "等待前台 ${FOREGROUND_WAIT_MS / 1000}s 未成功 → 再请求一次界面（拉起/显示播放层）")
+        onSurfaceProbeNeeded()
+        onPlaybackUiNeeded()
+
+        pendingStartUri = null
+        surfaceReady = true
+        DebugLog.log("DLNA", "再请求界面后仍无渲染面 → 按仅音频起播: $uri")
         if (started) runStart(uri, audioOnly = true)
+    }
+
+    /**
+     * Drops the foreground wait because the service just refused to raise the
+     * UI — the user dismissed this cast.
+     *
+     * Without this the receiver sits out all [FOREGROUND_WAIT_MS] asking for a
+     * picture nobody is going to get, and only then starts on sound. The
+     * refusal lands *before* that wait has any chance to pay off, so the
+     * fallback fires on the spot instead of ten seconds later.
+     */
+    fun cancelForegroundWaitAndStartAudio() {
+        mainHandler.post {
+            val uri = pendingStartUri ?: return@post
+            mainHandler.removeCallbacks(foregroundTimeoutRunnable)
+            mainHandler.removeCallbacks(surfaceTimeoutRunnable)
+            pendingStartUri = null
+            surfaceReady = true
+            DebugLog.log(
+                "DLNA",
+                "界面请求被服务拒绝（用户已关闭该投屏）→ 立即仅音频起播（不再空等 ${FOREGROUND_WAIT_MS / 1000}s）"
+            )
+            if (started) runStart(uri, audioOnly = true)
+        }
     }
 
     /** Starts the parked item, if the render surface is there by now. */
@@ -1762,6 +1887,19 @@ class DlnaReceiver(
             applyRelayHeaders(uri)
             mainHandler.removeCallbacks(stallWatchdog)
             mainHandler.postDelayed(stallWatchdog, STALL_TIMEOUT_MS.toLong())
+            // v88: drop whatever the previous item left behind before loading
+            // the new one. This is the path that trips media3's
+            // `SampleQueue.commitSample` assertion — the one that used to show
+            // up as "source error, self-recovers in 2 s" — because an HLS
+            // sample queue still holding samples at high byte offsets meets an
+            // item that writes from zero, and the first write after the
+            // transition asserts. [clearPlayback] already stops and clears on
+            // the UI-exit path, but a recovery retry reaches here straight
+            // from the error handler, so clear unconditionally: for a starting
+            // player this is a no-op, for a re-entry it is the difference
+            // between a picture and another assertion two seconds later.
+            p.stop()
+            p.clearMediaItems()
             p.setMediaItem(buildMediaItem(uri))
             p.volume = (DlnaAudioRenderingControl.getVolumeValue() / 100f)
                 .coerceIn(0f, 1f)

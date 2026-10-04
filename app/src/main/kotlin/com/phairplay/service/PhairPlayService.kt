@@ -559,6 +559,11 @@ class PhairPlayService : Service() {
                 // as a new cast while a poll echo of a dismissed one does not.
                 onSenderStop = {
                     lastSeenCastUri = null
+                    // A real Stop is the sender itself telling us the session is
+                    // over: everything the user dismissed since is moot, and a
+                    // later cast of the same channel is a new cast, not an echo.
+                    dismissedCastUri = null
+                    dismissedAtMs = 0L
                     Logger.i("Sender Stop → the same uri counts as a new cast again")
                 },
                 onStateChanged = { state ->
@@ -605,7 +610,12 @@ class PhairPlayService : Service() {
                                 val stoppedSince = lastSeenCastUri == null
                                 lastSeenCastUri = uri
                                 if (newUri || stoppedSince) {
-                                    dlnaDismissedByUser = false
+                                    // A genuinely different item — or the
+                                    // sender really stopping. Either one is a
+                                    // fresh action, so whatever the user
+                                    // dismissed a moment ago no longer counts.
+                                    dismissedCastUri = null
+                                    dismissedAtMs = 0L
                                     Logger.i(
                                         "DLNA cast re-armed (newUri=$newUri stoppedSince=$stoppedSince)"
                                     )
@@ -636,7 +646,16 @@ class PhairPlayService : Service() {
                         }
                     }
                 }
-            ).also { it.start() }
+            ).also {
+                it.start()
+                // v86: replay the current foreground state into a receiver that
+                // did not exist when the Activity reported it. Without this the
+                // instance is born with uiForeground=false and no Activity
+                // callback can ever reach it again (onResume already ran), so
+                // every cast into an open app waits out the full
+                // FOREGROUND_WAIT_MS before it even starts.
+                it.setUiForeground(activityResumed)
+            }
             Logger.d("DLNA receiver started (displayName='${settings.effectiveDisplayName}')")
         }
     }
@@ -698,13 +717,31 @@ class PhairPlayService : Service() {
      * Ends DLNA playback because the user closed the UI. Discovery stays up:
      * only the media stops, and the sender is told STOPPED.
      *
-     * Also sets [dlnaDismissedByUser]: the sender keeps polling, and without
-     * this the app climbed back into the user's face a few seconds later —
-     * "opened PhairPlay and it went straight into the player, not the home
-     * screen" is that, seen from the outside.
+     * Also records a dismissal for the uri that was on screen: the sender
+     * keeps polling, and without this the app climbed back into the user's
+     * face a few seconds later — "opened PhairPlay and it went straight into
+     * the player, not the home screen" is that, seen from the outside.
+     *
+     * The dismissal carries a timestamp and only holds while the UI is in the
+     * foreground, so it survives the two or three poll echoes right after
+     * Back without becoming permanent — see [dismissalApplies].
      */
-    fun stopDlnaPlayback() {
-        dlnaDismissedByUser = true
+    fun stopDlnaPlayback(rememberDismissal: Boolean = true) {
+        val onScreen = dlnaReceiver?.currentCastUri
+        // Only a dismissal recorded in front of the user's eyes counts as "they
+        // closed this cast". Pressing Back while the window is a black
+        // rectangle is the user leaving an app they never saw — and pinning
+        // the same uri shut for the next two minutes then made the very next
+        // cast of that channel silent (the 00:31 report all over again, only
+        // with a timestamp on it).
+        if (rememberDismissal && onScreen != null) {
+            dismissedCastUri = onScreen
+            dismissedAtMs = System.currentTimeMillis()
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "用户退出播放层 → 该投屏在 ${DISMISS_TTL_MS / 1000}s 内不再自动拉前台: ${onScreen.take(64)}…"
+            )
+        }
         dlnaReceiver?.stopPlaybackFromUi()
     }
 
@@ -717,7 +754,8 @@ class PhairPlayService : Service() {
      * for a cast the user just asked to see.
      */
     fun clearDlnaDismissed() {
-        dlnaDismissedByUser = false
+        dismissedCastUri = null
+        dismissedAtMs = 0L
         lastSeenCastUri = null
     }
 
@@ -728,11 +766,63 @@ class PhairPlayService : Service() {
      */
     fun isDlnaPlaybackLive(): Boolean = dlnaReceiver?.isPlaybackLive() == true
 
-    /** Last DLNA uri seen, to tell a new cast from a sender poll (see [dlnaDismissedByUser]). */
+    /** True once a cast has handed a real item to the renderer. */
+    fun hasDlnaMedia(): Boolean =
+        dlnaReceiver != null && com.phairplay.dlna.DlnaMediaMeta.hasMedia
+
+    /**
+     * True while the sender's item is queued but still waiting for the layer
+     * the UI has to reveal.
+     *
+     * Separate from [hasDlnaMedia] on purpose: the media metadata is only set
+     * in [runStart], whereas an item that still needs its surface is already a
+     * promise that something is coming. Answering "no" here locked the UI out
+     * of the very layer that was owed to that item.
+     */
+    fun hasPendingCast(): Boolean = dlnaReceiver?.hasPendingCast() == true
+
+    /** Last DLNA uri seen, to tell a new cast from a sender poll (see [dismissedCastUri]). */
     @Volatile private var lastSeenCastUri: String? = null
 
-    /** Set when the user closes the UI; blocks auto-foreground for the same cast. */
-    @Volatile private var dlnaDismissedByUser = false
+    /**
+     * The uri whose picture the user sent away with Back.
+     *
+     * A plain boolean is not enough: it has to say *when*. Closing the UI once
+     * used to pin auto-foreground off forever — the field log showed a cast at
+     * 00:31 that still carried a dismissal from 21:56, so the very next cast
+     * of the same channel sat out the full 10 s and started audio-only. The
+     * block now lives in [DISMISS_TTL_MS] and dies with it, and a different
+     * uri kills it at once.
+     */
+    @Volatile private var dismissedCastUri: String? = null
+
+    /** When [dismissedCastUri] was dismissed, or 0 for "nothing dismissed". */
+    @Volatile private var dismissedAtMs = 0L
+
+    /**
+     * How long a dismissal keeps withholding the picture.
+     *
+     * The sender polls every 10–30 s, so this window covers the echo or two
+     * right after the user pressed Back, and no more.
+     */
+    /**
+     * True while the dismissal for [uri] is still inside its time window.
+     *
+     * Deliberately **not** keyed on the foreground flag: [bringActivityToForeground]
+     * only ever reaches this check when the UI is already known to be hidden,
+     * so asking "is someone watching?" here could only ever be false. The
+     * window is what tells the two situations apart — a poll echo a few
+     * seconds after Back stays suppressed, while a cast that arrives minutes
+     * later (or a stale dismissal from half an hour ago) comes up with its
+     * picture. That last case is the field report: a flag set at 21:56 was
+     * still pinning auto-foreground off at 00:31, so the box made nothing but
+     * sound for a cast the user had never closed.
+     */
+    private fun dismissalStillInsideWindow(uri: String?): Boolean {
+        if (uri == null) return false
+        if (dismissedCastUri != uri) return false
+        return System.currentTimeMillis() - dismissedAtMs <= DISMISS_TTL_MS
+    }
 
     // ─── Auto foreground (receiver → UI) ────────────────────────────────────
 
@@ -747,8 +837,29 @@ class PhairPlayService : Service() {
      */
     @Volatile private var activityResumed = false
 
+    /**
+     * Whether the Activity's *window* is on screen and interactive — the
+     * honest version of "somebody is watching".
+     *
+     * [activityResumed] flips true in `onResume`, which on this box is not
+     * the same thing as a picture: a warm resume from the background often
+     * shows a window that has not been laid out or painted yet, so the user
+     * stares at a black rectangle. Field report: bring the app back by hand,
+     * press Back to get the home screen, cast — and the sound comes out of a
+     * screen that never shows the video. `onResume` already said "visible",
+     * so nothing ever asked the Activity to draw again.
+     *
+     * Only the window focus callback knows the difference. The service keeps
+     * its own copy because the receiver runs on other threads and because the
+     * Activity has already gone away by the time it matters.
+     */
+    @Volatile private var uiWindowFocused = false
+
     /** Guards against a sender hammering Play (polling every 10–30 s). */
     @Volatile private var lastForegroundLaunchMs = 0L
+
+    /** How often a refused auto-foreground launch has been retried. */
+    private var foregroundLaunchRetries = 0
 
     /** Called by MainActivity so the service knows whether someone is watching. */
     fun onActivityResumed() { activityResumed = true }
@@ -757,12 +868,57 @@ class PhairPlayService : Service() {
     fun onActivityPaused() { activityResumed = false }
 
     /**
+     * Tells the service whether the Activity's window is really on screen.
+     *
+     * [MainActivity] reports this from `onWindowFocusChanged`, which is the
+     * only callback that fires when a window exists but is not painted (a
+     * black cold/warm resume) or has been pushed behind another window
+     * (screensaver, another full-screen app).
+     */
+    fun setUiWindowFocused(focused: Boolean) {
+        if (uiWindowFocused == focused) return
+        uiWindowFocused = focused
+        com.phairplay.util.DebugLog.log(
+            "UI",
+            "窗口焦点变化 → focused=$focused（activityResumed=$activityResumed）"
+        )
+        // The window just came back: whatever it should be showing may have
+        // changed while it was invisible — a cast that started during the
+        // black screen, or a home screen that is owed the picture back. The
+        // Activity re-evaluates itself; the service only rings the bell.
+        if (focused) {
+            _dlnaPlaybackTick.value++
+        }
+    }
+
+    /** The uri the receiver is currently holding, for the UI's own gates. */
+    fun dlnaCurrentUri(): String? = dlnaReceiver?.currentCastUri
+
+    /** True while a cast the user dismissed is still inside its time window. */
+    fun isCastDismissed(uri: String?): Boolean = dismissalStillInsideWindow(uri)
+
+    /**
+     * True when the Intent came from our own auto-foreground launch, as
+     * opposed to a launcher / shortcut / notification tap.
+     *
+     * A launcher start means the user opened the app, which says more than any
+     * dismissal flag could; an auto-foreground start is our own doing, so it
+     * must not be mistaken for one.
+     */
+    fun isAutoForegroundLaunch(intent: android.content.Intent?): Boolean =
+        intent?.getStringExtra(EXTRA_AUTO_FOREGROUND_REASON) != null
+
+    /**
      * Hands the DLNA receiver the confirmed foreground state.
      *
      * The receiver does not play until this says true, so the cast order is
      * "sender pushes → UI comes up → UI is on screen → media starts".
      */
     fun setDlnaUiForeground(foreground: Boolean) {
+        // Keep the service's own copy as the single source of truth. The
+        // receiver is created lazily and after this has already run, so it has
+        // to be replayed to every new instance — see [startDlna].
+        activityResumed = foreground
         dlnaReceiver?.setUiForeground(foreground)
     }
 
@@ -784,24 +940,47 @@ class PhairPlayService : Service() {
      * @param reason Human-readable trigger, kept for diagnosis.
      */
     fun bringActivityToForeground(reason: String) {
+        // Every gate writes to the diagnostic log, not just to logcat. The
+        // field report "cast from the background, nothing happens for 10 s"
+        // could not be diagnosed from the log because these three refusals
+        // were Timber-only, and the one that fires in practice is invisible
+        // without it.
+        // Resumed is not the same as on screen. A window that was just woken
+        // from the background reports `onResume` before it has laid anything
+        // out, so the user is staring at black while we consider ourselves
+        // "visible" and skip the launch — the picture then never arrives and
+        // the cast plays on inaudibly behind a black rectangle. Only a window
+        // that actually holds focus may suppress a launch.
         if (activityResumed) {
-            Logger.d("Auto-foreground skipped — UI already visible ($reason)")
-            return
+            if (uiWindowFocused) {
+                com.phairplay.util.DebugLog.log("DLNA", "自动前台被跳过：UI 已可见（$reason）")
+                return
+            }
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "UI 已 resume 但窗口没有焦点（黑屏/未绘制）→ 仍发起前台：$reason"
+            )
         }
         // A cast the user already closed does not get to come back on its own.
-        // "DLNA 播放" is cleared by a *new* uri (see the CONNECTED handler); a
-        // retry of the same cast never is, so a dismissed session stays closed
-        // until the sender actually pushes something else.
-        if (dlnaDismissedByUser && reason.startsWith("DLNA")) {
-            Logger.i("Auto-foreground suppressed — user closed this cast ($reason)")
+        // [dismissalApplies] keeps this narrow on purpose: the same uri has to
+        // stay closed, while the time window and "is the UI on screen" question
+        // decide *when* it stops applying. [dismissalApplies] also tells the
+        // receiver to drop its foreground wait, so a refused cast never sits
+        // out the full 10 s before making a sound.
+        if (reason.startsWith("DLNA") && dismissalStillInsideWindow(dlnaReceiver?.currentCastUri)) {
+            com.phairplay.util.DebugLog.log("DLNA", "自动前台被抑制：用户已关闭该投屏（$reason）")
+            dlnaReceiver?.cancelForegroundWaitAndStartAudio()
             return
         }
         val now = System.currentTimeMillis()
         if (now - lastForegroundLaunchMs < AUTOFOREGROUND_THROTTLE_MS) {
-            Logger.d("Auto-foreground throttled ($reason)")
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "自动前台被限流（$reason，距上次启动仅 ${(now - lastForegroundLaunchMs) / 1000}s）"
+            )
             return
         }
-        lastForegroundLaunchMs = now
+        val attemptedAt = now
         runCatching {
             val intent = Intent(applicationContext, MainActivity::class.java).apply {
                 addFlags(
@@ -812,11 +991,43 @@ class PhairPlayService : Service() {
                 putExtra(EXTRA_AUTO_FOREGROUND_REASON, reason)
             }
             startActivity(intent)
-            Logger.i("Auto-foreground: opened MainActivity ($reason)")
-        }.onFailure {
-            // The notification's content intent opens the same Activity, so the
-            // user is never left with a silent picture and no way back.
-            Logger.w("Auto-foreground launch failed — notification can still open the app")
+            // The launch takes a second or two to land, but the receiver has
+            // already parked the item and is about to sit out the whole
+            // foreground timeout. Tell it the UI is on its way — without
+            // cancelling the fallback, so a launch that never materialises
+            // still ends in sound.
+            dlnaReceiver?.setUiForegroundPending(true)
+            // Only a launch that actually went out counts as "last attempt",
+            // otherwise a refused launch would be remembered as a successful
+            // one and the throttle would suppress the retry that might work.
+            lastForegroundLaunchMs = attemptedAt
+            foregroundLaunchRetries = 0
+            com.phairplay.util.DebugLog.log("DLNA", "自动前台：已发出 MainActivity（$reason）")
+        }.onFailure { err ->
+            // A launch refused in the same second is usually a race with the
+            // user arriving at the launcher, not a permanent answer. Try once
+            // more, but stay bounded: a sender that polls every 10-30 s must
+            // not be able to keep the Activity in a launch loop.
+            if (foregroundLaunchRetries < MAX_FOREGROUND_LAUNCH_RETRIES) {
+                foregroundLaunchRetries++
+                com.phairplay.util.DebugLog.log(
+                    "DLNA",
+                    "自动前台：startActivity 失败（$reason）=${err.message} → " +
+                        "${FOREGROUND_LAUNCH_RETRY_MS / 1000}s 后重试 $foregroundLaunchRetries/" +
+                        "$MAX_FOREGROUND_LAUNCH_RETRIES"
+                )
+                mainHandler.postDelayed(
+                    { bringActivityToForeground(reason) },
+                    FOREGROUND_LAUNCH_RETRY_MS
+                )
+            } else {
+                // The notification's content intent opens the same Activity, so
+                // the user is never left with a silent picture and no way back.
+                com.phairplay.util.DebugLog.log(
+                    "DLNA",
+                    "自动前台：已放弃（$reason，连续失败 $foregroundLaunchRetries 次）→ 通知仍可打开界面"
+                )
+            }
         }
     }
 
@@ -967,6 +1178,21 @@ class PhairPlayService : Service() {
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
         const val EXTRA_AUTO_FOREGROUND_REASON = "com.phairplay.extra.AUTO_FOREGROUND_REASON"
         const val AUTOFOREGROUND_THROTTLE_MS = 3_000L
+
+        /**
+         * How long a dismissal keeps withholding the picture — see
+         * [dismissedCastUri]. The sender polls every 10–30 s, so this window
+         * covers the echo or two right after Back and no more.
+         */
+        const val DISMISS_TTL_MS = 2 * 60_000L
+
+        /**
+         * A launch the system refused is usually a race, so it is worth one
+         * more shot a moment later — but only a bounded number of times, or a
+         * polling sender could keep the launcher in a loop.
+         */
+        const val FOREGROUND_LAUNCH_RETRY_MS = 1_500L
+        const val MAX_FOREGROUND_LAUNCH_RETRIES = 2
 
         /**
          * How long a new LAN IPv4 must hold still before the receivers are

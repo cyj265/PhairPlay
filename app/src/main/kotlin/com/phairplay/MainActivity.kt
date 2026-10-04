@@ -91,10 +91,47 @@ class MainActivity : AppCompatActivity() {
      * binding is asynchronous — see [onResume].
      */
     private var isUiInForeground = false
+
+    /**
+     * Whether this window is really on screen — the honest twin of
+     * [isUiInForeground].
+     *
+     * `onResume` is not enough: bringing the app back from the background
+     * often shows a window that has not been laid out yet, so the user sees
+     * black. Casting into that state produced sound without a picture, and
+     * the only thing that ever fixed it was pressing Back — a key event that
+     * made the window draw again. [onWindowFocusChanged] is the callback that
+     * says "the window is up and interactive"; the service gets the same
+     * answer so it stops trusting a resume that was never painted.
+     */
+    private var uiWindowFocused = false
+
     private var currentAirPlayState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
+
+    /**
+     * Whether the picture deserves the full-screen layer right now.
+     *
+     * Three cases, all of which must be answered the same way everywhere:
+     * a pipeline that is actually playing, an item already loaded (so coming
+     * back to the app can resume it), and an item the receiver is *holding*
+     * because it is still waiting for a render surface. The third one is the
+     * one that used to be missed: while a cast is parked on the surface,
+     * `hasDlnaMedia()` and `isDlnaPlaybackLive()` are both still false, so any
+     * recompute that only asked those two hid the layer, tore the surface down,
+     * and left the sender's next poll to restart the whole dance — which is how
+     * a cast ended up with sound and no picture for a dozen seconds
+     * (field log 10:22:36, 9900000501: layer shown at :36, frame only at :51).
+     *
+     * Every "show or hide the playback layer" decision goes through here so a
+     * future third state cannot slip past again.
+     */
+    private fun hasCastToPaint(): Boolean {
+        val svc = service ?: return false
+        return svc.hasDlnaMedia() || svc.isDlnaPlaybackLive() || svc.hasPendingCast()
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -124,7 +161,11 @@ class MainActivity : AppCompatActivity() {
             // survives a sender pause and a dead pipeline, so it used to drop
             // the user into a black player every time the app was opened —
             // "打开 app 后直接进播放器，不是首页".
-            if (shouldOpenOnPlayer()) {
+            // A launch that carried EXTRA_AUTO_FOREGROUND_REASON makes
+            // shouldOpenOnPlayer() true on its own, which used to drop the user
+            // straight into an empty, black player whenever the process came
+            // back up. There has to be something to look at first.
+            if (shouldOpenOnPlayer() && hasCastToPaint()) {
                 service?.resumeDlnaPlayback()
                 showDlnaPlayer()
             } else {
@@ -186,6 +227,12 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             updateDlnaMusicCard()
             updateResumePill()
+            // A4: keep the screensaver story honest. BUFFERING, stalls and the end
+            // of an item all change the playback state without firing a dedicated
+            // callback, so the 2 Hz tick is the cheapest correct place for it.
+            syncDlnaSessionState()
+            // A5: only ever reconsider a window we opened for a cast.
+            if (isDlnaPlayerVisible) maybeAutoBackoffForCast()
             dlnaDebugHandler.postDelayed(this, 500)
         }
     }
@@ -303,14 +350,30 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
-            service?.resumeDlnaPlayback()
-            if (hasDlnaMedia()) showDlnaPlayer()
-        }
+            if (intent.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
+                service?.resumeDlnaPlayback()
+                if (hasCastToPaint()) showDlnaPlayer()
+            }
+    }
+
+    /**
+     * A5: any key, touch or pointer counts as the user being present. Without
+     * this the auto-backoff would happily move a screen the person is watching
+     * back to the background.
+     */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        userInteractedThisForeground = true
     }
 
     override fun onResume() {
         super.onResume()
+        // A fresh foreground window starts with nothing remembered: both flags
+        // describe what happened *since the screen became visible*, so they are
+        // meaningless across a pause/resume cycle.
+        userInteractedThisForeground = false
+        autoOpenedForCast = false
+        autoBackedOffForCast = false
         // Report visibility before resuming: a cast that starts right now must
         // not trigger another auto-foreground launch on top of us. This is the
         // signal the receiver waits for — the media is only prepared once the
@@ -323,8 +386,66 @@ class MainActivity : AppCompatActivity() {
         // 10 s "UI not in foreground" wait before starting — and it started with
         // a perfectly good picture, because the PlayerView was there all along.
         isUiInForeground = true
+        // Opened from the home screen rather than by our own auto-foreground
+        // launch: the user walked up to the TV and started the app by hand. A
+        // dismissal recorded when they wandered off with Back no longer
+        // describes what they want, and keeping it would strand the next cast
+        // on sound only. An auto-foreground launch is exempt — that one is
+        // *our* intent (and the picture belongs to it), so it does not clear
+        // anything.
+        if (service?.isAutoForegroundLaunch(intent) != true) {
+            service?.clearDlnaDismissed()
+        }
         service?.onActivityResumed()
         service?.setDlnaUiForeground(true)
+    }
+
+    /**
+     * The window is up and interactive — or has stopped being.
+     *
+     * This is the callback that separates "the app is resumed" from "the user
+     * can actually see it". A black warm resume fires `onResume` and nothing
+     * else, which is why a cast into it made noise behind a black rectangle
+     * until somebody pressed a key.
+     *
+     * On regained focus the whole visibility question is re-evaluated: the
+     * surface may have been rebuilt while we were invisible (so the receiver
+     * has to be told it may prepare again), and a cast that started during the
+     * black screen is owed its picture. On lost focus the window is behind
+     * something else (screensaver, another app) and the service must stop
+     * treating the screen as ours.
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (uiWindowFocused == hasFocus) return
+        uiWindowFocused = hasFocus
+        service?.setUiWindowFocused(hasFocus)
+        if (!hasFocus) return
+        // Re-evaluate, don't assume. showDlnaPlayer/hideDlnaPlayer are both
+        // idempotent, so asking the question is safe at 2 Hz-worth of focus
+        // churn — and it is the only thing that ever repainted the black
+        // window after a cast came in behind it.
+        val svc = service
+        if (svc == null) {
+            com.phairplay.util.DebugLog.log("UI", "窗口重新获得焦点，但服务未绑定 → 等 onServiceConnected 重算")
+            return
+        }
+        com.phairplay.util.DebugLog.log(
+            "UI",
+            "窗口已可见 → 重算播放层（媒体=${svc.hasDlnaMedia()} 播放中=${svc.isDlnaPlaybackLive()} 待渲染=${svc.hasPendingCast()}）"
+        )
+        if (svc.isCastDismissed(svc.dlnaCurrentUri())) {
+            com.phairplay.util.DebugLog.log("UI", "窗口重显：该投屏已被用户关闭 → 保持首页")
+            hideDlnaPlayer()
+        } else if (hasCastToPaint()) {
+            service?.resumeDlnaPlayback()
+            showDlnaPlayer()
+        } else {
+            hideDlnaPlayer()
+        }
+        // Only for a picture that really came back. Polling a hidden layer
+        // would drag an empty player into view (see [dlnaSurfaceProbe]).
+        if (isDlnaPlayerVisible) scheduleDlnaSurfaceProbe()
     }
 
     override fun onPause() {
@@ -332,6 +453,7 @@ class MainActivity : AppCompatActivity() {
         isUiInForeground = false
         service?.onActivityPaused()
         service?.setDlnaUiForeground(false)
+        service?.setUiWindowFocused(false)
         super.onPause()
     }
 
@@ -364,6 +486,10 @@ class MainActivity : AppCompatActivity() {
         // Clear surface reference before unbinding to avoid holding a dead Surface
         service?.setVideoSurfaceProvider { null }
         dlnaDebugHandler.removeCallbacks(dlnaUiTick)
+        // No window, no MediaSession: the screensaver must be allowed back.
+        uiWindowFocused = false
+        service?.setUiWindowFocused(false)
+        releaseDlnaMediaSession()
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -551,7 +677,13 @@ class MainActivity : AppCompatActivity() {
     /** Shows/updates the music card for the current audio-only item. */
     private fun updateDlnaMusicCard() {
         val card = dlnaMusicView ?: return
-        val visible = isDlnaPlayerVisible && DlnaMediaMeta.audioOnly
+        // Belt and braces: the receiver retracts [DlnaMediaMeta.audioOnly] once a
+        // real frame lands, but a card that covers the whole player must not be
+        // able to keep an item "audio only" on the strength of a stale flag —
+        // the player's own video size is the one thing that cannot lie.
+        val pvVideo = dlnaPlayerView?.player?.videoSize
+        val hasVideo = pvVideo != null && pvVideo.width > 0 && pvVideo.height > 0
+        val visible = isDlnaPlayerVisible && DlnaMediaMeta.audioOnly && !hasVideo
         card.visibility = if (visible) View.VISIBLE else View.GONE
         if (!visible) return
         card.bringToFront()
@@ -629,6 +761,34 @@ class MainActivity : AppCompatActivity() {
     private var autoOpenUsedForCast = false
 
     /**
+     * v86 / A4 from the fork audit: [FLAG_KEEP_SCREEN_ON] alone did NOT stop this
+     * box's screensaver from kicking in mid-cast. The OEM dream logic does not
+     * just look at the window flag — it asks MediaSessionManager whether *someone*
+     * is playing, and with no MediaSession on screen the TV still dims, the
+     * Surface goes away, and the decoder keeps writing into a dead buffer queue.
+     *
+     * So the flag stays AND we advertise an active MediaSession while the player
+     * runs. [dlnaSessionPlaying] is an edge cache: [setPlaybackState] is not
+     * free and the UI tick runs at 2 Hz, so only real transitions are published.
+     */
+    private var dlnaMediaSession: android.media.session.MediaSession? = null
+    private var dlnaSessionPlaying = false
+
+    /**
+     * v86 / A5 from the fork audit: remembers whether *this* foreground window was
+     * opened for the user or opened for a cast. [onUserInteraction] sets it, so
+     * "user opened the app themselves" and "the system pulled it up for a sender"
+     * never get confused — that confusion is what would make us shove a screen the
+     * user is actively looking at back to the background.
+     */
+    private var userInteractedThisForeground = false
+    private var autoOpenedForCast = false
+    private var autoBackedOffForCast = false
+
+    /** Throttle for the "showDlnaPlayer refused" line, which fires every tick. */
+    private var lastShowBlockedMs = 0L
+
+    /**
      * Opens the player if a cast deserves it — and can be called as often as
      * the evidence changes.
      *
@@ -644,17 +804,101 @@ class MainActivity : AppCompatActivity() {
         val svc = service ?: return
         if (autoOpenUsedForCast) return
         if (svc.dlnaState.value != ProtocolState.CONNECTED) return
-        if (!svc.isDlnaPlaybackLive() && !hasDlnaMedia()) return
+        // A sender that pushed Play and is now waiting on the surface counts as
+        // "there is a picture owed to the user". Leaving it out here left the
+        // item parked: the surface timeout was reset by the next poll before it
+        // could ever fire, so the layer stayed hidden and the cast played on
+        // silently — the reported "sound only, no picture" case, as seen in the
+        // 10:08:13 field log, where sixteen seconds passed with no frame.
+        if (!hasCastToPaint()) return
         autoOpenUsedForCast = true
+        autoOpenedForCast = true
         showDlnaPlayer()
         com.phairplay.util.DebugLog.log("UI", "自动打开播放层（本轮投屏首次）")
+    }
+
+    /** Creates the screensaver-blocking MediaSession, once, on the UI thread. */
+    private fun ensureDlnaMediaSession() {
+        if (dlnaMediaSession != null) return
+        runCatching {
+            dlnaMediaSession = android.media.session.MediaSession(this, "PhairPlay DLNA")
+                .apply { isActive = true }
+        }.onFailure { err ->
+            // Losing the session only costs us the screensaver protection;
+            // FLAG_KEEP_SCREEN_ON and everything else keep working.
+            com.phairplay.util.DebugLog.log("UI", "MediaSession 创建失败（屏保防护降级）：${err.message}")
+        }
+        syncDlnaSessionState()
+    }
+
+    private fun releaseDlnaMediaSession() {
+        runCatching { dlnaMediaSession?.release() }
+        dlnaMediaSession = null
+        dlnaSessionPlaying = false
+    }
+
+    /**
+     * Publishes play/pause to the system so the TV's own screensaver logic sees
+     * an active playback. Called from the 2 Hz tick: cheap, and it also covers
+     * the states nobody wires an explicit callback for (buffering, stall, end).
+     */
+    private fun syncDlnaSessionState() {
+        val session = dlnaMediaSession ?: return
+        val player = service?.dlnaPlayer
+        val playing = player?.playWhenReady == true
+        if (playing == dlnaSessionPlaying) return
+        dlnaSessionPlaying = playing
+        runCatching {
+            session.setPlaybackState(
+                android.media.session.PlaybackState.Builder()
+                    .setState(
+                        if (playing) android.media.session.PlaybackState.STATE_PLAYING
+                        else android.media.session.PlaybackState.STATE_PAUSED,
+                        player?.currentPosition ?: 0L,
+                        1f
+                    )
+                    .build()
+            )
+        }
+    }
+
+    /**
+     * v86 / A5: puts the app back behind where it came from once the auto-opened
+     * player is empty and the user never touched a key.
+     *
+     * This is the other half of the auto-foreground work — without it a sender
+     * that stops leaves PhairPlay sitting full-screen in front of whatever the
+     * user was watching before the cast arrived. Three guards, all deliberate:
+     * only auto-opened windows, only with no user interaction this window, and
+     * only when the receiver has no media left. Anything else is a screen the
+     * person is actually using.
+     */
+    private fun maybeAutoBackoffForCast() {
+        if (!autoOpenedForCast || autoBackedOffForCast) return
+        if (userInteractedThisForeground) return
+        // The item may still be waiting for its render surface rather than
+        // finished: the metadata is only set once [runStart] runs, so an item
+        // parked on the surface gate would look like an over-and-done session
+        // and the app would slide back behind the launcher with the picture
+        // still owed.
+        if (hasCastToPaint()) return
+        autoBackedOffForCast = true
+        // Attach to nothing, move the whole task behind the launcher stack.
+        moveTaskToBack(true)
+        com.phairplay.util.DebugLog.log(
+            "UI",
+            "自动拉起的播放层会话已结束且用户未操作 → 自动退回后台（接收服务保持运行）"
+        )
     }
 
     private fun shouldOpenOnPlayer(): Boolean {
         if (intent?.getStringExtra(PhairPlayService.EXTRA_AUTO_FOREGROUND_REASON) != null) {
             return true
         }
-        return service?.isDlnaPlaybackLive() == true
+        // An item waiting on its surface comes from the same sender promise as
+        // one that already plays; the caller pairs this with "there is
+        // something to paint" so the answer only ever admits a real cast.
+        return service?.isDlnaPlaybackLive() == true || service?.hasPendingCast() == true
     }
 
     /**
@@ -886,6 +1130,9 @@ class MainActivity : AppCompatActivity() {
         /** How often the render-surface probe re-checks the player. */
         private const val DLNA_SURFACE_PROBE_INTERVAL_MS = 120L
 
+        /** Minimum gap between two "showDlnaPlayer refused" diagnostics. */
+        private const val SHOW_BLOCKED_LOG_INTERVAL_MS = 20_000L
+
         /**
          * How long the probe looks for a Surface before giving up and letting
          * the receiver start the item audio-only. Generous on purpose: a
@@ -960,6 +1207,18 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             svc.dlnaCastArrived.collectLatest {
                 autoOpenUsedForCast = true
+                autoOpenedForCast = true
+                // The service only postpones an auto-foreground launch for a
+                // dismissed cast; showing the player is a UI decision made
+                // here, and this collector used to take it unconditionally —
+                // which is how the home screen pulled the user back into the
+                // picture a few seconds after they pressed Back.
+                if (svc.isCastDismissed(svc.dlnaCurrentUri())) {
+                    com.phairplay.util.DebugLog.log(
+                        "UI", "新投屏到达，但用户已关闭该投屏 → 不抢首页"
+                    )
+                    return@collectLatest
+                }
                 showDlnaPlayer()
                 com.phairplay.util.DebugLog.log("UI", "新投屏到达 → 立即显示播放层")
             }
@@ -1054,6 +1313,36 @@ class MainActivity : AppCompatActivity() {
      */
     fun showDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
+        // An empty player is a black rectangle, and an empty player was
+        // exactly what a warm resume dropped the user into: the app came back
+        // (a launch still carrying EXTRA_AUTO_FOREGROUND_REASON, or a rebind
+        // after a background trip) with nothing loaded, showed the surface,
+        // and the only way out of the black screen was Back. No uri on the
+        // receiver means there is nothing to paint, so stay on the home screen.
+        val svc = service
+        // A pending cast counts as "something to paint". It is the state the
+        // sender is waiting on: it pushed Play, the renderer is holding the
+        // item, and only the layer makes the surface that lets the item start.
+        // Refusing on the strength of [dlnaCurrentUri] alone deadlocked the
+        // three steps that depend on each other (reveal → surface → start) and
+        // left the box audible but sightless.
+        if (svc != null &&
+            svc.dlnaCurrentUri() == null &&
+            svc.isDlnaPlaybackLive() != true &&
+            !svc.hasPendingCast()
+        ) {
+            // The collectors call this every tick, so an unthrottled line here
+            // drowns the diagnostic port within a second.
+            val now = System.currentTimeMillis()
+            if (now - lastShowBlockedMs > SHOW_BLOCKED_LOG_INTERVAL_MS) {
+                lastShowBlockedMs = now
+                com.phairplay.util.DebugLog.log(
+                    "UI", "showDlnaPlayer 被挡下：手上既没有 uri 也没有待播（空播放器=黑屏）"
+                )
+            }
+            hideDlnaPlayer()
+            return
+        }
         // Re-binding the player tears the TextureView surface down and rebuilds
         // it, and a cast regularly asks for this twice in the same second (the
         // auto-foreground launch and the state change both reach us). One
@@ -1092,6 +1381,9 @@ class MainActivity : AppCompatActivity() {
         // first try. So poll for the real thing instead — [dlnaSurfaceProbe].
         scheduleDlnaSurfaceProbe()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // The window flag stops the CPU sleeping; the MediaSession stops the
+        // TV's own screensaver. Both are needed — see [dlnaMediaSession].
+        ensureDlnaMediaSession()
         updateDlnaMusicCard()
         updateResumePill()
         dlnaDebugHandler.removeCallbacks(dlnaUiTick)
@@ -1148,6 +1440,9 @@ class MainActivity : AppCompatActivity() {
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         dlnaMusicView?.visibility = View.GONE
         updateResumePill()
+        // Nothing is playing behind the home screen any more: handing the screen
+        // back also releases the MediaSession, so the TV may idle again.
+        releaseDlnaMediaSession()
     }
 
     /** Refreshes the DLNA debug HUD with live playback info from ExoPlayer. */
@@ -1236,7 +1531,18 @@ class MainActivity : AppCompatActivity() {
                 // Otherwise the box keeps sounding an app the user closed, and
                 // re-opening PhairPlay resumes the old item as if nothing happened.
                 // (No-op for AirPlay sessions — those are driven by the sender.)
-                service?.stopDlnaPlayback()
+                // …
+                // …but not while the window is a black rectangle nobody can see.
+                // Backing out of an app that was never on screen is not the
+                // user rejecting this cast, and writing that down for two
+                // minutes is what made the next cast of the same channel silent.
+                if (uiWindowFocused) {
+                    service?.stopDlnaPlayback()
+                } else {
+                    com.phairplay.util.DebugLog.log(
+                        "UI", "Back：窗口无焦点（黑屏）→ 不判定为用户关闭投屏"
+                    )
+                }
                 return super.dispatchKeyEvent(event)
             }
             if (dlna || airPlay) {
