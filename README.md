@@ -24,6 +24,8 @@ The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, Ho
 
 The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from scratch rather than on top of a UPnP stack library — and is validated on Amlogic Android TV hardware (Fire TV, N1 boxes) for live TV and on-demand video.
 
+**Currently verified on hardware:** `v1.0.101-firetv` (2026-10-04) — the Back-key contract below was validated on a real box, not just in code.
+
 Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
 
 ## Features
@@ -202,6 +204,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
 - **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
+- **Switching away from the app and straight back can rebuild the picture once.** Leaving PhairPlay while a DLNA cast is playing and returning within a second or so may re-create the player once before the picture settles. It recovers on its own and playback is not lost; a fix is queued for the next build.
 
 For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
 
