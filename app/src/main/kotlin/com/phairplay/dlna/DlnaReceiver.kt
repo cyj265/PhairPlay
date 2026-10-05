@@ -582,6 +582,24 @@ class DlnaReceiver(
         return System.currentTimeMillis() - pendingStartAtMs <= PENDING_CAST_ENTRY_MS
     }
 
+    /**
+     * v102-④ — forget the pending item as well.
+     *
+     * `ManualDlnaHttp.cancelPendingAutoStart()` voids every auto-start timer
+     * already in flight, but the parked item is a separate promise:
+     * [pendingStartUri] is what the UI reads to decide something is coming and
+     * what the surface probe waits on. Left behind after a real end, the next
+     * SetAVTransportURI the sender polls for can put the playback layer back
+     * without a single timer having fired — the very zombie this receiver kept
+     * fighting in v95-v97, reached by a different door.
+     */
+    fun dismissPendingUri() {
+        val parked = pendingStartUri ?: return
+        pendingStartUri = null
+        pendingStartAtMs = 0L
+        DebugLog.log("DLNA", "真结束 → 一并清掉挂起的待播项: ${parked.take(64)}…")
+    }
+
     /** True while the Activity really is in the foreground (see [setUiForeground]). */
     @Volatile
     private var uiForeground = false
@@ -912,10 +930,25 @@ class DlnaReceiver(
                             when (playbackState) {
                                 Player.STATE_READY -> {
                                     mainHandler.removeCallbacks(stallWatchdog)
-                                    DebugLog.log(
-                                        "DLNA",
-                                        "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
-                                    )
+                                    // v103 — "准备完成" is proof that THIS item
+                                    // really got on screen, so it has to survive.
+                                    // Every later READY for the same uri is a
+                                    // network re-buffer coming back (field log
+                                    // 18:40-18:49: 67 READYs for one player,
+                                    // pos advancing normally the whole time), and
+                                    // printing each one buried the real entries —
+                                    // the 8099 log is a rolling window, so noise
+                                    // costs us evidence. Later hits go to one
+                                    // tally line instead.
+                                    if (readyLoggedUri != currentUri) {
+                                        readyLoggedUri = currentUri
+                                        DebugLog.log(
+                                            "DLNA",
+                                            "准备完成: ${p.videoSize.width}x${p.videoSize.height} 时长=${p.duration}"
+                                        )
+                                    } else {
+                                        bufferRecoveries++
+                                    }
                                     // The pipeline decoded something: whatever was
                                     // tried worked, so the counter starts over for
                                     // the next item instead of carrying a verdict
@@ -1038,7 +1071,10 @@ class DlnaReceiver(
                                     )
                                 }
                             }
-                            DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
+                            if (firstFrameLoggedUri != currentUri) {
+                                firstFrameLoggedUri = currentUri
+                                DebugLog.log("DLNA", "首帧已渲染（画面已上屏）")
+                            }
                             // The strongest possible "there is a picture now".
                             onPlaybackActivityChanged()
                         }
@@ -1963,23 +1999,58 @@ class DlnaReceiver(
      * media item — that is what actually returns the decoder — and remember
      * the URI so [resumePlaybackFromUi] can rebuild the item on the way back.
      */
+    // v103 — DO NOT "simplify" this by dropping the post() and running the
+    // teardown inline. The queue is not the bug; the bug was an un-cancellable
+    // teardown, and the flag+identity above is the fix. The race window this
+    // guards is still OPEN: `uiPauseRunnable` and the body of
+    // [resumePlaybackFromUi] are both messages on this same queue, so a busy
+    // main thread can still land them in the order "resume rebuilt, then the
+    // older pause clears it" — that is field log 18:06:52, reproduced only
+    // under dispatch skew that 32 rounds of real key presses never hit.
+    // Verified so far: no regression over 32 presses. Verified NOT: that the
+    // cancel works when the skew happens. Closing that properly means either
+    // running the teardown inline or a generation token, and neither is done.
     fun pausePlaybackFromUi() {
-        mainHandler.post {
-            val p = player?.takeIf { started && !it.isReleased } ?: return@post
-            val resumeUri = currentUri
-            val resumePos = runCatching { p.currentPosition }.getOrDefault(0L)
-            p.pause()
-            p.clearVideoSurface()
-            p.clearMediaItems()
-            p.stop()
-            lastStopReason = "界面退到后台 pausePlaybackFromUi"
-            if (resumeUri != null) {
-                parkedForUi = ParkedMedia(resumeUri, resumePos)
-                DebugLog.log(
-                    "DLNA",
-                    "界面退到后台 → 释放硬解槽（仅 pause 不会归还解码器）"
-                )
-            }
+        // v103 — the flag is raised HERE, on the synchronous side of the call,
+        // never inside the runnable. If it lived in the runnable, a queued
+        // pause would set its own flag and clear the player a moment later,
+        // and [resumePlaybackFromUi] would find nothing to cancel.
+        //
+        // Field log 18:06:52 (v103): the UI rebuilt the item and started it at
+        // 18:06:52, and 0.2 s later a pause queued back at 18:06:49 landed and
+        // cleared the player it had just built ("播放器被清空 (IDLE) 原因=
+        // 界面退到后台 pausePlaybackFromUi"), which then produced a bogus
+        // "起播 5s 未就绪" probe against a player that no longer existed.
+        pendingUiPause = true
+        mainHandler.post(uiPauseRunnable)
+    }
+
+    /**
+     * v103 — the same identity/cancel contract as [uiStopRunnable], on the
+     * pause path. Holding the decoder slot is deliberate (see
+     * [pausePlaybackFromUi]), but the teardown must never cross the moment
+     * the user came back.
+     */
+    private val uiPauseRunnable = Runnable {
+        pendingUiPause = false
+        val p = player?.takeIf { started && !it.isReleased } ?: return@Runnable
+        val resumeUri = currentUri
+        // v103 — a live stream can report a negative position right after it
+        // starts (the window start is before zero). It never reached a seek
+        // ([pendingSeekMs] is only applied when >= 0), but it did reach the log
+        // line, the "从 -3s 恢复" text and [ParkedMedia] on the rebuild path.
+        val resumePos = runCatching { p.currentPosition }.getOrDefault(0L).coerceAtLeast(0L)
+        p.pause()
+        p.clearVideoSurface()
+        p.clearMediaItems()
+        p.stop()
+        lastStopReason = "界面退到后台 pausePlaybackFromUi"
+        if (resumeUri != null) {
+            parkedForUi = ParkedMedia(resumeUri, resumePos)
+            DebugLog.log(
+                "DLNA",
+                "界面退到后台 → 释放硬解槽（仅 pause 不会归还解码器）"
+            )
         }
     }
 
@@ -2169,29 +2240,81 @@ class DlnaReceiver(
         }
     }
 
+    /*
+     * The UI's own stop, kept as a named Runnable so it can be cancelled.
+     *
+     * Leaving the screen queues this and going to the background does not undo
+     * it: the stop was posted, not executed. Coming straight back therefore
+     * rebuilt the item through [resumePlaybackFromUi] and only then did the
+     * queued stop run, clearing the playback that had just been rebuilt
+     * (field log 23:03:24 — one black flicker, then it recovered). A lambda
+     * cannot be cancelled because nobody can name it; this one can.
+     */
+
+    /** v103 — true while the UI's stop is still sitting in the queue. */
+    @Volatile
+    private var pendingUiStop = false
+
+    /**
+     * v103 — the same flag for the pause path. Both exist because a queued
+     * teardown that lands after the user came back destroys the playback that
+     * [resumePlaybackFromUi] just rebuilt.
+     */
+    @Volatile
+    private var pendingUiPause = false
+
+    /**
+     * v103 — log de-noising. "首帧已渲染" and "准备完成" are the proof that an
+     * item really reached the screen, so the first one for each uri always
+     * prints. Every re-buffer after that is counted here and flushed as a
+     * single tally when the uri changes or playback ends, so a healthy stream
+     * does not fill the rolling 8099 log with 60 identical lines a minute.
+     */
+    private var readyLoggedUri: String? = null
+    private var bufferRecoveries = 0
+    private var firstFrameLoggedUri: String? = null
+
+    /** Prints the pending re-buffer tally, if there is one, with its position. */
+    private fun flushBufferTally() {
+        if (bufferRecoveries <= 0) return
+        val pos = runCatching { (player?.currentPosition ?: 0L) / 1000 }.getOrDefault(0L)
+        DebugLog.log(
+            "DLNA",
+            "缓冲抖动恢复 x$bufferRecoveries 次（画面正常，pos=${pos}s）"
+        )
+        bufferRecoveries = 0
+    }
+
+    private val uiStopRunnable = Runnable {
+        pendingUiStop = false
+        // v100-② — the user just closed this item, so every auto-start
+        // timer still in flight has to die with it.
+        //
+        // Field log 14:49:38-39: the user pressed Back, and one second
+        // later a timer scheduled at 14:49:36 woke up and pulled the
+        // channel back. The exit had already put `transportState` back to
+        // STOPPED, which is what disarmed the timer's third guard — the
+        // exit did the timer's work for it. Bumping the generation voids
+        // every timer in flight in one move, instead of relying on each
+        // one happening to notice the dismissal in time.
+        ManualDlnaHttp.cancelPendingAutoStart()
+        // v102-④ — the timers are dead; drop the parked item too, or the
+        // next poll from the sender finds something still worth showing.
+        dismissPendingUri()
+        // v101: a real end also ends the pause, whatever it was holding.
+        userPaused = false
+        userPausedUri = null
+        userPausedPositionMs = 0
+        pauseReleasedSlot = false
+        mainHandler.removeCallbacks(pauseIdleRunnable)
+        clearPlayback("用户退出界面 stopPlaybackFromUi")
+        ManualDlnaHttp.notifyPlaybackEnded()
+        report(ProtocolState.ADVERTISING)
+    }
+
     fun stopPlaybackFromUi() {
-        mainHandler.post {
-            // v100-② — the user just closed this item, so every auto-start
-            // timer still in flight has to die with it.
-            //
-            // Field log 14:49:38-39: the user pressed Back, and one second
-            // later a timer scheduled at 14:49:36 woke up and pulled the
-            // channel back. The exit had already put `transportState` back to
-            // STOPPED, which is what disarmed the timer's third guard — the
-            // exit did the timer's work for it. Bumping the generation voids
-            // every timer in flight in one move, instead of relying on each
-            // one happening to notice the dismissal in time.
-            ManualDlnaHttp.cancelPendingAutoStart()
-            // v101: a real end also ends the pause, whatever it was holding.
-            userPaused = false
-            userPausedUri = null
-            userPausedPositionMs = 0
-            pauseReleasedSlot = false
-            mainHandler.removeCallbacks(pauseIdleRunnable)
-            clearPlayback("用户退出界面 stopPlaybackFromUi")
-            ManualDlnaHttp.notifyPlaybackEnded()
-            report(ProtocolState.ADVERTISING)
-        }
+        pendingUiStop = true
+        mainHandler.post(uiStopRunnable)
     }
 
     /**
@@ -2203,6 +2326,24 @@ class DlnaReceiver(
      */
     fun resumePlaybackFromUi() {
         mainHandler.post {
+            // v102 — the UI asked for its picture back, so a stop the same UI
+            // queued on the way out has nothing left to stop. Without this the
+            // queued stop lands one message later and clears the item that was
+            // just rebuilt here: one black flicker and a wasted decoder cycle.
+            if (pendingUiStop) {
+                pendingUiStop = false
+                mainHandler.removeCallbacks(uiStopRunnable)
+                DebugLog.log("DLNA", "回到前台 → 撤销排队中的 UI stop（不再清掉刚重建的播放）")
+            }
+            // v103 — the pause path needs the same cancellation. The flag is
+            // raised on the synchronous side of `pausePlaybackFromUi()`, so it
+            // is already true here even though the runnable itself has not run
+            // yet: `removeCallbacks` takes it out of the queue.
+            if (pendingUiPause) {
+                pendingUiPause = false
+                mainHandler.removeCallbacks(uiPauseRunnable)
+                DebugLog.log("DLNA", "回到前台 → 撤销排队中的 UI pause（不再释放刚重建的解码槽）")
+            }
             val parked = parkedForUi ?: return@post
             if (!started || player?.isReleased != false) return@post
             // The sender's Play may have re-armed the item already; do not
@@ -2360,6 +2501,34 @@ class DlnaReceiver(
             // the same treatment, because the slot is a box-wide resource, not
             // per-channel.
             if (decoderCooldownActive()) {
+                // v102 — the sender re-parks this item on every poll while the
+                // box cools down. Renewing that promise for a cast the user
+                // already closed is what kept the pending item alive past the
+                // exit: nothing arriving here is the user's decision either,
+                // so there is nothing to renew.
+                if (isCastDismissed(uri)) {
+                    ManualDlnaHttp.cancelPendingAutoStart()
+                    pendingUiStop = false
+                    mainHandler.removeCallbacks(uiStopRunnable)
+                    // v103 — the pause teardown is a queued action too, and it
+                    // is the one that releases the decoder slot. Leaving it in
+                    // the queue would clear a player the user's own return just
+                    // rebuilt.
+                    pendingUiPause = false
+                    mainHandler.removeCallbacks(uiPauseRunnable)
+                    mainHandler.removeCallbacks(decoderCooldownRetry)
+                    pendingStartUri = null
+                    pendingStartAtMs = 0L
+                    DebugLog.log(
+                        "DLNA",
+                        "该投屏已被用户关闭 → 冷却期内不再重复挂起（等用户手势或换 URI）: ${uri.take(64)}…"
+                    )
+                    // Only the promise goes, not the session: the same state the
+                    // parking branch below used to report, so a dismissal never
+                    // downgrades a cast that is still connected.
+                    report(ProtocolState.CONNECTED)
+                    return@post
+                }
                 // v99-②: deliberately a plain assignment, not holdPending().
                 // This is the same item waiting out a cooldown, not a new
                 // promise, and the sender polls here every 10-30 s — renewing
@@ -2742,9 +2911,14 @@ class DlnaReceiver(
      */
     @OptIn(UnstableApi::class)
     private fun clearPlayback(reason: String) {
+        // v103 — an item ended: report how many re-buffers it survived before
+        // the counters that belong to it are reset.
+        flushBufferTally()
         currentUri = null
         pendingSeekMs = -1L
         lastStopReason = reason
+        readyLoggedUri = null
+        firstFrameLoggedUri = null
         DlnaMediaMeta.setActive(false)
         player?.let { p ->
             p.stop()

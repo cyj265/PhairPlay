@@ -976,6 +976,22 @@ class PhairPlayService : Service() {
     private var autoForegroundWindowStartMs = 0L
     private var autoForegroundCountInWindow = 0
 
+    /**
+     * v103 — the distinct items that have already been dragged into the
+     * foreground inside the current window. The budget above asks "how many
+     * launches", which a single cold-start cast can exhaust on its own (one
+     * retry plus the Play behind it); this asks "how many different things has
+     * the user been dragged out of their app for".
+     */
+    private val autoForegroundBudgetUris = HashSet<String>()
+
+    /**
+     * v103 — how often each reason was skipped because the UI was already up.
+     * Cleared with the budget window; kept as counts so the line stays short
+     * without losing the fact that it kept happening.
+     */
+    private val autoForegroundSkipped = HashMap<String, Int>()
+
     /** How often a refused auto-foreground launch has been retried. */
     private var foregroundLaunchRetries = 0
 
@@ -1071,7 +1087,22 @@ class PhairPlayService : Service() {
         // that actually holds focus may suppress a launch.
         if (activityResumed) {
             if (uiWindowFocused) {
-                com.phairplay.util.DebugLog.log("DLNA", "自动前台被跳过：UI 已可见（$reason）")
+                // v103 — senders poll every 10-30 s, so one visible cast used to
+                // print this on every single poll: dozens of identical lines
+                // that pushed real entries out of the rolling 8099 window.
+                // Counted instead of silenced — "it should have come forward and
+                // did not" is a signal we must not swallow.
+                val key = reason
+                autoForegroundSkipped[key] = (autoForegroundSkipped[key] ?: 0) + 1
+                val seen = autoForegroundSkipped[key] ?: 1
+                if (seen == 1) {
+                    com.phairplay.util.DebugLog.log("DLNA", "自动前台被跳过：UI 已可见（$reason）")
+                } else if (seen % 10 == 0) {
+                    com.phairplay.util.DebugLog.log(
+                        "DLNA",
+                        "自动前台被跳过 x$seen 次（UI 已可见，$reason）"
+                    )
+                }
                 return
             }
             com.phairplay.util.DebugLog.log(
@@ -1097,15 +1128,43 @@ class PhairPlayService : Service() {
         if (now - autoForegroundWindowStartMs >= AUTOFOREGROUND_BUDGET_WINDOW_MS) {
             autoForegroundWindowStartMs = now
             autoForegroundCountInWindow = 0
+            autoForegroundBudgetUris.clear()
+            autoForegroundSkipped.clear()
         }
-        if (autoForegroundCountInWindow >= AUTOFOREGROUND_BUDGET_MAX) {
+        // v103 — the budget counts DISTINCT items, not launches.
+        //
+        // A single cold-start cast needs 2-3 launches to get on screen (one
+        // retry plus the Play that follows it), so counting launches let a cast
+        // spend its own budget before it had even shown a picture. Field log
+        // 18:02:34-18:02:40: one live stream took all three slots in six
+        // seconds, and for the next 60 s every new item "played but did not
+        // come forward" — which the user experiences as "the fourth channel I
+        // switch to shows no picture".
+        //
+        // A set keyed by uri fixes it: re-sending the same item (senders poll
+        // every 10-30 s, and a dismissal/return cycle re-posts) no longer costs
+        // anything, while genuinely new items still get their own budget.
+        val budgetUri = dlnaReceiver?.currentCastUri ?: dlnaReceiver?.pendingCastUri
+        val newBudgetItem = budgetUri != null && autoForegroundBudgetUris.add(budgetUri)
+        if (!newBudgetItem && budgetUri == null && autoForegroundCountInWindow >= AUTOFOREGROUND_BUDGET_MAX) {
+            // No uri to attribute the launch to: fall back to the old counter so
+            // a launch storm with nothing identifiable is still bounded.
+            com.phairplay.util.DebugLog.log(
+                "DLNA",
+                "自动前台总闸（无 URI 归属）：60s 内已拉起 $autoForegroundCountInWindow 次（上限 $AUTOFOREGROUND_BUDGET_MAX）" +
+                    "→ 本次只播不拉前台（$reason）。播放正常，界面不再自动抢"
+            )
+            dlnaReceiver?.cancelForegroundWaitAndStartAudio()
+            return
+        }
+        if (newBudgetItem && autoForegroundBudgetUris.size > AUTOFOREGROUND_BUDGET_MAX) {
             // Over budget: play, do not drag. Same courtesy the dismissal path
             // extends — the receiver stops waiting for a UI that is not coming
             // and starts on its own, so the user hears the cast instead of
             // watching an app they left keep pulling itself into view.
             com.phairplay.util.DebugLog.log(
                 "DLNA",
-                "自动前台总闸：60s 内已拉起 $autoForegroundCountInWindow 次（上限 $AUTOFOREGROUND_BUDGET_MAX）" +
+                "自动前台总闸：60s 内已为 ${autoForegroundBudgetUris.size} 个不同投屏拉起过前台（上限 $AUTOFOREGROUND_BUDGET_MAX）" +
                     "→ 本次只播不拉前台（$reason）。播放正常，界面不再自动抢"
             )
             dlnaReceiver?.cancelForegroundWaitAndStartAudio()
