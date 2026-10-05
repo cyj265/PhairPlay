@@ -17,6 +17,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -260,9 +261,123 @@ class DlnaReceiver(
             (p.playbackState == Player.STATE_BUFFERING && p.playWhenReady)
     }
 
-    /** Retry counter for playback errors, reset on new media and on READY. */
-    @Volatile
-    private var retryCount = 0
+    /**
+     * Retry counters for playback errors, bucketed by uri.
+     *
+     * WHY a map and not a single counter (v104): a sender picks a new channel
+     * by sending SetAVTransportURI + Play, and a live stream that stalls counts
+     * against the retry budget of whatever was playing before it. With one
+     * shared counter, item A burning both retries meant item B failed on its
+     * very first error with no retry left — and the user sees "my new video
+     * won't start", not "the previous one was broken". Keying on the uri means
+     * a channel switch starts with a clean budget, which is what "换台" has to
+     * mean.
+     *
+     * Bounded: a sender that keeps re-casting fresh URLs could otherwise grow
+     * this forever. Only a handful of entries are ever live, so the oldest are
+     * dropped rather than keeping the map unbounded.
+     */
+    private val retryCountByUri = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Retry budget consumed by [uri]; zero when that uri is untouched. */
+    private fun retryCountFor(uri: String?): Int =
+        if (uri == null) 0 else retryCountByUri[uri] ?: 0
+
+    /**
+     * Consume one retry for [uri].
+     *
+     * Callers gate on [retryCountFor] first, then call this to record the
+     * attempt, so the budget check and the consumption stay on the same uri.
+     */
+    private fun takeRetry(uri: String) {
+        retryCountByUri.merge(uri, 1, Int::plus)
+        if (retryCountByUri.size > RETRY_BUCKET_LIMIT) {
+            // A sender that keeps re-casting fresh URLs would otherwise grow
+            // this forever. Drop the least-used entries; the map only ever
+            // needs to cover the handful of channels in rotation.
+            val stale = retryCountByUri.keys
+                .filter { it != uri }
+                .sortedBy { retryCountByUri[it] ?: 0 }
+                .take(retryCountByUri.size - RETRY_BUCKET_LIMIT)
+            stale.forEach { retryCountByUri.remove(it) }
+        }
+    }
+
+    /** Forget the retry budget for [uri] (a new item, or one that reached a picture). */
+    private fun clearRetryCount(uri: String?) {
+        if (uri != null) retryCountByUri.remove(uri)
+    }
+
+    /** How many uris may hold a retry budget at once (see [retryCountByUri]). */
+    private val RETRY_BUCKET_LIMIT = 8
+
+    /**
+     * HTTP 403 strikes per uri.
+     *
+     * WHY this was silent until v104: `errorCode / 1000 == 2` lumps an expired
+     * or authorisation-gated URL in with a segment that failed mid-transfer,
+     * and both were retried quietly. The first recovers on its own; the second
+     * never will, because the sender's URL has a short-lived signature. To the
+     * user both look identical — nothing happens when they cast — so the one
+     * case that needs them to re-pick the video on the phone said nothing at
+     * all. The first 403 stays silent (it genuinely is often transient); the
+     * second one is a verdict, and it gets a line on screen.
+     */
+    private val forbiddenByUri = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Wording agreed with the diagnostic side; keep it user-actionable. */
+    private val sourceRejectedMessage =
+        "该视频无法播放：视频源已失效（可能已过期或需要授权）。请在手机端重新选择后再次投屏。"
+
+    /**
+     * Report an HTTP 403 for [uri]; returns true when this one should be shown.
+     *
+     * First strike per uri stays silent and lets the ordinary retry path run —
+     * a source that answers 403 once can still come back. The second strike is
+     * treated as permanent for that URL and escalated to the user, who is the
+     * only one who can do anything about it.
+     */
+    private fun reportForbidden(uri: String?): Boolean {
+        if (uri == null) return false
+        val strikes = forbiddenByUri.merge(uri, 1, Int::plus) ?: 1
+        if (forbiddenByUri.size > RETRY_BUCKET_LIMIT) {
+            val stale = forbiddenByUri.keys
+                .filter { it != uri }
+                .sortedBy { forbiddenByUri[it] ?: 0 }
+                .take(forbiddenByUri.size - RETRY_BUCKET_LIMIT)
+            stale.forEach { forbiddenByUri.remove(it) }
+        }
+        if (strikes < SOURCE_REJECTED_STRIKES) return false
+        DebugLog.log("DLNA", "同一 uri 第 $strikes 次 403 → 判定源站拒绝，升级为界面提示")
+        onSourceHint(sourceRejectedMessage)
+        return true
+    }
+
+    /** Strikes per uri before the 403 stops being treated as transient (v104). */
+    private val SOURCE_REJECTED_STRIKES = 2
+
+    /**
+     * HTTP status carried by a media3 [PlaybackException], or null if the
+     * failure was not an HTTP response.
+     *
+     * Walked up the cause chain on purpose: media3 reports the status on
+     * `HttpDataSource.InvalidResponseCodeException`, and the HLS and
+     * progressive paths wrap that exception at different depths, so a
+     * single-level check misses half the 403s. Depth is capped so a cyclic
+     * chain cannot spin.
+     */
+    private fun httpStatusOf(error: PlaybackException): Int? {
+        var cause: Throwable? = error
+        var depth = 0
+        while (cause != null && depth < 6) {
+            if (cause is HttpDataSource.InvalidResponseCodeException) {
+                return cause.responseCode
+            }
+            cause = cause.cause
+            depth++
+        }
+        return null
+    }
 
     /** Consecutive decoder-init failures for the current item (see the error handler). */
     @Volatile
@@ -372,7 +487,7 @@ class DlnaReceiver(
         surfaceGeneration++
         hevcCodecSelector.resetFailures()
         consecutiveDecoderFailures = 0
-        retryCount = 0
+        clearRetryCount(uri)
         if (surfaceReady) {
             runStart(uri)
         } else {
@@ -444,6 +559,12 @@ class DlnaReceiver(
         }
         decoderCooldownMs = DECODER_COOLDOWN_MS
         consecutiveCooldowns = 0
+        // v104: the same URL working again settles the question of whether it
+        // was refused. Without this, re-picking a video the user had to fetch
+        // twice would land on the second strike immediately and be told it is
+        // expired while it is playing.
+        clearRetryCount(currentUri)
+        if (currentUri != null) forbiddenByUri.remove(currentUri)
         // A picture is on screen, so any "the decoder failed" advice is now
         // stale. Retract it: the UI holds the hint until told otherwise, and a
         // hint that outlives the problem is worse than none (the user reads a
@@ -987,7 +1108,13 @@ class DlnaReceiver(
                                         p.seekTo(pending)
                                     }
                                     if (currentUri != null) {
-                                        retryCount = 0
+                                        // v104: only this item's budget resets.
+                                        // A single shared counter also cleared the
+                                        // previous channel's budget here, which
+                                        // handed a sender that re-cast the same
+                                        // dead URL a free pass every time it
+                                        // polled.
+                                        clearRetryCount(currentUri)
                                         report(ProtocolState.CONNECTED)
                                     }
                                 }
@@ -1186,12 +1313,23 @@ class DlnaReceiver(
                             } else {
                                 consecutiveDecoderFailures = 0
                             }
-                            // A source-side hiccup (a segment that failed to load,
-                            // a playlist that rolled mid-fetch) is not a receiver
-                            // fault: the very next retry in the field log came back
-                            // with a picture, twice in a row. Surfacing it as an
-                            // error flashes the home card red at the user for
-                            // something they never caused and cannot see.
+                            // v104: an HTTP 403 is not a hiccup — the source is
+                            // refusing this URL, and the sender's URL usually
+                            // carries a short-lived signature, so retrying cannot
+                            // fix it. It used to land in the silent "source
+                            // glitch" bucket below and the user got nothing at
+                            // all. Pull it out first: first strike stays quiet,
+                            // the second one speaks up (see [reportForbidden]).
+                            val forbidden = httpStatusOf(error)
+                            val sourceRejected = forbidden == 403 &&
+                                reportForbidden(currentUri)
+                            // Everything else in errorCode/1000 == 2 stays a
+                            // genuine glitch: a segment that failed to load or a
+                            // playlist that rolled mid-fetch came back with a
+                            // picture on the very next retry in the field log,
+                            // twice in a row. Surfacing those as errors flashes
+                            // the home card red at the user for something they
+                            // never caused and cannot see.
                             // Anything decoder-related still reports, because that
                             // one is real and needs the card to say so.
                             val sourceGlitch = error.errorCode / 1000 == 2
@@ -1209,11 +1347,17 @@ class DlnaReceiver(
                                         error.cause?.cause is IllegalArgumentException
                                 DebugLog.log(
                                     "DLNA",
-                                    if (internal)
-                                        "错误根因=播放器内部断言（Media3 SampleQueue.commitSample：样本偏移回退，非网络/源端）" +
-                                            "，不向界面报错（此类异常被 catch 不住，靠下一次重建自愈）"
-                                    else
-                                        "源端瞬时抖动（可自恢复），不向界面报错"
+                                    when {
+                                        forbidden == 403 && sourceRejected ->
+                                            "源站返回 403 且已非首次 → 已升级为界面提示，不再自动重试"
+                                        forbidden == 403 ->
+                                            "源站返回 403（首次，静默重试；源站偶发拒绝确实能自恢复）"
+                                        internal ->
+                                            "错误根因=播放器内部断言（Media3 SampleQueue.commitSample：样本偏移回退，非网络/源端）" +
+                                                "，不向界面报错（此类异常被 catch 不住，靠下一次重建自愈）"
+                                        else ->
+                                            "源端瞬时抖动（可自恢复），不向界面报错"
+                                    }
                                 )
                             } else {
                                 onError(msg)
@@ -1312,10 +1456,17 @@ class DlnaReceiver(
                                             "若反复出现，该片源为纯 H.265，本机无法解码。"
                                     )
                                 }
-                            } else if (uri != null && retryCount < 2 && !decoderDead &&
-                                !decoderCooldownActive()
+                            } else if (uri != null && retryCountFor(uri) < 2 && !decoderDead &&
+                                !decoderCooldownActive() && !sourceRejected
                             ) {
-                                retryCount++
+                                // v104: a URL the source is refusing will refuse
+                                // again, and each rebuild of the item is one
+                                // more load attempt against a server that is
+                                // saying no. Once the second 403 has already
+                                // told the user to re-pick the video, retrying
+                                // would only bury that advice under more
+                                // silence.
+                                takeRetry(uri)
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {
                                     player?.let { p ->
@@ -2022,6 +2173,11 @@ class DlnaReceiver(
         // 界面退到后台 pausePlaybackFromUi"), which then produced a bogus
         // "起播 5s 未就绪" probe against a player that no longer existed.
         pendingUiPause = true
+        // DO NOT DELETE this post() — agreed with the diagnostic side (v104).
+        // v103 made the queued teardown *cancellable*; it did not stop the
+        // *queueing*. The 32 press rounds prove the cancellation works and
+        // that this lifecycle order is stable, NOT that the window is closed.
+        // Removing the post brings the 18:06:52 sequence straight back.
         mainHandler.post(uiPauseRunnable)
     }
 
@@ -2346,6 +2502,26 @@ class DlnaReceiver(
             }
             val parked = parkedForUi ?: return@post
             if (!started || player?.isReleased != false) return@post
+            // v104: the parked item is only ours to restore if it is still the
+            // item on screen. `pendingStartUri` used to guard this, but a new
+            // cast clears that as it starts, so by the time the app came back
+            // the guard was already open and this restored the OLD uri on top
+            // of the channel the user had just switched to.
+            // Field log 23:27:20: switching away at 23:27:20 parked
+            // ipv4.download.../doesnot.mp4, the sender cast the mux stream, and
+            // this line then started the dead URL again — three strikes on a
+            // channel nobody was watching, while the new one sat in BUFFERING.
+            // Comparing against the item actually loaded is the only test that
+            // survives a cast that has already started.
+            if (currentUri != null && currentUri != parked.uri) {
+                DebugLog.log(
+                    "DLNA",
+                    "回到前台 → 搁置项已不是当前台（搁置=${parked.uri.take(48)}… " +
+                        "当前=${currentUri?.take(48)}…）→ 不再恢复旧的"
+                )
+                parkedForUi = null
+                return@post
+            }
             // The sender's Play may have re-armed the item already; do not
             // stomp on a start that is already in flight.
             if (pendingStartUri != null) return@post
@@ -2726,7 +2902,11 @@ class DlnaReceiver(
             lastRunStartMs = nowMs
 
             currentUri = uri
-            retryCount = 0
+            clearRetryCount(uri)
+            // v104: a parked item belongs to the uri it was parked for. Once a
+            // different item starts, the parked one is stale and restoring it on
+            // the way back would undo the channel switch.
+            if (parkedForUi?.uri != uri) parkedForUi = null
             consecutiveDecoderFailures = 0
             // A start that got as far as loading an item is a start the source
             // served; the next stall on this item is measured from here.
