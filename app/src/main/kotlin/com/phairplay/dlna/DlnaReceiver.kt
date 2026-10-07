@@ -16,7 +16,6 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -777,8 +776,17 @@ class DlnaReceiver(
      * carried by the sender's relay URL (see [applyRelayHeaders]) are applied
      * here before every new media item, because HLS playlists resolve their
      * segments to absolute CDN URLs that ExoPlayer fetches directly.
+     *
+     * v107: this is [Ipv4HttpDataSource], not media3's DefaultHttpDataSource.
+     * Media3 1.4.1 has no DNS seam — it opens connections through the JVM's
+     * HttpURLConnection, so the AAAA-first resolution happens inside the
+     * platform and every request pays a connect timeout before falling back to
+     * IPv4 (measured at 6.1 s / 12.6 s / 66.2 s of first byte on real casts,
+     * against 144 ms for the one source with no AAAA record). Resolving here
+     * keeps the hostname for the Host header and for relative HLS segments,
+     * and connects to the IPv4 address instead.
      */
-    private val httpFactory: DefaultHttpDataSource.Factory = DefaultHttpDataSource.Factory()
+    private val httpFactory: Ipv4HttpDataSource.Factory = Ipv4HttpDataSource.Factory()
         .setUserAgent(DEFAULT_HTTP_USER_AGENT)
         .setAllowCrossProtocolRedirects(true)
         .setConnectTimeoutMs(10_000)
@@ -1704,7 +1712,7 @@ class DlnaReceiver(
                         val dnsStartedAt = System.currentTimeMillis()
                         val future = resolver.submit(
                             java.util.concurrent.Callable {
-                                java.net.InetAddress.getAllByName(host)
+                                Ipv4OnlyDns.lookup(host)
                             }
                         )
                         try {
@@ -1717,13 +1725,23 @@ class DlnaReceiver(
                                 "DLNA",
                                 "源探测: DNS $host → " +
                                     addrs.joinToString(",") { it.hostAddress ?: "?" } +
-                                    " (${dnsMs}ms)"
+                                    " (${dnsMs}ms, 仅 IPv4)"
                             )
                         } catch (e: java.util.concurrent.TimeoutException) {
                             DebugLog.log(
                                 "DLNA",
                                 "源探测: DNS $host 超过 ${PROBE_DNS_TIMEOUT_MS}ms 未解析 → 网络层慢" +
-                                    "（connectTimeout 管不到 DNS，首字节 42s 就是这一类；后续 HTTP 阶段不再进行）"
+                                    "（connectTimeout 管不到 DNS；后续 HTTP 阶段不再进行）"
+                            )
+                            return@Thread
+                        } catch (e: java.net.UnknownHostException) {
+                            // v107: with IPv6 filtered out, a host that only ever
+                            // published AAAA lands here. Say so, because it looks
+                            // identical to a typo otherwise.
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: DNS $host 只解析到 AAAA（无可用 IPv4）→ " +
+                                    "本机 IPv6 不通，该源无法播放: ${e.message}"
                             )
                             return@Thread
                         } catch (e: Exception) {
@@ -1738,6 +1756,12 @@ class DlnaReceiver(
                     }
                 }
                 conn = java.net.URL(uri).openConnection() as java.net.HttpURLConnection
+                // v107: the probe opens its own connection, so it needs the
+                // same IPv4 preference the player sets. Without this the probe
+                // still walks the AAAA-first path and keeps reporting 12–66 s
+                // first bytes for a source the player now plays in 1 s — the
+                // log would contradict itself.
+                Ipv4OnlyDns.preferIpv4()
                 conn.requestMethod = "GET"
                 conn.setRequestProperty(
                     "User-Agent",
@@ -1763,9 +1787,25 @@ class DlnaReceiver(
                 // can be attributed to resolution vs. the far end itself.
                 val probeMs = System.currentTimeMillis() - probeStartedAt
                 val dnsPart = if (dnsMs >= 0) "DNS ${dnsMs}ms, " else ""
+                // v107②: an HLS playlist answers fast while the segments it points
+                // at live on a different host — measured 144 ms for the playlist
+                // against 22 s to the first frame, with the segments on
+                // picasso-static.xiaohongshu.com. Timing the segment host is what
+                // turns "slow source" into "slow *that* host", so the next person
+                // reading this log knows which app's CDN to look at.
+                val segmentHost = firstSegmentHost(head)
+                val segmentDnsMs = if (segmentHost != null && segmentHost != host) {
+                    timeHostDns(segmentHost)
+                } else -1L
+                val segmentPart: String = when {
+                    segmentHost == null -> ""
+                    segmentHost == host -> "分片域同源, "
+                    segmentDnsMs >= 0 -> "分片域 $segmentHost ${segmentDnsMs}ms, "
+                    else -> "分片域 $segmentHost 解析失败, "
+                }
                 DebugLog.log(
                     "DLNA",
-                    "源探测: HTTP $code, Content-Type=$type, ${dnsPart}首字节 ${probeMs}ms"
+                    "源探测: HTTP $code, Content-Type=$type, ${dnsPart}${segmentPart}首字节 ${probeMs}ms"
                 )
                 DebugLog.log("DLNA", "源前200字节: $head")
                 // v97: remember that the far end is answering, so the
@@ -1836,6 +1876,51 @@ class DlnaReceiver(
      *   `binary/octet-stream`, or nothing at all; that is a gap in our
      *   knowledge, not a verdict on the source.
      */
+    /**
+     * v107 — the host of the first media segment named inside an HLS playlist, or
+     * null when [firstBytes] is not a playlist or names nothing absolute.
+     *
+     * Only the first 200 bytes of the playlist reach here, which is enough for the
+     * `#EXTINF:` line plus the URI that follows it in every playlist seen so far.
+     * The point is the *host*, not a working URL: it is only used to time DNS for
+     * the host that actually serves the video.
+     */
+    private fun firstSegmentHost(firstBytes: String): String? {
+        if (!firstBytes.contains("#EXTINF")) return null
+        val uri = Regex("""(https?://[^\s"'\\]+)""").findAll(firstBytes)
+            .map { it.groupValues[1] }
+            // The playlist URI itself is never in its own body, but a relative or
+            // root-relative segment must not be mistaken for an absolute one.
+            .firstOrNull { it.contains("://") && !it.endsWith(".m3u8", true) }
+            ?: return null
+        return java.net.URI(uri).host
+    }
+
+    /**
+     * v107 — resolve [host] the way the player will (IPv4 only, see [Ipv4OnlyDns])
+     * and return how long it took, or -1 when it cannot be resolved.
+     *
+     * Bounded by [PROBE_DNS_TIMEOUT_MS] like the main probe: this is a diagnostic,
+     * and a slow lookup here must not become a second hang.
+     */
+    private fun timeHostDns(host: String): Long {
+        val resolver = java.util.concurrent.Executors.newSingleThreadExecutor()
+        return try {
+            val started = System.currentTimeMillis()
+            val future = resolver.submit(
+                java.util.concurrent.Callable { Ipv4OnlyDns.lookupOrEmpty(host) }
+            )
+            val addrs = future.get(
+                PROBE_DNS_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS
+            )
+            if (addrs.isEmpty()) -1 else System.currentTimeMillis() - started
+        } catch (e: Exception) {
+            -1
+        } finally {
+            resolver.shutdownNow()
+        }
+    }
+
     private fun classifyProbePayload(contentType: String, firstBytes: String): Int {
         val type = contentType.trim().lowercase()
         // A textual answer is only acceptable when it really is a playlist.
