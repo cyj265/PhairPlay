@@ -1683,6 +1683,60 @@ class DlnaReceiver(
             var conn: java.net.HttpURLConnection? = null
             val probeStartedAt = System.currentTimeMillis()
             try {
+                // v106 — resolve DNS under our own deadline first.
+                //
+                // connectTimeout/readTimeout start at the TCP handshake, but
+                // the far end is reached through getaddrinfo, which can (and
+                // on 2026-10-06 did) eat 30-40 s with both timeouts set to 6 s
+                // — that is exactly the "probe said 42 s" mystery. Resolving
+                // here also warms the JVM's InetAddress cache, so the
+                // connection below is judged on connect/read only and the
+                // probe as a whole can no longer run away.
+                val host = try {
+                    java.net.URI(uri).host
+                } catch (_: Exception) {
+                    null
+                }
+                var dnsMs = -1L
+                if (!host.isNullOrBlank()) {
+                    val resolver = java.util.concurrent.Executors.newSingleThreadExecutor()
+                    try {
+                        val dnsStartedAt = System.currentTimeMillis()
+                        val future = resolver.submit(
+                            java.util.concurrent.Callable {
+                                java.net.InetAddress.getAllByName(host)
+                            }
+                        )
+                        try {
+                            val addrs = future.get(
+                                PROBE_DNS_TIMEOUT_MS,
+                                java.util.concurrent.TimeUnit.MILLISECONDS
+                            )
+                            dnsMs = System.currentTimeMillis() - dnsStartedAt
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: DNS $host → " +
+                                    addrs.joinToString(",") { it.hostAddress ?: "?" } +
+                                    " (${dnsMs}ms)"
+                            )
+                        } catch (e: java.util.concurrent.TimeoutException) {
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: DNS $host 超过 ${PROBE_DNS_TIMEOUT_MS}ms 未解析 → 网络层慢" +
+                                    "（connectTimeout 管不到 DNS，首字节 42s 就是这一类；后续 HTTP 阶段不再进行）"
+                            )
+                            return@Thread
+                        } catch (e: Exception) {
+                            DebugLog.log(
+                                "DLNA",
+                                "源探测: DNS $host 解析失败: ${e.javaClass.simpleName} ${e.message} → 域名不存在或本机 DNS 故障"
+                            )
+                            return@Thread
+                        }
+                    } finally {
+                        resolver.shutdownNow()
+                    }
+                }
                 conn = java.net.URL(uri).openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.setRequestProperty(
@@ -1705,8 +1759,14 @@ class DlnaReceiver(
                 // v98 C: the first-byte latency is what separates "the source
                 // is slow" from "the player is not playing" in the log, without
                 // having to reach a laptop for a curled copy of the stream.
+                // v106: the DNS phase is reported next to it, so a big number
+                // can be attributed to resolution vs. the far end itself.
                 val probeMs = System.currentTimeMillis() - probeStartedAt
-                DebugLog.log("DLNA", "源探测: HTTP $code, Content-Type=$type, 首字节 ${probeMs}ms")
+                val dnsPart = if (dnsMs >= 0) "DNS ${dnsMs}ms, " else ""
+                DebugLog.log(
+                    "DLNA",
+                    "源探测: HTTP $code, Content-Type=$type, ${dnsPart}首字节 ${probeMs}ms"
+                )
                 DebugLog.log("DLNA", "源前200字节: $head")
                 // v97: remember that the far end is answering, so the
                 // "READY but 0x0" watchdog can tell a slow source from a dead
@@ -3188,6 +3248,19 @@ class DlnaReceiver(
 
         /** How long a "the source answered 2xx" verdict still applies. */
         private const val PROBE_FRESHNESS_MS = 60_000L
+
+        /**
+         * v106 — hard deadline for the probe's own DNS lookup.
+         *
+         * HttpURLConnection's connectTimeout/readTimeout do NOT cover name
+         * resolution: field log 2026-10-06 (Douyin CDN `gravity-t11`) measured
+         * a 42196 ms first byte against 6000 ms timeouts, all of it spent
+         * inside getaddrinfo. The probe resolves the host itself under this
+         * deadline; a successful answer is cached by the JVM, so the HTTP
+         * connection that follows then actually honours its own 6 s timeouts
+         * and the whole probe is bounded (~3 + 6 + 6 s) instead of open-ended.
+         */
+        private const val PROBE_DNS_TIMEOUT_MS = 3_000L
 
         /** Gap used when re-driving a start after a healthy source probe. */
         private const val SOURCE_SLOW_RETRY_MS = 3000L
