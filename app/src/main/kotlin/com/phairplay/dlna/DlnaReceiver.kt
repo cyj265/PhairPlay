@@ -37,6 +37,8 @@ import com.phairplay.dlna.transport.DlnaUpnpServiceConfiguration
 import com.phairplay.dlna.transport.ManualDlnaHttp
 import com.phairplay.dlna.transport.ManualSsdp
 import com.phairplay.util.NetworkUtils
+import okhttp3.Request
+import okhttp3.Response
 import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
 import org.jupnp.model.meta.DeviceDetails
 import org.jupnp.model.meta.DeviceIdentity
@@ -1688,7 +1690,7 @@ class DlnaReceiver(
             probeInFlightUri = uri
         }
         Thread {
-            var conn: java.net.HttpURLConnection? = null
+            var resp: Response? = null
             val probeStartedAt = System.currentTimeMillis()
             try {
                 // v106 — resolve DNS under our own deadline first.
@@ -1760,40 +1762,31 @@ class DlnaReceiver(
                 // per RFC 6724 and tries the AAAA record first — into a black
                 // hole on this network. Measured: DNS 1 ms and yet first byte at
                 // 12 s, because only the lookup was IPv4-only while the connect
-                // was not. The probe now dials the same IPv4 address the player
-                // does, with the hostname kept in the Host header.
-                val probeHost = host ?: ""
-                val probeIp = Ipv4OnlyDns.lookupOrEmpty(probeHost)
-                    .firstNotNullOfOrNull { it.hostAddress }
-                val probeTarget = when {
-                    probeIp == null || probeHost.isEmpty() -> uri
-                    uri.startsWith("https://") -> uri // TLS needs the real name
-                    else -> uri.replaceFirst(Regex("^(http://)[^/]+"), "$1$probeIp")
-                }
-                conn = java.net.URL(probeTarget).openConnection() as java.net.HttpURLConnection
-                if (probeIp != null && !uri.startsWith("https://")) {
-                    runCatching {
-                        conn.setRequestProperty(
-                            "Host",
-                            if (probeHost.contains(':')) "[$probeHost]" else probeHost
-                        )
-                    }
-                }
-                conn.requestMethod = "GET"
-                conn.setRequestProperty(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-                )
-                conn.connectTimeout = 6000
-                conn.readTimeout = 6000
-                val code = conn.responseCode
-                val type = conn.contentType ?: "(无 Content-Type)"
+                // was not. The probe now dials through the same IPv4-only OkHttp
+                // client the player uses ([newIpv4OkHttpClient]), so the connect
+                // phase is also IPv4-only and the hostname stays in the URL
+                // (correct `Host` header — the §89/§90 403 regression was caused
+                // by `Host: <ip>`). Keeping both paths identical means the probe
+                // can no longer disagree with what the player actually sends.
+                val client = newIpv4OkHttpClient(6000, 6000)
+                val req = Request.Builder()
+                    .url(uri)
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 15; PhairPlay) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+                    )
+                    .build()
+                resp = client.newCall(req).execute()
+                val code = resp!!.code
+                val type = resp!!.header("Content-Type") ?: "(无 Content-Type)"
                 val head = try {
-                    conn.inputStream.bufferedReader().use { r ->
-                        val buf = CharArray(200)
-                        val n = r.read(buf)
-                        if (n <= 0) "(空响应体)" else String(buf, 0, n).replace('\n', ' ').replace('\r', ' ')
-                    }
+                    val src = resp!!.body?.source()
+                    if (src != null) {
+                        val bytes = src.readByteArray(200L)
+                        if (bytes.isEmpty()) "(空响应体)"
+                        else String(bytes, Charsets.UTF_8)
+                            .replace('\n', ' ').replace('\r', ' ')
+                    } else "(空响应体)"
                 } catch (e: Exception) {
                     "(读取响应体失败: ${e.message})"
                 }
@@ -1869,7 +1862,7 @@ class DlnaReceiver(
             } catch (e: Exception) {
                 DebugLog.log("DLNA", "源探测失败: ${e.javaClass.simpleName} ${e.message}")
             } finally {
-                conn?.disconnect()
+                resp?.close()
                 synchronized(probeLock) {
                     if (probeInFlightUri == uri) probeInFlightUri = null
                 }

@@ -6,6 +6,7 @@
 # Build tools
 agp = "8.6.1"                          # Android Gradle Plugin
 kotlin = "1.9.23"                      # Kotlin compiler
+okhttp = "4.12.0"                       # IPv4-only HTTP layer (custom Dns drops AAAA)
 desugar-jdk-libs = "2.0.4"            # Core library desugaring (backports Java 8+ APIs to API 25)
 
 # AndroidX
@@ -87,6 +88,11 @@ slf4j-android = { group = "org.slf4j", name = "slf4j-android", version.ref = "sl
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exoplayer-hls", version.ref = "media3" }
 media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+
+# HTTP transport — replaces java.net.HttpURLConnection so we can pin an
+# IPv4-only Dns (the router advertises IPv6 but the data plane is a black
+# hole) while still sending the correct Host header from the URL hostname.
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }

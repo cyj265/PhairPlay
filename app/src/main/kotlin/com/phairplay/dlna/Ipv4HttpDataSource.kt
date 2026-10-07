@@ -6,63 +6,57 @@ import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.HttpDataSource.HttpDataSourceException
+import com.phairplay.util.DebugLog
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody
 import java.io.IOException
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.Inet4Address
-import java.net.URL
 import java.util.LinkedHashMap
-import java.util.LinkedHashSet
+import java.util.concurrent.TimeUnit
 
 /** Media3 1.4.1 has no LENGTH_UNSET constant; an unknown length is simply -1. */
 private const val LENGTH_UNKNOWN = -1L
 
-/** Redirect hops before giving up, matching media3's own data source. */
-private const val MAX_REDIRECTS = 5
-
 /**
- * v107 — an HTTP data source that does not pay the IPv6 wait.
+ * v107–v110 — an HTTP data source that does not pay the IPv6 wait, and that
+ * sends the correct `Host` header.
  *
- * ## Why media3's own factory cannot do this
+ * ## Why OkHttp instead of `HttpURLConnection`
  *
- * Media3 1.4.1's `DefaultHttpDataSource` opens connections through the JVM's
- * `HttpURLConnection` and its `Factory` offers no DNS seam — resolution happens
- * inside the platform, which sorts addresses per RFC 6724 and therefore tries a
- * host's AAAA record first. On this network the router advertises IPv6 and hands
- * out a default route but the IPv6 data plane is a black hole, so those
- * connections go nowhere and a request proceeds only after the connect timeout
- * expires. Measured on real casts: 6.1 s, 12.6 s and 66.2 s of first byte — one
- * per retry step — against 144 ms for the one source publishing no AAAA record.
- * The same video plays quickly on a phone on the same Wi-Fi, which is what
- * proved the delay was ours rather than the origin's.
+ * Two constraints have to hold at once on this box:
  *
- * ## Why the URI is not rewritten
+ * 1. **No IPv6 data plane.** The router advertises an IPv6 default route but
+ *    does not forward it, so any connection that tries a host's AAAA record
+ *    first goes to a black hole and only recovers after the connect timeout —
+ *    measured 6.1 s / 12.6 s / 66.2 s of first byte against 144 ms for a
+ *    source with no AAAA. The fix is to resolve only IPv4.
+ * 2. **Correct `Host`.** Android's `HttpURLConnection` lists `Host` as a
+ *    *restricted* header, so `setRequestProperty("Host", …)` is silently
+ *    ignored (v107 proved this: rewriting the URL to an IP literal made the
+ *    request carry `Host: <ip>`, and hosts that validate Host — douyincdn,
+ *    TVbox anti-leech — answered 403, see doc §89/§90). The hostname therefore
+ *    has to live in the URL itself, and the platform must be allowed to derive
+ *    `Host` from it.
  *
- * The hostname is kept for the `Host` header and for the URL media3 reports; for
- * plain http only the socket points at an IPv4 address. Rewriting the item URI to
- * an IP literal would break every HLS playlist with relative segment URLs, since
- * media3 resolves segments against the item's own URI. Hence a DataSource rather
- * than a URI rewrite.
- *
- * ## Why HTTPS keeps the hostname
- *
- * Dialling an IP literal breaks HTTPS outright: the handshake verifies the
- * certificate against the address and every source rejects it
- * (`SSLPeerUnverifiedException: Hostname 117.157.224.253 not verified`, measured
- * on the first HTTPS cast through this class). A custom `SSLSocketFactory` that
- * keeps SNI on the real name while connecting to the address is the textbook
- * answer, but this Android 7.1 platform client drives the handshake itself and
- * ignores the SNI set on the socket, so that path could not be trusted here.
- * HTTPS therefore keeps the name end to end and is de-prioritised at the resolver
- * instead — the same effect without touching TLS.
+ * `HttpURLConnection` cannot satisfy both: it exposes no DNS seam, and the one
+ * trick that would have pinned only the socket (`setSocketFactory`) does not
+ * exist at runtime on Android 7.1 (reflection confirms it is absent, so the
+ * v110 attempt was a no-op and silently reintroduced the IPv6 black hole).
+ * OkHttp gives us a first-class `Dns` interface, so we resolve only IPv4 while
+ * the URL keeps the real hostname — `Host`, SNI and relative-HLS resolution
+ * are all automatically correct, and redirects are followed safely per hop.
  */
 internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
-    private var connection: HttpURLConnection? = null
-    private var inputStream: InputStream? = null
+    private var call: okhttp3.Call? = null
+    private var response: Response? = null
+    private var bodyStream: InputStream? = null
     private var currentUri: Uri? = null
     private var currentSpec: DataSpec = DataSpec(Uri.EMPTY)
-    private var responseCodeInternal = HttpURLConnection.HTTP_OK
+    private var responseCodeInternal = 0
     private var responseHeadersInternal: Map<String, List<String>> = emptyMap()
     private var userAgent: String? = null
     private var allowCrossProtocolRedirects = true
@@ -76,8 +70,8 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     private var bytesRemaining = 0L
 
     init {
-        // Covers the HTTPS half; cheap, idempotent, and it only changes how
-        // names resolve.
+        // Covers HTTPS and any other plain-Java connection in the process;
+        // cheap, idempotent, and harmless once IPv6 forwarding is fixed.
         Ipv4OnlyDns.preferIpv4()
     }
 
@@ -88,20 +82,15 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         currentUri = dataSpec.uri
         currentSpec = dataSpec
         try {
-            val conn = openOverIpv4(dataSpec.uri)
+            val resp = openOverIpv4(dataSpec)
             transferStarted(dataSpec)
-            connection = conn
-            responseCodeInternal = conn.responseCode
-            responseHeadersInternal = conn.headerFields ?: emptyMap()
-            logResponseHeaders(conn)
-            inputStream = try {
-                conn.inputStream
-            } catch (e: IOException) {
-                // An error status still has a body worth draining: the sender's
-                // relay answers a challenge page here, and its text is the only
-                // thing that says why.
-                conn.errorStream
-            } ?: throw IOException("HTTP ${conn.responseCode} with no body")
+            response = resp
+            responseCodeInternal = resp.code
+            responseHeadersInternal = resp.headers.toMultimap()
+            logResponseHeaders(resp, dataSpec.uri.toString())
+            val body: ResponseBody =
+                resp.body ?: throw IOException("HTTP ${resp.code} with no body")
+            bodyStream = body.byteStream()
             // Media3 mirrors DefaultHttpDataSource here: what open() returns is
             // the number of bytes left in this resource, not the offset it
             // started at. Returning the position instead leaves `remaining`
@@ -111,19 +100,22 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             val declared = dataSpec.length
             bytesRemaining = when {
                 declared != LENGTH_UNKNOWN -> declared
-                conn.contentLengthLong > 0 -> conn.contentLengthLong
-                else -> 0L
+                else -> {
+                    val cl = body.contentLength()
+                    if (cl > 0L) cl else 0L
+                }
             }
-            if (dataSpec.position != 0L && responseCodeInternal == HttpURLConnection.HTTP_OK) {
+            if (dataSpec.position != 0L && responseCodeInternal in 200..299) {
                 // A 200 answer to a request that asked for an offset has to be
                 // skipped forward, the same way the platform class does it.
                 var skipped = 0L
+                val stream = bodyStream!!
                 while (skipped < dataSpec.position) {
-                    val n = inputStream!!.skip(dataSpec.position - skipped)
+                    val n = stream.skip(dataSpec.position - skipped)
                     if (n <= 0) break
                     skipped += n
                 }
-                bytesRemaining -= skipped
+                if (bytesRemaining > 0L) bytesRemaining -= skipped
             }
             return bytesRemaining
         } catch (e: IOException) {
@@ -134,196 +126,76 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     }
 
     /**
-     * Opens [uri] against one of its IPv4 addresses, keeping the hostname in the
-     * `Host` header so a plain-http request is indistinguishable from a
-     * name-based one.
+     * Opens [dataSpec.uri] through OkHttp with an IPv4-only [Dns].
      *
-     * The URL is rebuilt from the `Uri` components rather than through `URL`'s
-     * string parsing: an HLS segment can arrive with a path that does not start
-     * with a slash, and the three-argument `URL(scheme, host, file)` constructor
-     * then duplicates the path — which is exactly what broke the first version
-     * of this class (`.../270000001128/270000001128/...`).
-     *
-     * Every candidate failing means the source is genuinely unreachable, which is
-     * a different verdict from "slow" and the probe reports them separately.
+     * The hostname stays in the URL, so OkHttp emits the correct `Host` header
+     * (and the correct SNI for HTTPS), and relative HLS segment URLs resolve
+     * against the item's own URI. Redirects are followed automatically by the
+     * client — each hop is re-resolved through the same IPv4-only DNS, so no AAAA
+     * address is ever dialled.
      */
-    private fun openOverIpv4(uri: Uri): HttpURLConnection {
-        val host = uri.host
-        if (host.isNullOrBlank()) {
-            // "Invalid host: http://[...]" points at the wrong place; say what
-            // actually arrived instead.
-            throw IOException("no host in URI: ${uri.toString().take(120)}")
-        }
-        val scheme = uri.scheme?.lowercase() ?: "http"
-        val port = if (uri.port > 0) uri.port else defaultPort(scheme)
-        val path = uri.encodedPath.orEmpty()
-        val pathAndQuery = buildString {
-            append(if (path.startsWith("/")) path else "/$path")
-            uri.encodedQuery?.let { append('?').append(it) }
-        }
-        val hostHeader = if (port == defaultPort(scheme)) host else "$host:$port"
-
-        val candidates = LinkedHashSet<String>()
-        for (address in Ipv4OnlyDns.lookupOrEmpty(host)) {
-            val ip = address.hostAddress ?: continue
-            if (address is Inet4Address) candidates.add(ip)
-        }
-        if (candidates.isEmpty()) {
-            throw IOException("no IPv4 address for $host (IPv6 does not leave this network)")
-        }
-
-        var lastFailure: IOException? = null
-        for (ip in candidates) {
-            // Plain http is dialled on the IPv4 address, which is where the wait
-            // actually happened for every source measured; the `Host` header
-            // keeps the request identical to a name-based one.
-            //
-            // https keeps the hostname so TLS verifies the real name — and it
-            // uses the original URI verbatim rather than a rebuilt string,
-            // because hand-assembling it produced a stream that began with
-            // 0x00 instead of the `ftyp` box and every source failed container
-            // sniffing. There is no error to work backwards from in that case,
-            // so this path stays as untouched as possible.
-            val target = if (scheme == "https") uri.toString() else "$scheme://$ip:$port$pathAndQuery"
-            val conn = URL(target).openConnection() as HttpURLConnection
-            conn.connectTimeout = connectTimeout
-            conn.readTimeout = readTimeout
-            conn.instanceFollowRedirects = allowCrossProtocolRedirects
-            if (scheme != "https") {
-                // A restricted header on the platform client; harmless to set,
-                // and it documents the intent for the http path where it matters.
-                runCatching { conn.setRequestProperty("Host", hostHeader) }
+    private fun openOverIpv4(dataSpec: DataSpec): Response {
+        val client = newIpv4OkHttpClient(connectTimeout, readTimeout)
+        val builder = Request.Builder().url(dataSpec.uri.toString())
+        // Range header, exactly as media3's DefaultHttpDataSource does it.
+        if (dataSpec.position != 0L || dataSpec.length != LENGTH_UNKNOWN) {
+            val range = if (dataSpec.length != LENGTH_UNKNOWN) {
+                "bytes=${dataSpec.position}-${dataSpec.position + dataSpec.length - 1}"
+            } else {
+                "bytes=${dataSpec.position}-"
             }
-            userAgent?.let { conn.setRequestProperty("User-Agent", it) }
-            // Identity encoding keeps byte offsets aligned with the server's
-            // stream, which matters because media3 seeks by absolute position.
-            conn.setRequestProperty("Accept-Encoding", "identity")
-            for ((key, value) in requestProperties) {
-                if (key.equals("Host", ignoreCase = true)) continue
-                conn.setRequestProperty(key, value)
-            }
-            try {
-                conn.connect()
-                if (conn.responseCode in 300..399) {
-                    val location = conn.getHeaderField("Location")
-                    conn.disconnect()
-                    if (!allowCrossProtocolRedirects || location.isNullOrBlank()) {
-                        throw IOException(
-                            "redirect (HTTP ${conn.responseCode}) not followed for $host"
-                        )
-                    }
-                    // Redirects are followed here rather than by the platform,
-                    // because the platform would follow them against the IP
-                    // literal and leak that address into the next request's Host
-                    // header. media3's own data source does the same thing: read
-                    // Location, cap the hops, re-resolve each target.
-                    return followRedirects(uri, location)
-                }
-                return conn
-            } catch (e: IOException) {
-                conn.disconnect()
-                lastFailure = e
-            }
+            builder.header("Range", range)
         }
-        throw lastFailure ?: IOException("could not connect to $host over IPv4")
+        userAgent?.let { builder.header("User-Agent", it) }
+        // Identity encoding keeps byte offsets aligned with the server's stream,
+        // which matters because media3 seeks by absolute position; it also stops
+        // OkHttp from transparently gzip-decoding a body we want raw.
+        builder.header("Accept-Encoding", "identity")
+        for ((key, value) in requestProperties) {
+            builder.header(key, value)
+        }
+        val c = client.newCall(builder.build())
+        call = c
+        return try {
+            c.execute()
+        } catch (e: IOException) {
+            throw e
+        }
+        // OkHttp follows redirects itself (followRedirects/followSslRedirects on
+        // the client), so the returned response is the terminal one. A 3xx that
+        // reached us would mean redirection was disabled; we never disable it.
     }
 
     /**
-     * Follows an HTTP redirect chain the way media3's own data source does:
-     * read `Location`, cap the hops, and resolve every target again so the next
-     * hop also gets the IPv4 treatment. Absolute and relative targets are both
-     * accepted; a cross-protocol hop is passed to the platform, which is safe
-     * because the URL then carries the real hostname.
+     * v107 — reports what the far end actually agreed to, into the in-app
+     * diagnostic log (visible at `http://<box>:8099/log`) rather than only
+     * logcat. A cast that reads three bytes and stops is indistinguishable,
+     * from the outside, between a short file and a connection that closed
+     * mid-stream; these headers separate those cases. The request line also
+     * records the hostname we sent `Host` for, which is the exact thing the
+     * §89/§90 regression turned on.
      */
-    private fun followRedirects(fromUri: Uri, location: String): HttpURLConnection {
-        var target = java.net.URI(location).let {
-            if (it.isAbsolute) it else java.net.URI(fromUri.toString()).resolve(it)
-        }
-        var hops = 0
-        while (hops < MAX_REDIRECTS) {
-            if (++hops > MAX_REDIRECTS) {
-                throw IOException("Too many redirects: $location")
-            }
-            val nextUri = Uri.parse(target.toString())
-            val nextScheme = nextUri.scheme?.lowercase() ?: "http"
-            // An https hop goes by name: the certificate has to verify against
-            // it, and the platform resolver is the only thing that can do that.
-            if (nextScheme == "https") {
-                return URL(target.toString()).openConnection() as HttpURLConnection
-            }
-            val host = nextUri.host
-                ?: throw IOException("redirect without a host: $location")
-            val ip = Ipv4OnlyDns.lookupOrEmpty(host).firstNotNullOfOrNull { it.hostAddress }
-                ?: throw IOException("no IPv4 address for $host (IPv6 does not leave this network)")
-            val port = if (nextUri.port > 0) nextUri.port else defaultPort(nextScheme)
-            val path = nextUri.encodedPath.orEmpty()
-            val conn = URL(
-                "$nextScheme://$ip:$port" + (if (path.startsWith("/")) path else "/$path") +
-                    (nextUri.encodedQuery?.let { "?$it" } ?: "")
-            ).openConnection() as HttpURLConnection
-            conn.connectTimeout = connectTimeout
-            conn.readTimeout = readTimeout
-            conn.instanceFollowRedirects = false
-            conn.setRequestProperty("Host", host)
-            userAgent?.let { conn.setRequestProperty("User-Agent", it) }
-            conn.setRequestProperty("Accept-Encoding", "identity")
-            for ((key, value) in requestProperties) {
-                if (key.equals("Host", ignoreCase = true)) continue
-                conn.setRequestProperty(key, value)
-            }
-            conn.connect()
-            if (conn.responseCode !in 300..399) return conn
-            val next = conn.getHeaderField("Location")
-            conn.disconnect()
-            if (next.isNullOrBlank()) {
-                throw IOException("redirect without a Location header")
-            }
-            target = java.net.URI(next).let {
-                if (it.isAbsolute) it else target.resolve(it)
-            }
-        }
-        throw IOException("Too many redirects: $location")
-    }
-
-    private fun defaultPort(scheme: String): Int = if (scheme == "https") 443 else 80
-
-    /**
-     * v107 — reports what the far end actually agreed to.
-     *
-     * A cast that reads three bytes and stops is indistinguishable, from the
-     * outside, between a body that ended, a connection closed mid-stream and a
-     * `Content-Length` that never matched. A CDN that dislikes the request
-     * headers answers `200` with a tiny length and closes, which looks exactly
-     * like a short file. These four headers separate those cases, and the
-     * request headers go out with them so the two can be compared against a
-     * curl of the same URL.
-     */
-    private fun logResponseHeaders(conn: HttpURLConnection) {
-        val h = conn.headerFields.orEmpty()
+    private fun logResponseHeaders(resp: Response, url: String) {
+        val h = resp.headers
         fun get(name: String): String =
-            h.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }
-                ?.value?.joinToString(",") ?: "-"
+            h[name] ?: "-"
 
-        android.util.Log.d(
-            "Ipv4HttpDataSource",
-            "open ${dataSpecUri()} code=${conn.responseCode} " +
+        DebugLog.log(
+            "DECODER",
+            "Ipv4DS open url=$url code=${resp.code} " +
                 "CL=${get("Content-Length")} TE=${get("Transfer-Encoding")} " +
                 "CR=${get("Content-Range")} Conn=${get("Connection")} " +
                 "Type=${get("Content-Type")} CE=${get("Content-Encoding")}"
         )
-        android.util.Log.d(
-            "Ipv4HttpDataSource",
-            "req ${dataSpecUri()} UA=${conn.getRequestProperty("User-Agent")} " +
-                "AE=${conn.getRequestProperty("Accept-Encoding")} " +
-                "Host=${conn.getRequestProperty("Host")} " +
-                "extra=${requestProperties.keys}"
+        DebugLog.log(
+            "DECODER",
+            "Ipv4DS req host=${resp.request.url.host} UA=${userAgent ?: "-"} " +
+                "extra=${requestProperties.keys} range=${requestProperties["Range"] ?: "-"}"
         )
     }
 
-    private fun dataSpecUri(): String = currentSpec.uri.toString().take(100)
-
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        val stream = inputStream ?: return -1
+        val stream = bodyStream ?: return -1
         if (length == 0) return 0
         if (bytesRemaining == 0L) {
             if (!streamEnded) {
@@ -335,8 +207,13 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         // DefaultHttpDataSource narrows the caller's length by what is left in
         // this resource (`min(remaining, length)`) before every read. Without
         // that, a caller asking for more than the resource holds gets a short
-        // read that the extractors read as "end of stream".
-        val want = if (bytesRemaining < length) bytesRemaining.toInt() else length
+        // read that the extractors read as "end of stream". When the length is
+        // unknown (-1) we must never narrow with it.
+        val want = if (bytesRemaining in 1L until length.toLong()) {
+            bytesRemaining.toInt()
+        } else {
+            length
+        }
         // One underlying read is the platform's contract here: the caller asks
         // for as much as it can take and we give it, filling the buffer only as
         // far as the stream actually yields.
@@ -354,7 +231,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             }
             return -1
         }
-        bytesRemaining -= bytes
+        if (bytesRemaining > 0L) bytesRemaining -= bytes
         // v107: the sniffers only get one chance, and "the stream ended after
         // three bytes" has to be distinguishable from "the stream ended after
         // three bytes because the far end closed". The second read's result is
@@ -362,15 +239,15 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         if (!firstReadLogged) {
             firstReadLogged = true
             val sample = buffer.copyOfRange(offset, minOf(offset + 16, offset + bytes)).toHex()
-            android.util.Log.d(
-                "Ipv4HttpDataSource",
-                "read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining " +
+            DebugLog.log(
+                "DECODER",
+                "Ipv4DS read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining " +
                     "code=$responseCodeInternal first=$sample url=${currentUri}"
             )
         } else if (bytes < want) {
-            android.util.Log.d(
-                "Ipv4HttpDataSource",
-                "read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining (short)"
+            DebugLog.log(
+                "DECODER",
+                "Ipv4DS read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining (short)"
             )
         }
         bytesTransferred(bytes)
@@ -385,14 +262,16 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
     override fun close() {
         try {
-            inputStream?.close()
-            connection?.disconnect()
+            bodyStream?.close()
+            response?.close()
+            call?.cancel()
         } catch (e: Exception) {
             // The stream is being dropped either way; a failure here cannot be
             // acted on and must not mask the caller's own error.
         } finally {
-            inputStream = null
-            connection = null
+            bodyStream = null
+            response = null
+            call = null
             streamEnded = false
             bytesRemaining = 0L
             transferEnded()
@@ -416,9 +295,9 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     override fun getResponseHeaders(): Map<String, List<String>> = responseHeadersInternal
 
     /**
-     * Mirrors `DefaultHttpDataSource.Factory`'s shape so the call site stays as it
-     * was, and keeps [Ipv4OnlyDns] the single definition of how a host resolves
-     * for both playback and the source probe.
+     * Mirrors `DefaultHttpDataSource.Factory`'s shape so the call site stays as
+     * it was, and keeps [Ipv4OnlyDns] the single definition of how a host
+     * resolves for both playback and the source probe.
      */
     internal class Factory : HttpDataSource.Factory {
         private var userAgent: String? = null
@@ -451,3 +330,31 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         }
     }
 }
+
+/**
+ * IPv4-only DNS shared by playback and the source probe. It delegates to
+ * [Ipv4OnlyDns.lookup], which drops AAAA records (the router advertises IPv6
+ * but the data plane is a black hole) and throws [java.net.UnknownHostException]
+ * when only AAAA exists — the same verdict the player would have reached anyway.
+ */
+internal val IPV4_OKDNS: Dns = object : Dns {
+    override fun lookup(hostname: String) = Ipv4OnlyDns.lookup(hostname)
+}
+
+/**
+ * Build an OkHttp client that resolves only IPv4. Used by both
+ * [Ipv4HttpDataSource] (playback) and [com.phairplay.dlna.DlnaReceiver]'s
+ * source probe, so the two paths can never disagree about which address family
+ * they dial or what `Host` they send.
+ */
+internal fun newIpv4OkHttpClient(connectTimeoutMs: Int, readTimeoutMs: Int): OkHttpClient =
+    OkHttpClient.Builder()
+        .dns(IPV4_OKDNS)
+        .connectTimeout(connectTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+        .readTimeout(readTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+        // Redirects are followed per hop, each re-resolved through IPV4_OKDNS;
+        // Host/SNI stay correct because the URL keeps the real hostname.
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
+        .build()

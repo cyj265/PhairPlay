@@ -65,8 +65,8 @@ android {
         // applicationId is overridden per flavor below
         minSdk = 25           // Lowest common denominator (Fire TV)
         targetSdk = 35
-        versionCode = 61
-        versionName = "1.0.109"
+        versionCode = 63
+        versionName = "1.0.111"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
@@ -289,6 +289,9 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
+
+    // OkHttp — HTTP transport with a custom IPv4-only Dns (see Ipv4HttpDataSource).
+    implementation(libs.okhttp)
 
     // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
     // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.
