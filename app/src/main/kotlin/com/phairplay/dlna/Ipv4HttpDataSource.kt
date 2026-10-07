@@ -86,6 +86,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             connection = conn
             responseCodeInternal = conn.responseCode
             responseHeadersInternal = conn.headerFields ?: emptyMap()
+            logResponseHeaders(conn)
             inputStream = try {
                 conn.inputStream
             } catch (e: IOException) {
@@ -193,6 +194,41 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
     private fun defaultPort(scheme: String): Int = if (scheme == "https") 443 else 80
 
+    /**
+     * v107 — reports what the far end actually agreed to.
+     *
+     * A cast that reads three bytes and stops is indistinguishable, from the
+     * outside, between a body that ended, a connection closed mid-stream and a
+     * `Content-Length` that never matched. A CDN that dislikes the request
+     * headers answers `200` with a tiny length and closes, which looks exactly
+     * like a short file. These four headers separate those cases, and the
+     * request headers go out with them so the two can be compared against a
+     * curl of the same URL.
+     */
+    private fun logResponseHeaders(conn: HttpURLConnection) {
+        val h = conn.headerFields.orEmpty()
+        fun get(name: String): String =
+            h.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }
+                ?.value?.joinToString(",") ?: "-"
+
+        android.util.Log.d(
+            "Ipv4HttpDataSource",
+            "open ${dataSpecUri()} code=${conn.responseCode} " +
+                "CL=${get("Content-Length")} TE=${get("Transfer-Encoding")} " +
+                "CR=${get("Content-Range")} Conn=${get("Connection")} " +
+                "Type=${get("Content-Type")} CE=${get("Content-Encoding")}"
+        )
+        android.util.Log.d(
+            "Ipv4HttpDataSource",
+            "req ${dataSpecUri()} UA=${conn.getRequestProperty("User-Agent")} " +
+                "AE=${conn.getRequestProperty("Accept-Encoding")} " +
+                "Host=${conn.getRequestProperty("Host")} " +
+                "extra=${requestProperties.keys}"
+        )
+    }
+
+    private fun dataSpecUri(): String = currentSpec.uri.toString().take(100)
+
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         val stream = inputStream ?: return -1
         // Media3's contract is "fill the buffer as far as the source allows",
@@ -202,6 +238,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         // every container unrecognised (`UnrecognizedInputFormatException` on
         // every HTTPS source). Loop until the buffer is full or the source ends.
         var total = 0
+        var reads = 0
         while (total < length) {
             val bytes = try {
                 stream.read(buffer, offset + total, length - total)
@@ -211,6 +248,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
                     e, currentSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
                 )
             }
+            reads++
             if (bytes == -1) break
             total += bytes
         }
@@ -219,14 +257,25 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             transferEnded()
             return -1
         }
-        // v107: the sniffers only get this one chance, so the first read is
-        // logged with what actually arrived.
+        // v107: the sniffers only get one chance, and "the stream ended after
+        // three bytes" has to be distinguishable from "the stream ended after
+        // three bytes because the far end closed". The second read's result is
+        // the difference, so it is logged next to the first one.
         if (!firstReadLogged) {
             firstReadLogged = true
             val sample = buffer.copyOfRange(offset, minOf(offset + 16, offset + total)).toHex()
             android.util.Log.d(
                 "Ipv4HttpDataSource",
-                "read@${currentSpec.position}: bytes=$total code=$responseCodeInternal first=$sample url=${currentUri}"
+                "read@${currentSpec.position}: total=$total requested=$length " +
+                    "underlying=$reads code=$responseCodeInternal first=$sample url=${currentUri}"
+            )
+        } else if (reads > 1 || total < length) {
+            // Every short read matters here: media3 sniffs by asking for a few
+            // bytes at a time, so a stream that returns 3 and then nothing is
+            // the difference between "container recognised" and a black screen.
+            android.util.Log.d(
+                "Ipv4HttpDataSource",
+                "read@${currentSpec.position}: total=$total requested=$length underlying=$reads"
             )
         }
         bytesTransferred(total)
