@@ -221,6 +221,11 @@ class MainActivity : AppCompatActivity() {
      *  Surface (plain View above the Surface layer) so it is never clipped. */
     private var dlnaDebugView: TextView? = null
 
+    /** Hand-drawn playback bar for the DLNA player (see ui/DlnaOsdView).
+     *  Replaces Media3's phone-style PlayerControlView, which was switched off
+     *  in dlna_player_view.xml. Never focusable — the PlayerView keeps the D-pad. */
+    private var dlnaOsd: com.phairplay.ui.DlnaOsdView? = null
+
     /** Music card for audio-only DLNA casts (see [setupDlnaMusicCard]). */
     private var dlnaMusicView: View? = null
 
@@ -601,6 +606,18 @@ class MainActivity : AppCompatActivity() {
 
         setupDlnaMusicCard()
         setupResumePill()
+
+        // Playback bar LAST so it paints above both the player and the music
+        // card. It replaces PlayerView's own controller (switched off in XML):
+        // every call site that used to showController() now calls showDlnaOsd().
+        dlnaOsd = com.phairplay.ui.DlnaOsdView(this)
+        streamingContainer.addView(
+            dlnaOsd,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
     }
 
     // ─── Audio-only (music) DLNA card ────────────────────────────────────
@@ -1485,6 +1502,11 @@ class MainActivity : AppCompatActivity() {
         ensureDlnaMediaSession()
         updateDlnaMusicCard()
         updateResumePill()
+        // Reveal the playback bar for a few seconds so the key hints are on
+        // screen when the picture lands — otherwise the only way to learn that
+        // ← → seek is to press something and hope. (No-op for audio-only casts:
+        // the music card carries the same hints.)
+        showDlnaOsd()
         dlnaDebugHandler.removeCallbacks(dlnaUiTick)
         dlnaDebugHandler.post(dlnaUiTick)
         // The remote drives this screen. Without focus the D-pad events go to
@@ -1524,6 +1546,9 @@ class MainActivity : AppCompatActivity() {
         service?.markDlnaSurfaceGone()
         pv.player = null
         pv.visibility = View.GONE
+        // The bar outlives the picture otherwise: its auto-hide timer would
+        // keep it on screen over the home screen for another few seconds.
+        dlnaOsd?.hide()
         dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
         dlnaDebugView?.visibility = View.GONE
         // DLNA ended: tear down the whole full-screen overlay, exactly like
@@ -1692,11 +1717,11 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
                 else -> {
-                    // Any other key just reveals the controller. It must NOT be
-                    // consumed: swallowing every direction press was why the
+                    // Any other key just reveals the playback bar. It must NOT
+                    // be consumed: swallowing every direction press was why the
                     // remote looked completely dead in the first place.
-                    if (dlna && dlnaPlayerView?.isControllerFullyVisible == false) {
-                        dlnaPlayerView?.showController()
+                    if (dlna && dlnaOsd?.isVisible != true) {
+                        showDlnaOsd()
                     }
                 }
                 }
@@ -1716,7 +1741,7 @@ class MainActivity : AppCompatActivity() {
     private fun transportPlayPause() {
         if (isDlnaPlayerVisible) {
             togglePlayPause()
-            dlnaPlayerView?.showController()
+            showDlnaOsd()
         } else {
             sendDacp(DacpClient.CMD_PLAY_PAUSE)
         }
@@ -1731,7 +1756,7 @@ class MainActivity : AppCompatActivity() {
         if (isDlnaPlayerVisible) {
             val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) -30_000L else -SEEK_STEP_MS
             seekBy(step)
-            dlnaPlayerView?.showController()
+            showDlnaOsd()
         } else {
             sendDacp(
                 when (keyCode) {
@@ -1748,7 +1773,7 @@ class MainActivity : AppCompatActivity() {
         if (isDlnaPlayerVisible) {
             val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) 30_000L else SEEK_STEP_MS
             seekBy(step)
-            dlnaPlayerView?.showController()
+            showDlnaOsd()
         } else {
             sendDacp(
                 when (keyCode) {
@@ -1810,46 +1835,99 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Player settings reachable from the Menu key — what PlayerView's own
-     * gear button offers, but that button is unreachable with a D-pad.
+     * Reveals the DLNA playback bar.
+     *
+     * Audio-only casts are skipped on purpose: the music card already carries
+     * the title, progress, time and key hints, and it covers the whole layer —
+     * a second bar on top of it would just be two progress bars disagreeing.
+     */
+    private fun showDlnaOsd() {
+        val osd = dlnaOsd ?: return
+        if (dlnaMusicView?.visibility == View.VISIBLE) {
+            osd.hide()
+            return
+        }
+        osd.show(dlnaPlayerView?.player)
+    }
+
+    /**
+     * The Menu-key player menu — what PlayerView's own gear button offered,
+     * except that button is unreachable with a D-pad.
+     *
+     * v105: titled and shaped like [showAirPlaySessionMenu] so both protocols
+     * open the same kind of screen, and every row carries the value it
+     * currently holds ("画面比例：原始比例") instead of a bare label. On a TV
+     * there is no pointer hovering over a row to reveal what is selected, and
+     * a menu that only says "画面比例" forces the user to open it to find out.
      */
     private fun showPlayerSettings() {
         val pv = dlnaPlayerView ?: return
         val p = pv.player ?: return
         showMenuDialog(
-            "播放器设置",
+            "投屏控制 · DLNA",
             listOf(
+                "播放 / 暂停" to { transportPlayPause() },
+                "快退 ${SEEK_STEP_MS / 1000} 秒" to { seekBy(-SEEK_STEP_MS); showDlnaOsd() },
+                "快进 ${SEEK_STEP_MS / 1000} 秒" to { seekBy(SEEK_STEP_MS); showDlnaOsd() },
+                "画面比例：${resizeModeName(pv.resizeMode)}" to { showResizeSettings(pv) },
+                "播放速度：${speedLabel(p)}" to { showSpeedSettings(p) },
                 "音轨 / 字幕" to { showTrackSettings(p) },
-                "播放速度" to { showSpeedSettings(p) },
-                "画面比例" to { cycleResizeMode(pv) },
-                "关闭设置" to {}
+                "关闭" to {}
             )
         )
     }
 
-    private fun showSpeedSettings(p: androidx.media3.common.Player) {
-        val speeds = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-        showMenuDialog(
-            "播放速度",
-            speeds.map { s -> "${s}x" to { p.playbackParameters = p.playbackParameters.withSpeed(s) } }
+    /** Same hand-drawn menu, but marks the row that is currently selected. */
+    private fun showMenuDialogChecked(
+        title: String,
+        entries: List<Pair<String, () -> Unit>>,
+        checkedIndex: Int
+    ) {
+        com.phairplay.ui.TvDialogs.menu(this, title, entries, checkedIndex)
+    }
+
+    private fun showResizeSettings(pv: PlayerView) {
+        val modes = listOf(
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT,
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL,
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        )
+        showMenuDialogChecked(
+            "画面比例",
+            modes.map { mode ->
+                resizeModeName(mode) to {
+                    pv.resizeMode = mode
+                    showTvToast("画面比例: ${resizeModeName(mode)}")
+                }
+            },
+            modes.indexOf(pv.resizeMode)
         )
     }
 
-    private fun cycleResizeMode(pv: PlayerView) {
-        val next = when (pv.resizeMode) {
-            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT ->
-                androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
-            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL ->
-                androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-        }
-        pv.resizeMode = next
-        val name = when (next) {
-            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL -> "拉伸填满"
-            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "放大裁切"
-            else -> "原始比例"
-        }
-        android.widget.Toast.makeText(this, "画面比例: $name", android.widget.Toast.LENGTH_SHORT).show()
+    private fun resizeModeName(mode: Int): String = when (mode) {
+        androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL -> "拉伸填满"
+        androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "放大裁切"
+        else -> "原始比例"
+    }
+
+    private fun showSpeedSettings(p: androidx.media3.common.Player) {
+        val speeds = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+        val current = p.playbackParameters.speed
+        showMenuDialogChecked(
+            "播放速度",
+            speeds.map { s ->
+                "${s}x" to {
+                    p.playbackParameters = p.playbackParameters.withSpeed(s)
+                    showTvToast("播放速度: ${s}x")
+                }
+            },
+            speeds.indexOfFirst { kotlin.math.abs(it - current) < 0.01f }
+        )
+    }
+
+    private fun speedLabel(p: androidx.media3.common.Player): String {
+        val s = p.playbackParameters.speed
+        return if (s == kotlin.math.round(s)) "${s.toLong()}" else "$s"
     }
 
     /**
@@ -1863,7 +1941,9 @@ class MainActivity : AppCompatActivity() {
                 it.type == androidx.media3.common.C.TRACK_TYPE_TEXT
         }
         if (groups.isEmpty()) {
-            android.widget.Toast.makeText(this, "该媒体没有可选音轨/字幕", android.widget.Toast.LENGTH_SHORT).show()
+            // showTvToast, not Toast: the system toast is ~14 sp and sits on
+            // the very bottom edge — unreadable from a sofa.
+            showTvToast("该媒体没有可选音轨/字幕")
             return
         }
         val entries = ArrayList<Pair<String, () -> Unit>>()
@@ -1873,7 +1953,10 @@ class MainActivity : AppCompatActivity() {
                 val fmt = group.getTrackFormat(i)
                 val lang = fmt.language?.takeIf { it.isNotBlank() && it != "und" } ?: "默认"
                 val label = fmt.label ?: fmt.codecs ?: ""
-                entries.add("$kind $i · $lang ${label.ifBlank { "" }}".trim() to {
+                // Mark the row that is actually in use, same as the speed and
+                // aspect menus do.
+                val selected = if (group.isTrackSelected(i)) " ✓" else ""
+                entries.add("$kind $i · $lang ${label.ifBlank { "" }}$selected".trim() to {
                     p.trackSelectionParameters = p.trackSelectionParameters
                         .buildUpon()
                         .setOverrideForType(

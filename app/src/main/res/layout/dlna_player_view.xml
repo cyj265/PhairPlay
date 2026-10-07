@@ -20,5 +20,17 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:keepScreenOn="true"
-    app:use_controller="true"
+    app:use_controller="false"
     app:surface_type="texture_view" />
+<!--
+  app:use_controller="false" (v105): Media3's bundled PlayerControlView is a
+  phone widget — hairline icons, 4 dp progress bar, light grey on transparent —
+  and it was the only screen in the app not drawn in the TV palette. It is
+  replaced by ui/DlnaOsdView.kt, which is revealed by the same remote keys
+  that used to call PlayerView.showController().
+
+  Do NOT flip this back on: with use_controller="true" the controller's own
+  view group sits above the Surface and takes the D-pad, which is how the
+  remote ended up "completely dead" once before.
+-->
+
