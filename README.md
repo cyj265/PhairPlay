@@ -24,7 +24,7 @@ The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, Ho
 
 The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from scratch rather than on top of a UPnP stack library — and is validated on Amlogic Android TV hardware (Fire TV, N1 boxes) for live TV and on-demand video.
 
-**Currently verified on hardware:** `v1.0.106-firetv` (2026-10-07) — the playback OSD, the unified cast menu and the bounded source probe below were each validated on a real N1 box, not just in code.
+**Currently verified on hardware:** `v1.0.107-firetv` (2026-10-07) — the IPv4-only resolver, the TV-native playback OSD and the bounded source probe were each validated on a real N1 box against real sources.
 
 Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
 
