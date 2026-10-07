@@ -24,7 +24,7 @@ The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, Ho
 
 The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from scratch rather than on top of a UPnP stack library — and is validated on Amlogic Android TV hardware (Fire TV, N1 boxes) for live TV and on-demand video.
 
-**Currently verified on hardware:** `v1.0.103-firetv` (2026-10-05) — the Back-key contract below was validated on a real box, not just in code.
+**Currently verified on hardware:** `v1.0.106-firetv` (2026-10-07) — the playback OSD, the unified cast menu and the bounded source probe below were each validated on a real N1 box, not just in code.
 
 Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
 
@@ -50,7 +50,16 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - **Back key built for a TV remote:** Back pauses the cast and returns to the home screen, the session stays alive, and a second Back ends it — the picture never comes back on its own
 - Sender-aware playback: a Play instruction resumes from the pause point, a repeated Set of the same item is ignored, and the picture is never dragged back over the home screen by a polling sender
 - Source diagnostics: a source that answers with a challenge page instead of a media manifest is reported as such on screen, instead of leaving a black rectangle
+- A source that refuses us twice is named on screen instead of being retried silently; the refusal is tracked per URL, so giving up on one channel never poisons the next one
+- Bounded source probe: name resolution runs on its own 3 s deadline before the request is made, because `connectTimeout` does not cover DNS — the log then separates "the name took 42 s" from "the origin is slow"
 - Live diagnostic port (`8099`) exposing the running log for field debugging without a USB cable
+
+### Playback UI (TV-native)
+- Self-drawn playback OSD and menus in one visual language: rounded dark panels, orange accent, oversized text sized for a living-room screen
+- The full-screen player no longer shows Media3's phone-style control bar (thin progress line, 9 sp captions); progress, elapsed time, state and key hints are drawn for a D-pad and auto-hide after 5 s
+- The OSD is never focusable, so it cannot swallow the remote; audio-only casts keep the single artwork card instead of showing two progress bars
+- One "投屏控制" menu for both DLNA and AirPlay, with each row carrying its current value and submenus marking the active entry
+- Every dialog and toast is drawn by the app — the platform's own dialogs render as blank boxes on these boxes
 
 ### App & Platform
 - Android TV / Fire TV app shell with foreground service and status UI
@@ -205,7 +214,9 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
 - **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
 - **Switching away from the app and straight back rebuilds the picture once — by design.** Pausing alone does not hand the single hardware decoder slot back on this box, so leaving PhairPlay while a DLNA cast is playing tears the player down and returning rebuilds it. Playback position is preserved and it settles on its own. A queued teardown is now cancelled when you come straight back, so the rebuilt player is no longer dropped afterwards; a low-probability ordering window for that cancellation remains and is tracked as a known unclosed item.
-- **A stream the source rejects can fail without a message.** Some senders hand over a URL that has already expired or needs authorisation; the source answers with an access error that is retried quietly, which looks like the app ignoring the cast. A visible notice is queued for a later build.
+- **A stream the source rejects now says so.** Some senders hand over a URL that has already expired or needs authorisation; the source answers with an access error, which is retried quietly, and that used to look like the app ignoring the cast. The first refusal is still retried silently, because a single access error is often transient; a second one is reported on screen and no longer retried. The refusal is remembered per URL, so a channel that gave up never blocks the next channel.
+- **Portrait video is not scaled up.** A vertical stream (a phone-video cast, for example) is letterboxed to its own aspect ratio instead of being fitted to the screen, so it occupies only about a third of a 16:9 TV's width. The picture mode can be changed from the menu, but the app does not pick a portrait-aware mode on its own.
+- **Only the main DLNA sources have been cast-tested on real hardware** — HLS, FLV and MPEG-TS from Chinese phone apps, including Douyin. AirPlay 2 has been validated with macOS and iOS senders but not against every streaming app, and DRM-protected video is out of scope entirely.
 
 For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
 
