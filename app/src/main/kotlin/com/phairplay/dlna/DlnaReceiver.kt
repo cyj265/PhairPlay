@@ -1755,13 +1755,30 @@ class DlnaReceiver(
                         resolver.shutdownNow()
                     }
                 }
-                conn = java.net.URL(uri).openConnection() as java.net.HttpURLConnection
-                // v107: the probe opens its own connection, so it needs the
-                // same IPv4 preference the player sets. Without this the probe
-                // still walks the AAAA-first path and keeps reporting 12–66 s
-                // first bytes for a source the player now plays in 1 s — the
-                // log would contradict itself.
-                Ipv4OnlyDns.preferIpv4()
+                // v107: the probe resolves the host itself (above), but opening the connection
+                // still handed the URL to the platform, which orders addresses
+                // per RFC 6724 and tries the AAAA record first — into a black
+                // hole on this network. Measured: DNS 1 ms and yet first byte at
+                // 12 s, because only the lookup was IPv4-only while the connect
+                // was not. The probe now dials the same IPv4 address the player
+                // does, with the hostname kept in the Host header.
+                val probeHost = host ?: ""
+                val probeIp = Ipv4OnlyDns.lookupOrEmpty(probeHost)
+                    .firstNotNullOfOrNull { it.hostAddress }
+                val probeTarget = when {
+                    probeIp == null || probeHost.isEmpty() -> uri
+                    uri.startsWith("https://") -> uri // TLS needs the real name
+                    else -> uri.replaceFirst(Regex("^(http://)[^/]+"), "$1$probeIp")
+                }
+                conn = java.net.URL(probeTarget).openConnection() as java.net.HttpURLConnection
+                if (probeIp != null && !uri.startsWith("https://")) {
+                    runCatching {
+                        conn.setRequestProperty(
+                            "Host",
+                            if (probeHost.contains(':')) "[$probeHost]" else probeHost
+                        )
+                    }
+                }
                 conn.requestMethod = "GET"
                 conn.setRequestProperty(
                     "User-Agent",
