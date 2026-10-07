@@ -14,6 +14,9 @@ import java.net.URL
 import java.util.LinkedHashMap
 import java.util.LinkedHashSet
 
+/** Media3 1.4.1 has no LENGTH_UNSET constant; an unknown length is simply -1. */
+private const val LENGTH_UNKNOWN = -1L
+
 /**
  * v107 — an HTTP data source that does not pay the IPv6 wait.
  *
@@ -67,6 +70,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
     private var firstReadLogged = false
     private var streamEnded = false
+    private var bytesRemaining = 0L
 
     init {
         // Covers the HTTPS half; cheap, idempotent, and it only changes how
@@ -95,7 +99,30 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
                 // thing that says why.
                 conn.errorStream
             } ?: throw IOException("HTTP ${conn.responseCode} with no body")
-            return dataSpec.position
+            // Media3 mirrors DefaultHttpDataSource here: what open() returns is
+            // the number of bytes left in this resource, not the offset it
+            // started at. Returning the position instead leaves `remaining`
+            // wrong in [read], and every read hands back the wrong slice — which
+            // is what made Mp4Extractor sniff three bytes, declare the container
+            // unrecognised and fail the whole cast.
+            val declared = dataSpec.length
+            bytesRemaining = when {
+                declared != LENGTH_UNKNOWN -> declared
+                conn.contentLengthLong > 0 -> conn.contentLengthLong
+                else -> 0L
+            }
+            if (dataSpec.position != 0L && responseCodeInternal == HttpURLConnection.HTTP_OK) {
+                // A 200 answer to a request that asked for an offset has to be
+                // skipped forward, the same way the platform class does it.
+                var skipped = 0L
+                while (skipped < dataSpec.position) {
+                    val n = inputStream!!.skip(dataSpec.position - skipped)
+                    if (n <= 0) break
+                    skipped += n
+                }
+                bytesRemaining -= skipped
+            }
+            return bytesRemaining
         } catch (e: IOException) {
             throw HttpDataSourceException.createForIOException(
                 e, dataSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
@@ -231,55 +258,57 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         val stream = inputStream ?: return -1
-        // Media3's contract is "fill the buffer as far as the source allows",
-        // not "return whatever one underlying read produced". The platform
-        // stream handed back by the TLS layer often yields only a handful of
-        // bytes per call, and a sniff-only read then saw 3 bytes and declared
-        // every container unrecognised (`UnrecognizedInputFormatException` on
-        // every HTTPS source). Loop until the buffer is full or the source ends.
-        var total = 0
-        var reads = 0
-        while (total < length) {
-            val bytes = try {
-                stream.read(buffer, offset + total, length - total)
-            } catch (e: IOException) {
-                if (total > 0) break
-                throw HttpDataSourceException.createForIOException(
-                    e, currentSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
-                )
+        if (length == 0) return 0
+        if (bytesRemaining == 0L) {
+            if (!streamEnded) {
+                streamEnded = true
+                transferEnded()
             }
-            reads++
-            if (bytes == -1) break
-            total += bytes
-        }
-        if (total == 0 && !streamEnded) {
-            streamEnded = true
-            transferEnded()
             return -1
         }
+        // DefaultHttpDataSource narrows the caller's length by what is left in
+        // this resource (`min(remaining, length)`) before every read. Without
+        // that, a caller asking for more than the resource holds gets a short
+        // read that the extractors read as "end of stream".
+        val want = if (bytesRemaining < length) bytesRemaining.toInt() else length
+        // One underlying read is the platform's contract here: the caller asks
+        // for as much as it can take and we give it, filling the buffer only as
+        // far as the stream actually yields.
+        val bytes = try {
+            stream.read(buffer, offset, want)
+        } catch (e: IOException) {
+            throw HttpDataSourceException.createForIOException(
+                e, currentSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+            )
+        }
+        if (bytes == -1) {
+            if (!streamEnded) {
+                streamEnded = true
+                transferEnded()
+            }
+            return -1
+        }
+        bytesRemaining -= bytes
         // v107: the sniffers only get one chance, and "the stream ended after
         // three bytes" has to be distinguishable from "the stream ended after
         // three bytes because the far end closed". The second read's result is
         // the difference, so it is logged next to the first one.
         if (!firstReadLogged) {
             firstReadLogged = true
-            val sample = buffer.copyOfRange(offset, minOf(offset + 16, offset + total)).toHex()
+            val sample = buffer.copyOfRange(offset, minOf(offset + 16, offset + bytes)).toHex()
             android.util.Log.d(
                 "Ipv4HttpDataSource",
-                "read@${currentSpec.position}: total=$total requested=$length " +
-                    "underlying=$reads code=$responseCodeInternal first=$sample url=${currentUri}"
+                "read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining " +
+                    "code=$responseCodeInternal first=$sample url=${currentUri}"
             )
-        } else if (reads > 1 || total < length) {
-            // Every short read matters here: media3 sniffs by asking for a few
-            // bytes at a time, so a stream that returns 3 and then nothing is
-            // the difference between "container recognised" and a black screen.
+        } else if (bytes < want) {
             android.util.Log.d(
                 "Ipv4HttpDataSource",
-                "read@${currentSpec.position}: total=$total requested=$length underlying=$reads"
+                "read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining (short)"
             )
         }
-        bytesTransferred(total)
-        return total
+        bytesTransferred(bytes)
+        return bytes
     }
 
     private fun ByteArray.toHex(): String {
@@ -299,6 +328,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             inputStream = null
             connection = null
             streamEnded = false
+            bytesRemaining = 0L
             transferEnded()
         }
     }
