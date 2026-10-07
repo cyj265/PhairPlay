@@ -17,6 +17,9 @@ import java.util.LinkedHashSet
 /** Media3 1.4.1 has no LENGTH_UNSET constant; an unknown length is simply -1. */
 private const val LENGTH_UNKNOWN = -1L
 
+/** Redirect hops before giving up, matching media3's own data source. */
+private const val MAX_REDIRECTS = 5
+
 /**
  * v107 — an HTTP data source that does not pay the IPv6 wait.
  *
@@ -202,13 +205,19 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             try {
                 conn.connect()
                 if (conn.responseCode in 300..399) {
-                    // Following a redirect against an IP-literal URL would leak
-                    // the address into the next request's Host header, so it is
-                    // not followed here; the caller sees the code and decides.
+                    val location = conn.getHeaderField("Location")
                     conn.disconnect()
-                    throw IOException(
-                        "redirect (HTTP ${conn.responseCode}) not followed for $host"
-                    )
+                    if (!allowCrossProtocolRedirects || location.isNullOrBlank()) {
+                        throw IOException(
+                            "redirect (HTTP ${conn.responseCode}) not followed for $host"
+                        )
+                    }
+                    // Redirects are followed here rather than by the platform,
+                    // because the platform would follow them against the IP
+                    // literal and leak that address into the next request's Host
+                    // header. media3's own data source does the same thing: read
+                    // Location, cap the hops, re-resolve each target.
+                    return followRedirects(uri, location)
                 }
                 return conn
             } catch (e: IOException) {
@@ -217,6 +226,63 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             }
         }
         throw lastFailure ?: IOException("could not connect to $host over IPv4")
+    }
+
+    /**
+     * Follows an HTTP redirect chain the way media3's own data source does:
+     * read `Location`, cap the hops, and resolve every target again so the next
+     * hop also gets the IPv4 treatment. Absolute and relative targets are both
+     * accepted; a cross-protocol hop is passed to the platform, which is safe
+     * because the URL then carries the real hostname.
+     */
+    private fun followRedirects(fromUri: Uri, location: String): HttpURLConnection {
+        var target = java.net.URI(location).let {
+            if (it.isAbsolute) it else java.net.URI(fromUri.toString()).resolve(it)
+        }
+        var hops = 0
+        while (hops < MAX_REDIRECTS) {
+            if (++hops > MAX_REDIRECTS) {
+                throw IOException("Too many redirects: $location")
+            }
+            val nextUri = Uri.parse(target.toString())
+            val nextScheme = nextUri.scheme?.lowercase() ?: "http"
+            // An https hop goes by name: the certificate has to verify against
+            // it, and the platform resolver is the only thing that can do that.
+            if (nextScheme == "https") {
+                return URL(target.toString()).openConnection() as HttpURLConnection
+            }
+            val host = nextUri.host
+                ?: throw IOException("redirect without a host: $location")
+            val ip = Ipv4OnlyDns.lookupOrEmpty(host).firstNotNullOfOrNull { it.hostAddress }
+                ?: throw IOException("no IPv4 address for $host (IPv6 does not leave this network)")
+            val port = if (nextUri.port > 0) nextUri.port else defaultPort(nextScheme)
+            val path = nextUri.encodedPath.orEmpty()
+            val conn = URL(
+                "$nextScheme://$ip:$port" + (if (path.startsWith("/")) path else "/$path") +
+                    (nextUri.encodedQuery?.let { "?$it" } ?: "")
+            ).openConnection() as HttpURLConnection
+            conn.connectTimeout = connectTimeout
+            conn.readTimeout = readTimeout
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("Host", host)
+            userAgent?.let { conn.setRequestProperty("User-Agent", it) }
+            conn.setRequestProperty("Accept-Encoding", "identity")
+            for ((key, value) in requestProperties) {
+                if (key.equals("Host", ignoreCase = true)) continue
+                conn.setRequestProperty(key, value)
+            }
+            conn.connect()
+            if (conn.responseCode !in 300..399) return conn
+            val next = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (next.isNullOrBlank()) {
+                throw IOException("redirect without a Location header")
+            }
+            target = java.net.URI(next).let {
+                if (it.isAbsolute) it else target.resolve(it)
+            }
+        }
+        throw IOException("Too many redirects: $location")
     }
 
     private fun defaultPort(scheme: String): Int = if (scheme == "https") 443 else 80
