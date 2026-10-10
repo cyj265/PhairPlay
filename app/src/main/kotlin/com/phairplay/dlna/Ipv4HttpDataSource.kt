@@ -102,7 +102,11 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
                 declared != LENGTH_UNKNOWN -> declared
                 else -> {
                     val cl = body.contentLength()
-                    if (cl > 0L) cl else 0L
+                    when {
+                        cl == 0L -> 0L
+                        cl > 0L -> cl
+                        else -> LENGTH_UNKNOWN
+                    }
                 }
             }
             if (dataSpec.position != 0L && responseCodeInternal in 200..299) {
