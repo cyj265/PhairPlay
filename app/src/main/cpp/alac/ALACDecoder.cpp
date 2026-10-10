@@ -200,6 +200,9 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 	
 	RequireAction( (bits != nil) && (sampleBuffer != nil) && (outNumSamples != nil), return kALAC_ParamError; );
 	RequireAction( numChannels > 0, return kALAC_ParamError; );
+	// The caller passes frameLength here; reject anything that would overflow the
+	// frameLength-sized mix/shift/output buffers before we even look at the bitstream.
+	RequireAction( numSamples <= mConfig.frameLength, return kALAC_ParamError; );
 
 	mActiveElements = 0;
 	channelIndex	= 0;
@@ -251,6 +254,12 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 				{
 					numSamples  = BitBufferRead( bits, 16 ) << 16;
 					numSamples |= BitBufferRead( bits, 16 );
+					// A malformed partial-frame length is attacker-controlled (no auth on
+					// the RTSP/AirPlay handshake) and would overflow the frameLength-sized
+					// buffers plus the Zero* memset on exit. Reject anything outside (0,
+					// frameLength].
+					RequireAction( (numSamples > 0) && (numSamples <= mConfig.frameLength),
+					               status = kALAC_ParamError; goto Exit; );
 				}
 
 				if ( escapeFlag == 0 )
@@ -402,6 +411,12 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 				{
 					numSamples  = BitBufferRead( bits, 16 ) << 16;
 					numSamples |= BitBufferRead( bits, 16 );
+					// A malformed partial-frame length is attacker-controlled (no auth on
+					// the RTSP/AirPlay handshake) and would overflow the frameLength-sized
+					// buffers plus the Zero* memset on exit. Reject anything outside (0,
+					// frameLength].
+					RequireAction( (numSamples > 0) && (numSamples <= mConfig.frameLength),
+					               status = kALAC_ParamError; goto Exit; );
 				}
 
 				if ( escapeFlag == 0 )
