@@ -68,8 +68,15 @@ object InfoResponder {
         return PlistCodec.encode(info)
     }
 
-    /** 64-bit features value; mirrors MdnsService's "0x5A7FFFF7,0x1E" (low,high 32-bit halves). */
-    private const val AIRPLAY_FEATURES = 0x1E5A7FFFF7L
+    /**
+     * Features value. Mirrors MdnsService's single-word `0x527FFFF7`.
+     *
+     * The high word used to be 0x1E, which is what tells a sender this is an AirPlay 2
+     * receiver. It has to stay zeroed here as well as in the TXT record — /info is a second,
+     * independent place where senders read the generation, so changing only one of the two
+     * leaves the receiver sending mixed signals.
+     */
+    private const val AIRPLAY_FEATURES = 0x527FFFF7L
 
     /** Matches RPiPlay's /info statusFlags (0x44). */
     private const val STATUS_FLAGS = 68L
@@ -77,6 +84,7 @@ object InfoResponder {
     /** Status bit advertising that the receiver requires PIN pairing (0x8 — verify vs macOS). */
     private const val STATUS_FLAG_PIN_REQUIRED = 0x8L
 
-    private const val MODEL = "AppleTV5,3"
+    /** Kept in sync with MdnsService.AIRPLAY_MODEL — see its comment for why this is 3,1. */
+    private const val MODEL = "AppleTV3,1"
     private const val SOURCE_VERSION = "220.68"
 }

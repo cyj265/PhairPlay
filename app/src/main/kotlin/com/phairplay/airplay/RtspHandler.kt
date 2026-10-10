@@ -422,8 +422,11 @@ open class RtspHandler(
     private fun handleServerInfo(request: RtspRequest): RtspResponse {
         val info = mapOf(
             "deviceid" to com.phairplay.util.NetworkUtils.getMacAddress(),
-            "features" to 0x1E5A7FFFF7L,
-            "model" to "AppleTV5,3",
+            // Kept in sync with MdnsService/InfoResponder: single-word features and AppleTV3,1
+            // are what mark us as an AirPlay 1 receiver. See MdnsService.AIRPLAY_FEATURES for
+            // why claiming AirPlay 2 here sends audio down a path we cannot decrypt.
+            "features" to 0x527FFFF7L,
+            "model" to "AppleTV3,1",
             "protovers" to "1.1",
             "srcvers" to "220.68",
         )

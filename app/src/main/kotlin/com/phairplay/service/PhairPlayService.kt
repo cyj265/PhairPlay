@@ -12,6 +12,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -71,6 +72,11 @@ class PhairPlayService : Service() {
     // Coroutine scope — cancelled in onDestroy() to clean up all coroutines
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+
+    // Held for the service lifetime so Wi-Fi stays up when the screen turns off.
+    // Requires android.permission.WAKE_LOCK — without it acquire() throws SecurityException
+    // and the receiver becomes invisible after the box idles.
+    private var wifiLock: WifiManager.WifiLock? = null
 
     // Observable state — Activities and Fragments observe this via the binder
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
@@ -165,6 +171,46 @@ class PhairPlayService : Service() {
         Logger.i("PhairPlayService created")
         settingsRepository = SettingsRepository(applicationContext)
         createNotificationChannel()
+        acquireWifiLock()
+    }
+
+    /**
+     * Holds a WifiLock for as long as the receiver runs.
+     *
+     * WHY: the whole product depends on being discoverable and reachable on the LAN. Without
+     * a lock, the platform is free to drop Wi-Fi when the screen goes off, and a TV box spends
+     * most of its life with the screen off — the device then silently stops being discoverable
+     * even though the service is still running. Type 3 (WIFI_MODE_FULL_HIGH_PERF) is what
+     * Android 10+ wants; older levels reject it, so fall back to WIFI_MODE_FULL there.
+     */
+    private fun acquireWifiLock() {
+        val appContext = applicationContext
+        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        if (wifiManager == null) {
+            Logger.w("WifiLock unavailable: no WifiManager")
+            return
+        }
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        } else {
+            WifiManager.WIFI_MODE_FULL
+        }
+        wifiLock = wifiManager.createWifiLock(mode, "PhairPlay:castReceiver")
+        // Reference-counted: repeated onCreate without a matching release would leak.
+        wifiLock?.setReferenceCounted(false)
+        runCatching { wifiLock?.acquire() }
+            .onSuccess { Logger.i("WifiLock acquired (mode=$mode)") }
+            .onFailure { Logger.w("WifiLock acquire failed: ${it.message}") }
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { lock ->
+            if (lock.isHeld) {
+                runCatching { lock.release() }
+                    .onSuccess { Logger.i("WifiLock released") }
+            }
+        }
+        wifiLock = null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -233,6 +279,7 @@ class PhairPlayService : Service() {
     override fun onDestroy() {
         Logger.i("PhairPlayService destroying")
         stopAllReceiversInternal()
+        releaseWifiLock()
         serviceJob.cancel()
         super.onDestroy()
     }

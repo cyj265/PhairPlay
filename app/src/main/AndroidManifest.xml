@@ -27,6 +27,9 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required by PhairPlayService's WifiLock: keeps Wi-Fi up while the screen is off,
+         otherwise the box stops being discoverable once it idles. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Foreground service — keeps receiver alive when app is in background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

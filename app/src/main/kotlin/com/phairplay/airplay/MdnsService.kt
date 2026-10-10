@@ -3,6 +3,7 @@ package com.phairplay.airplay
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import com.phairplay.util.NetworkUtils
@@ -173,6 +174,11 @@ class MdnsService(
             setAttribute("vv", "2")                             // AirPlay protocol version 2
             setAttribute("pi", NetworkUtils.getPersistentUuid(context))
             setAttribute("flags", "0x4")                        // Screen-mirroring receiver
+            // Pairing identity. Both were missing before: senders that look for `pk` in the
+            // TXT record (not just in GET /info) had nothing to read, and absent `pw` leaves
+            // the "needs a password" interpretation open.
+            setAttribute("pk", PairingKeys.get(context).edPublic.toHex())
+            setAttribute("pw", "0")                             // 0 = no password required
         }
 
         airPlayListener = createRegistrationListener(
@@ -211,15 +217,25 @@ class MdnsService(
             serviceType = SERVICE_TYPE_RAOP
             port = AIRPLAY_PORT
 
-            setAttribute("cn", "0,1,2,3")        // Cipher numbers (encryption types)
+            setAttribute("cn", "0,1,3")          // Cipher numbers — 2 was advertised but unsupported
             setAttribute("da", "true")             // Digest authentication capable
             setAttribute("et", "0,3,5")            // Encryption types supported
             setAttribute("md", "0,1,2")            // Metadata types supported
             setAttribute("sv", "false")            // Software volume control
             setAttribute("tp", "UDP")              // Transport for audio RTP
-            setAttribute("vn", "65537")            // Version number (required)
+            setAttribute("vn", "3")                // RAOP version — was 65537 (0x10001), not a real value
             setAttribute("vs", AIRPLAY_SERVER_VERSION)
             setAttribute("am", AIRPLAY_MODEL)
+            // Audio stream description. Senders use these to pick a stream format before
+            // connecting; without them the sender has to guess.
+            setAttribute("sr", "44100")            // Sample rate
+            setAttribute("ss", "16")               // Sample size (bits)
+            setAttribute("ch", "2")                // Channels
+            setAttribute("ek", "1")                // Encryption key version
+            setAttribute("txtvers", "1")           // TXT record version
+            setAttribute("sf", "0x4")              // Same status flags as the AirPlay service
+            setAttribute("pk", PairingKeys.get(context).edPublic.toHex())
+            setAttribute("pw", "false")            // false = no password required
         }
 
         raopListener = createRegistrationListener(
@@ -296,6 +312,15 @@ class MdnsService(
     }
 
     companion object {
+        /**
+         * Lowercase hex, no separators — the form senders expect for TXT `pk`.
+         *
+         * Note the public `NsdServiceInfo.setAttribute` only has a String overload; the byte[]
+         * one is hidden, so the key cannot be published as raw bytes even though that is how
+         * the wire format carries it.
+         */
+        private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
         /** Standard mDNS service type for AirPlay receivers. */
         private const val SERVICE_TYPE_AIRPLAY = "_airplay._tcp"
 
@@ -307,12 +332,25 @@ class MdnsService(
 
         /**
          * AirPlay feature bitmask: advertise screen mirroring, video, and audio support.
-         * See TECHNICAL_SPEC.md §8 for the full bit-level breakdown.
+         *
+         * WHY THIS IS A SINGLE 32-BIT WORD AND NOT `0x5A7FFFF7,0x1E`:
+         * The old value was two comma-separated words. A second word is what marks a receiver
+         * as AirPlay 2, so senders picked the AirPlay 2 path for us — whose buffered audio
+         * stream is FairPlay-2 encrypted and cannot be decrypted by any open implementation
+         * (see BufferedAudioServer). That is why audio arrived and never played.
+         * Advertising one word puts us back on the AirPlay 1 path, which is the one we
+         * actually implement (RAOP/ALAC via AudioStreamServer + AlacDecoder).
          */
-        private const val AIRPLAY_FEATURES = "0x5A7FFFF7,0x1E"
+        private const val AIRPLAY_FEATURES = "0x527FFFF7"
 
-        /** Pretend to be an Apple TV so macOS uses the screen mirroring protocol. */
-        private const val AIRPLAY_MODEL = "AppleTV5,3"
+        /**
+         * Pretend to be an Apple TV so macOS uses the screen mirroring protocol.
+         *
+         * AppleTV3,1 (not 5,3) deliberately: 5,3 is a tvOS model and reinforces the AirPlay 2
+         * impression that the old feature bitmask already gave senders. 3,1 is the classic
+         * AirPlay 1 receiver, matching AIRPLAY_FEATURES above.
+         */
+        private const val AIRPLAY_MODEL = "AppleTV3,1"
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
         private const val AIRPLAY_SERVER_VERSION = "220.68"
