@@ -832,6 +832,12 @@ class DlnaReceiver(
         val p = player
         val uri = currentUri
         if (p == null || uri == null) return@Runnable
+        // v112: this deadline only means something once THIS item reached READY.
+        // The callback can also survive a source switch (belt: IDLE now cancels
+        // it, suspenders: verify anyway) — a BUFFERING new item has no verdict
+        // to give, and "no picture yet" during buffering is the stall
+        // watchdog's problem, not the decoder's.
+        if (p.playbackState != Player.STATE_READY) return@Runnable
         if (p.videoSize.width > 0 && p.videoSize.height > 0) return@Runnable
         // v97: READY-but-0x0 is only a decoder problem if the source actually
         // answered. Boxes here resolve public CDN hostnames through a link-local
@@ -1129,6 +1135,18 @@ class DlnaReceiver(
                                     }
                                 }
                                 Player.STATE_IDLE -> {
+                                    // v112: switching sources (SetAVTransportURI while
+                                    // something is playing) passes through IDLE. The
+                                    // watchdog posted by the PREVIOUS item's READY was
+                                    // still pending here — it fired 1s into the NEW
+                                    // item's buffering, read the new item's 0x0 video
+                                    // size, and cooling down on that killed every
+                                    // hot-switch (e.g. IPTV live → Douyin MP4 died
+                                    // "READY 后 12s 仍无画面" where 12s was the old
+                                    // channel's READY age). First-frame proof of the
+                                    // new item must start from zero.
+                                    mainHandler.removeCallbacks(stallWatchdog)
+                                    mainHandler.removeCallbacks(firstPictureWatchdog)
                                     // A player that had an item and no longer
                                     // does: the picture is gone, and until now
                                     // nothing said who took it. `lastStopReason`
