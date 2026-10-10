@@ -1390,8 +1390,9 @@ class DlnaReceiver(
                             } else {
                                 onError(msg)
                             }
-                            // Reflect STOPPED immediately so the control point's
-                            // UI doesn't stay stuck on PLAYING while we retry.
+                            // 默认先上报 STOPPED；若下方进入「静默重试」分支会立即 markPlaying
+                            // 抵消，让发送端保持 PLAYING（用户无感）。仅二次失败 / 源拒绝 / 解码器
+                            // 不可用等明确放弃时才真正结束（对齐光元素：出错不翻状态、静默重试）。
                             ManualDlnaHttp.notifyPlaybackEnded()
                             // Transient failures (Surface recreation across a
                             // background/foreground switch, momentary network
@@ -1494,6 +1495,9 @@ class DlnaReceiver(
                                 // told the user to re-pick the video, retrying
                                 // would only bury that advice under more
                                 // silence.
+                                // v115: 静默重试——抵消上方刚发出的 STOPPED，使发送端保持
+                                // PLAYING（出错不翻状态，用户对重试无感，对齐光元素）。
+                                ManualDlnaHttp.markPlaying()
                                 takeRetry(uri)
                                 mainHandler.postDelayed({
                                     if (started && currentUri == uri) {

@@ -216,6 +216,8 @@ class MainActivity : AppCompatActivity() {
     /** Full-screen DLNA playback view (inside streaming_container so it covers
      *  the nav panel). PlayerView provides the controller and Surface lifecycle. */
     private var dlnaPlayerView: PlayerView? = null
+    /** v115: 竖屏自适应监听只注册一次（player 实例 long-lived） */
+    private var videoSizeAutoFitRegistered = false
 
     /** DLNA debug HUD (Settings → "Debug overlay"), drawn ABOVE the DLNA
      *  Surface (plain View above the Surface layer) so it is never clipped. */
@@ -1479,6 +1481,18 @@ class MainActivity : AppCompatActivity() {
         pinScreen.visibility = View.GONE
 
         pv.player = service?.dlnaPlayer
+        // v115: 竖屏自适应——视频为竖屏时自动放大裁切填满，避免两侧大黑边
+        val autoFitPlayer = service?.dlnaPlayer
+        if (autoFitPlayer != null && !videoSizeAutoFitRegistered) {
+            autoFitPlayer.addListener(object : androidx.media3.common.Player.Listener {
+                override fun onVideoSizeChanged(
+                    videoSize: androidx.media3.common.VideoSize
+                ) {
+                    applyAutoResize(videoSize.width, videoSize.height)
+                }
+            })
+            videoSizeAutoFitRegistered = true
+        }
         pv.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
@@ -1884,6 +1898,27 @@ class MainActivity : AppCompatActivity() {
         checkedIndex: Int
     ) {
         com.phairplay.ui.TvDialogs.menu(this, title, entries, checkedIndex)
+    }
+
+    /**
+     * v115: 竖屏自适应。竖屏视频（高>宽，如抖音 720x1270）在横屏电视上若用 FIT
+     * 只占屏宽约 32%，两侧大黑边。这里自动切 ZOOM（等比放大填满、裁切溢出），
+     * 让竖屏内容占满整个电视宽度；横屏恢复原始比例（FIT）。用户仍可用菜单手动覆盖。
+     */
+    private fun applyAutoResize(videoWidth: Int, videoHeight: Int) {
+        val pv = dlnaPlayerView ?: return
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        val target = if (videoHeight > videoWidth)
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        else
+            androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+        if (pv.resizeMode != target) {
+            pv.resizeMode = target
+            com.phairplay.util.DebugLog.log(
+                "UI",
+                "竖屏自适应：视频 ${videoWidth}x${videoHeight} → " + resizeModeName(target)
+            )
+        }
     }
 
     private fun showResizeSettings(pv: PlayerView) {
