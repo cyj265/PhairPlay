@@ -124,6 +124,7 @@ public class AndroidUpnpStream extends UpnpStream {
                     String resp = "HTTP/1.1 200 OK\r\nSERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                             + "CONTENT-LENGTH: 0\r\n\r\n";
                     DebugLog.INSTANCE.log("HTTP", "UNSUBSCRIBE " + reqPath + " -> 200");
+                    GenaNotifier.unsubscribe();
                     socket.getOutputStream().write(resp.getBytes("UTF-8"));
                     socket.getOutputStream().flush();
                     return;

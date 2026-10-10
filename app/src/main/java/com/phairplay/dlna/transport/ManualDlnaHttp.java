@@ -121,6 +121,20 @@ public final class ManualDlnaHttp {
     }
 
     /**
+     * Live playback position / duration for GENA progress events. Pulled off
+     * the ExoPlayer bridge; returns 0 when there is no player or it is gone.
+     */
+    public static long getCurrentPositionSeconds() {
+        com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+        return pc != null ? pc.getPositionSeconds() : 0L;
+    }
+
+    public static long getCurrentDurationSeconds() {
+        com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+        return pc != null ? pc.getDurationSeconds() : 0L;
+    }
+
+    /**
      * v99-④ — the player really started, so say so before anyone asks.
      *
      * A sender polls TransportState and stops re-sending Set/Play once it
@@ -129,7 +143,8 @@ public final class ManualDlnaHttp {
      */
     public static void markPlaying() {
         transportState = "PLAYING";
-        GenaNotifier.push();
+        GenaNotifier.pushAsync();
+        GenaNotifier.startProgressTicker();
     }
 
     /**
@@ -168,7 +183,7 @@ public final class ManualDlnaHttp {
      */
     public static void markPaused() {
         transportState = "PAUSED_PLAYBACK";
-        GenaNotifier.push();
+        GenaNotifier.pushAsync();
         // v101-③ verification: this used to leave no trace, so "no PAUSED_PLAYBACK
         // in the log" could not be told apart from "never called". The state
         // itself is observable from the outside - a GetTransportInfo during a
@@ -214,7 +229,8 @@ public final class ManualDlnaHttp {
                         c.startPlaybackAuto(uri);
                     }
                     transportState = "PLAYING";
-                    GenaNotifier.push();
+                    GenaNotifier.pushAsync();
+                    GenaNotifier.startProgressTicker();
                 } catch (Throwable ignored) {
                     // The player is the receiver's problem now; failing here
                     // must never take the HTTP server down.
@@ -631,7 +647,7 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "PLAYING";
-                GenaNotifier.push();
+                GenaNotifier.pushAsync();
                 return avtResponse("PlayResponse", "");
             }
             case "Pause": {
@@ -643,7 +659,7 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "PAUSED_PLAYBACK";
-                GenaNotifier.push();
+                GenaNotifier.pushAsync();
                 return avtResponse("PauseResponse", "");
             }
             case "Stop": {
@@ -656,7 +672,7 @@ public final class ManualDlnaHttp {
                 }
                 transportState = "STOPPED";
                 positionSeconds = 0;
-                GenaNotifier.push();
+                GenaNotifier.pushAsync();
                 return avtResponse("StopResponse", "");
             }
             case "Seek": {
@@ -918,7 +934,8 @@ public final class ManualDlnaHttp {
     public static void notifyPlaybackEnded() {
         transportState = "STOPPED";
         positionSeconds = 0;
-        GenaNotifier.push();
+        GenaNotifier.pushAsync();
+        GenaNotifier.stopProgressTicker();
     }
 
     private static String extractAction(String body) {

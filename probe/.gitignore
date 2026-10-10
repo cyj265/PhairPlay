@@ -1,0 +1,8 @@
+# GENA verification harness run artifacts (regenerated on each run)
+test.mp4
+gena_stdout.log
+gena_stderr.log
+last_notify.txt
+boxlog.bin
+__pycache__/
+*.pyc
