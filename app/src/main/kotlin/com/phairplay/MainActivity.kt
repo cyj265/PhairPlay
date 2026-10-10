@@ -838,6 +838,13 @@ class MainActivity : AppCompatActivity() {
         val svc = service ?: return
         if (autoOpenUsedForCast) return
         if (svc.dlnaState.value != ProtocolState.CONNECTED) return
+        // A still image never reaches the player, so there is nothing here to
+        // open — and opening it anyway paints an empty black PlayerView over the
+        // photo. Guarded here rather than at each call site because all three
+        // callers (state, cast-arrived, playback-tick) can fire during a photo
+        // cast; a guard at one of them would leave the others still fighting for
+        // the screen.
+        if (svc.dlnaIsPhotoCast()) return
         // A sender that pushed Play and is now waiting on the surface counts as
         // "there is a picture owed to the user". Leaving it out here left the
         // item parked: the surface timeout was reset by the next poll before it
@@ -1120,6 +1127,9 @@ class MainActivity : AppCompatActivity() {
      * Hides the nav panel and content area to give the stream the full screen.
      */
     fun showStreamingScreen() {
+        // A photo cast owns the full-screen container; switching back to the
+        // video surface here would blank the picture the user is looking at.
+        if (service?.dlnaIsPhotoCast() == true) return
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         nowPlayingScreen.clear()
@@ -1134,9 +1144,24 @@ class MainActivity : AppCompatActivity() {
             streamingScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE
+            dlnaPlayerView?.visibility = View.GONE
             photoScreen.visibility = View.VISIBLE
             streamingContainer.visibility = View.VISIBLE
             streamingContainer.bringToFront()
+            // The PlayerView is an earlier sibling, so a later showDlnaPlayer()
+            // anywhere in the flow would otherwise paint over the photo without
+            // this one ever being told. Raising the photo screen keeps the
+            // picture visible no matter which path tried to open the player.
+            photoScreen.bringToFront()
+            com.phairplay.util.DebugLog.log(
+                "UI",
+                "照片屏已显示 ${photoFrame.bytes.size / 1024}KB type=${photoFrame.mimeType}"
+            )
+        } else {
+            com.phairplay.util.DebugLog.log(
+                "UI",
+                "照片解码失败（${photoFrame.bytes.size}B type=${photoFrame.mimeType}），不显示"
+            )
         }
     }
 
@@ -1273,6 +1298,13 @@ class MainActivity : AppCompatActivity() {
             svc.dlnaState.collectLatest { state ->
                 if (state != ProtocolState.CONNECTED) {
                     hideDlnaPlayer()
+                } else if (svc.dlnaIsPhotoCast()) {
+                    // A still-image cast: there is no player to open. Bringing
+                    // up the PlayerView here would put an empty black surface
+                    // over the photo that is already on screen.
+                    com.phairplay.util.DebugLog.log(
+                        "UI", "DLNA CONNECTED 但当前是图片投屏 → 不拉播放器"
+                    )
                 } else {
                     // Never let one emission settle this. CONNECTED arrives
                     // before the player has even buffered; the picture's
@@ -1306,6 +1338,17 @@ class MainActivity : AppCompatActivity() {
                 if (svc.isCastDismissed(svc.dlnaCurrentUri())) {
                     com.phairplay.util.DebugLog.log(
                         "UI", "新投屏到达，但用户已关闭该投屏 → 不抢首页"
+                    )
+                    return@collectLatest
+                }
+                // A new cast that is a still image will paint the photo screen
+                // on its own once the bytes arrive. Opening the PlayerView here
+                // would flash an empty surface and then sit on top of the
+                // picture, because the photo screen and the player share one
+                // container.
+                if (svc.dlnaIsPhotoCast()) {
+                    com.phairplay.util.DebugLog.log(
+                        "UI", "新投屏到达，当前是图片投屏 → 不拉播放器"
                     )
                     return@collectLatest
                 }
@@ -1384,8 +1427,12 @@ class MainActivity : AppCompatActivity() {
             // Audio-only AirPlay (system audio, Music, podcasts): show the now-playing card instead
             // of the black video surface. Set whenever audio plays without video.
             nowPlaying != null -> showNowPlayingScreen(nowPlaying)
-            currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
+            // A photo cast (DLNA still image or AirPlay /photo) outranks the
+            // AirPlay-connected branch: it never reaches ExoPlayer, so pulling
+            // the PlayerView up would cover the picture with a black surface
+            // that has nothing behind it.
             photoFrame != null -> showPhotoScreen(photoFrame)
+            currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
             else -> hideStreamingScreen()
         }
     }
@@ -1412,6 +1459,19 @@ class MainActivity : AppCompatActivity() {
      */
     fun showDlnaPlayer() {
         val pv = dlnaPlayerView ?: return
+        // A photo cast must never be covered by the player, and this function
+        // is the single point every "open the playback layer" path funnels
+        // through — the state collector, the cast-arrived collector, the
+        // playback tick, a warm resume, the "back to playback" pill. Guarding
+        // the callers instead meant whichever one was missed brought the empty
+        // PlayerView up over the picture within a couple of seconds. Guarding
+        // here covers all of them at once.
+        if (service?.dlnaIsPhotoCast() == true) {
+            com.phairplay.util.DebugLog.log(
+                "UI", "showDlnaPlayer：当前是图片投屏 → 不开播放器"
+            )
+            return
+        }
         // An empty player is a black rectangle, and an empty player was
         // exactly what a warm resume dropped the user into: the app came back
         // (a launch still carrying EXTRA_AUTO_FOREGROUND_REASON, or a rebind

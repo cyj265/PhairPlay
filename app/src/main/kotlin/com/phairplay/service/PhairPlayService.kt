@@ -570,6 +570,27 @@ class PhairPlayService : Service() {
                 // The receiver parks an item when a decoder init failed with no
                 // surface behind it; only the Activity can see when one appears.
                 onSurfaceProbeNeeded = { requestDlnaSurfaceProbe() },
+                // Still images never reach ExoPlayer (media3 1.4.1 has no image
+                // renderer), so the receiver fetches the bytes itself and hands
+                // them over here. Routing them into the same _photoFrame the
+                // AirPlay `/photo` path uses means one photo screen serves both
+                // protocols instead of a second view that can drift.
+                photoSink = { frame ->
+                    _photoFrame.value = frame
+                    updateNotification(isRunning = true)
+                },
+                // A video arriving has to retire the photo screen: both live in
+                // the same full-screen container, so without this a photo would
+                // keep covering the video that replaced it.
+                onVideoStart = {
+                    _photoFrame.value = null
+                    isPhotoCast = false
+                },
+                // Recorded the instant the uri is recognised as a photo, which
+                // is what the UI's cast-arrival decision actually needs to see.
+                onPhotoStart = {
+                    isPhotoCast = true
+                },
                 // …and only the Activity can bring the playback layer back. A
                 // parked item sits in ADVERTISING while showDlnaPlayer() only runs
                 // on CONNECTED, so without this the retry would wait for a Surface
@@ -1074,6 +1095,19 @@ class PhairPlayService : Service() {
 
     /** The uri the receiver is currently holding, for the UI's own gates. */
     fun dlnaCurrentUri(): String? = dlnaReceiver?.currentCastUri
+
+    /**
+     * True while the current DLNA item is a still image.
+     *
+     * The UI needs this to decide NOT to open the PlayerView. Checking
+     * `_photoFrame` instead does not work: the cast-arrived signal fires the
+     * instant the sender sends a new uri, which is before the photo has been
+     * downloaded, so the frame is still null at exactly the moment the decision
+     * is made — and the playback layer goes up over the picture.
+     */
+    @Volatile private var isPhotoCast = false
+
+    fun dlnaIsPhotoCast(): Boolean = isPhotoCast
 
     /** True while a cast the user dismissed is still inside its time window. */
     fun isCastDismissed(uri: String?): Boolean = dismissalStillInsideWindow(uri)

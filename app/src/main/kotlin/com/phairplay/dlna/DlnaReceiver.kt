@@ -2,6 +2,10 @@ package com.phairplay.dlna
 
 import android.content.Context
 import android.net.ConnectivityManager
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLDecoder
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -27,6 +31,7 @@ import com.phairplay.dlna.renderer.DlnaNoMediaPresent
 import com.phairplay.dlna.renderer.DlnaPlayerBridge
 import com.phairplay.dlna.renderer.DlnaPlayerControl
 import com.phairplay.dlna.renderer.DlnaRendererStateMachine
+import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.DebugLog
 import com.phairplay.util.Logger
@@ -125,6 +130,27 @@ class DlnaReceiver(
      */
     private val onPlaybackUiNeeded: () -> Unit = {},
     /**
+     * Receives a still image the receiver fetched for a photo cast, so the UI
+     * can show it full screen. Defaults to no-op so callers that do not display
+     * photos (tests, tooling) need not know about this channel.
+     */
+    photoSink: ((PhotoFrame) -> Unit)? = null,
+    /**
+     * Fired when a non-photo (video/audio) DLNA cast starts. The service uses
+     * this to drop any still image the photo screen is still holding — the same
+     * "a new item must clear the previous one's leftovers" rule the player path
+     * relies on, and without it a photo keeps covering the video that replaced
+     * it.
+     */
+    onVideoStart: (() -> Unit)? = null,
+    /**
+     * Fired the moment a cast is identified as a still image — before the bytes
+     * are fetched. The UI's "should I open the player?" decision happens at
+     * cast-arrival time, so anything later (the photo frame itself) arrives too
+     * late to influence it.
+     */
+    onPhotoStart: (() -> Unit)? = null,
+    /**
      * Ticks whenever the player's own state changes (IDLE / BUFFERING / READY)
      * or a first frame lands.
      *
@@ -198,9 +224,32 @@ class DlnaReceiver(
      */
     private var uiGateBlocked = false
 
+    /**
+     * Receives a fetched still image so the UI can show it full screen. Set from
+     * the constructor, which forwards to MainActivity's photo screen — the same
+     * path AirPlay `/photo` already uses, so both protocols land on one view.
+     */
+    @Volatile
+    var photoSink: ((PhotoFrame) -> Unit)? = null
+
+    /**
+     * Notified when a video/audio item (not a photo) starts; the service drops
+     * any still image the photo screen is still holding so a photo cannot keep
+     * covering the video that replaced it.
+     */
+    @Volatile
+    private var onVideoStartCb: (() -> Unit)? = null
+
+    /** Notified at photo-identification time; see constructor. */
+    @Volatile
+    private var onPhotoStartCb: (() -> Unit)? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
+        this.photoSink = photoSink
+        this.onVideoStartCb = onVideoStart
+        this.onPhotoStartCb = onPhotoStart
         installCrashGuard { throwable ->
             val where = throwable.stackTrace.firstOrNull()
                 ?.let { "${it.className}.${it.methodName}" }
@@ -793,6 +842,14 @@ class DlnaReceiver(
         .setAllowCrossProtocolRedirects(true)
         .setConnectTimeoutMs(10_000)
         .setReadTimeoutMs(20_000)
+
+    /**
+     * Guards against a slow photo download landing after a newer cast (or a
+     * stop). Incremented on every new photo and on every stop, so a fetch that
+     * started earlier simply drops its result instead of overwriting the
+     * current picture with a stale one.
+     */
+    private var photoFetchToken = 0
 
     /**
      * Fires when an item starts but never reaches READY — i.e. a black screen
@@ -2020,6 +2077,165 @@ class DlnaReceiver(
         return builder.build()
     }
 
+    /**
+     * True when the URI points at a still image rather than playable media.
+     *
+     * media3 1.4.1 ships no image renderer and no image extractor (both arrived
+     * in later releases as a separate module), so handing an image source to
+     * ExoPlayer makes it read a few KB, find no track it can render, and end in
+     * STATE_ENDED within the same second — the sender shows "cast failed" with
+     * no error anywhere. Every receiver worth copying detects photos instead of
+     * feeding them to the player, and this box already has a full-screen
+     * ImageView for AirPlay `/photo`, so the same path serves DLNA photos.
+     *
+     * Two things this has to get right, both learned from the sender that
+     * actually failed here (a phone serving gallery picks):
+     *  - Its path separators arrive percent-encoded — the real URI is
+     *    `.../%2Fexternal_primary%2Fimages%2Fmedia%2F10678` — so matching a
+     *    literal "/images/" never fires and the photo goes to the player and
+     *    dies in STATE_ENDED. Decoding first is the whole fix.
+     *  - Relay/proxy addresses smuggle other URLs inside a query string, and a
+     *    video may well sit under a path that mentions images. A known media
+     *    container extension therefore vetoes the image verdict outright.
+     */
+    private fun looksLikeImageUri(uri: String): Boolean {
+        val raw = uri.lowercase()
+        val decoded = runCatching { URLDecoder.decode(uri, "UTF-8").lowercase() }
+            .getOrDefault(raw)
+        // A real container in the path is the strongest signal there is; it beats
+        // every image hint below (proxy?url=…/a.jpg wrapping an .mp4, or a
+        // directory literally named "photos" holding videos).
+        val mediaExt = listOf(
+            ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".ts", ".m4v",
+            ".m3u8", ".mpd", ".ism", ".3gp", ".wmv", ".rmvb"
+        )
+        val path = decoded.substringBefore('?')
+        if (mediaExt.any { path.endsWith(it) }) return false
+        val query = decoded.substringAfter('?', "")
+        if (mediaExt.any { query.endsWith(it) }) return false
+
+        if (raw.startsWith("data:image/")) return true
+        val imageExt = listOf(
+            ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"
+        )
+        if (imageExt.any { path.endsWith(it) || query.contains(it) }) return true
+        // Extensionless gallery endpoints: the real type only exists in the
+        // response headers, so treat these as "maybe image" and let the fetch
+        // confirm with Content-Type before the picture is trusted.
+        return path.contains("/images/") || path.contains("/image/") ||
+            path.contains("/photo/") || path.contains("/photos/")
+    }
+
+    /** Content types we can hand straight to [android.graphics.BitmapFactory]. */
+    private fun isDecodableImageMime(mime: String?): Boolean {
+        val m = mime?.substringBefore(';')?.trim()?.lowercase() ?: return false
+        return m.startsWith("image/") && m != "image/tiff" && m != "image/svg+xml"
+    }
+
+    // ───────────────────────── Still-image (photo) casting ─────────────────────────
+
+    /**
+     * Downloads a still image and hands the bytes to the UI's photo screen.
+     *
+     * Runs off the main thread: the files are 10–20 MB on these senders, and
+     * decoding one on the main thread would stall the box for seconds. Fails
+     * quietly into the debug log — a photo we could not fetch is not worth a
+     * dialog on the TV, and the sender's own error UI has already given up by
+     * the time any of this finishes.
+     */
+    private fun fetchPhoto(uri: String) {
+        photoFetchToken++
+        val token = photoFetchToken
+        Thread {
+            val bytes = ByteArrayOutputStream()
+            var mime: String? = null
+            var ok = false
+            try {
+                val conn = (URL(uri).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10000
+                    readTimeout = 20000
+                    instanceFollowRedirects = true
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", DEFAULT_HTTP_USER_AGENT)
+                }
+                conn.connect()
+                val code = conn.responseCode
+                mime = conn.contentType
+                DebugLog.log("DLNA", "照片源 HTTP $code content-type=$mime url=$uri")
+                if (code in 200..299) {
+                    conn.inputStream.use { input ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            bytes.write(buf, 0, n)
+                        }
+                    }
+                    ok = true
+                }
+            } catch (t: Throwable) {
+                DebugLog.log("DLNA", "照片下载失败: ${t.message}")
+            }
+            val data = if (ok) bytes.toByteArray() else null
+            val fetchedMime = mime
+            mainHandler.post {
+                // A newer photo (or a stop/新投屏) landed while we were
+                // downloading; showing this one now would put the wrong picture
+                // on screen.
+                if (token != photoFetchToken) return@post
+                if (data == null) {
+                    DebugLog.log("DLNA", "照片未显示（下载失败或为空）")
+                    return@post
+                }
+                if (data.size < 2) {
+                    DebugLog.log("DLNA", "照片未显示（响应过小 ${data.size}B）")
+                    return@post
+                }
+                // Second opinion from the far end. The URI test in
+                // [looksLikeImageUri] is a heuristic; when it guessed wrong and
+                // the response is plainly not an image, hand the item back to
+                // the player rather than handing the picture screen bytes it
+                // cannot decode — a wrong guess then costs a normal video cast
+                // nothing instead of breaking it.
+                if (!isDecodableImageMime(fetchedMime)) {
+                    DebugLog.log(
+                        "DLNA",
+                        "判定为图片但响应是 $fetchedMime → 回落播放器: $uri"
+                    )
+                    runStart(uri)
+                    return@post
+                }
+                DebugLog.log("DLNA", "照片已下载 ${data.size / 1024} KB，交给图片屏显示")
+                currentUri = uri
+                clearRetryCount(uri)
+                DlnaMediaMeta.setActive(true)
+                DlnaMediaMeta.audioOnly = false
+                photoSink?.invoke(PhotoFrame(data, fetchedMime ?: "image/jpeg"))
+            }
+        }.start()
+    }
+
+    /**
+     * Handles a still-image cast: skip the player entirely, report PLAYING so the
+     * sender stops retrying, and fetch the bytes for the photo screen. The
+     * transport state has to go to PLAYING because ExoPlayer is never involved
+     * here — without this the sender's polling would see STOPPED for the whole
+     * download and report a failure.
+     */
+    private fun startPhoto(uri: String) {
+        DebugLog.log("DLNA", "识别为静态图片 → 走图片屏（不经 ExoPlayer）: $uri")
+        onPhotoStartCb?.invoke()
+        currentUri = uri
+        clearRetryCount(uri)
+        DlnaMediaMeta.setActive(true)
+        DlnaMediaMeta.audioOnly = false
+        startedOnRealSurface = false
+        applyRelayHeaders(uri)
+        ManualDlnaHttp.markPlaying()
+        report(ProtocolState.CONNECTED)
+        fetchPhoto(uri)
+    }
+
     /** Releases everything owned by the receiver. Main thread only. */
     private fun releaseResources() {
         // A full teardown is the one moment where grabbing the hardware
@@ -2035,6 +2251,8 @@ class DlnaReceiver(
         lastProbeOkMs = 0L
         lastProbeUri = null
         parkedForUi = null
+        photoFetchToken++
+        photoSink = null
         mainHandler.removeCallbacks(decoderCooldownRetry)
         mainHandler.removeCallbacks(firstPictureWatchdog)
         lastStopReason = "接收器释放 releaseResources"
@@ -3102,6 +3320,21 @@ class DlnaReceiver(
             applyRelayHeaders(uri)
             mainHandler.removeCallbacks(stallWatchdog)
             mainHandler.postDelayed(stallWatchdog, STALL_TIMEOUT_MS.toLong())
+            // A still image has no renderer to load it (see [looksLikeImageUri]),
+            // so it must never reach setMediaItem — ExoPlayer ends within a
+            // second and the sender calls it a failure. Give it to the photo
+            // screen instead and leave the player untouched.
+            if (!audioOnly && looksLikeImageUri(uri)) {
+                p.stop()
+                p.clearMediaItems()
+                mainHandler.removeCallbacks(stallWatchdog)
+                startPhoto(uri)
+                return@post
+            }
+            // Ordinary playable media. Anything the photo screen is still
+            // showing belonged to the previous item and has to go, or it keeps
+            // covering this one (same container, one visible surface).
+            onVideoStartCb?.invoke()
             // v88: drop whatever the previous item left behind before loading
             // the new one. This is the path that trips media3's
             // `SampleQueue.commitSample` assertion — the one that used to show
@@ -3142,6 +3375,10 @@ class DlnaReceiver(
     override fun stopPlayback() {
         mainHandler.post {
             if (!started) return@post
+            // A photo download already in flight belongs to the cast being
+            // stopped; bump the token so its result is dropped instead of
+            // painting the picture back onto the TV after the stop.
+            photoFetchToken++
             clearPlayback("发送端 Stop (SOAP)")
             // A control point Stop is the one event that makes "the same uri
             // again" a genuinely new cast. The service forgets the uri here and
@@ -3277,6 +3514,10 @@ class DlnaReceiver(
         readyLoggedUri = null
         firstFrameLoggedUri = null
         DlnaMediaMeta.setActive(false)
+        // A cast ending retires the photo state with it. Leaving it set would
+        // make the NEXT video cast skip opening the player, because the UI asks
+        // "is this a photo?" long before the new item is identified.
+        onVideoStartCb?.invoke()
         player?.let { p ->
             p.stop()
             p.clearMediaItems()
