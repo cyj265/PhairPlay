@@ -21,11 +21,12 @@ Pass criterion
 - GetPositionInfo RelTime advances over the run (sanity that the player plays).
 
 Box addressing (hard-coded for the home N1; override with env vars)
-  BOX_IP, BOX_PORT(8899), BOX_UDN, MY_IP(192.168.10.10), MY_PORT(8899)
+  BOX_IP, BOX_PORT(8899), BOX_UDN, MY_IP(auto-detected LAN IP), MY_PORT(8899)
 """
 
 import os
 import re
+import socket
 import sys
 import time
 import threading
@@ -36,7 +37,25 @@ from urllib.error import URLError
 BOX_IP = os.environ.get("BOX_IP", "192.168.10.11")
 BOX_PORT = os.environ.get("BOX_PORT", "8899")
 BOX_UDN = os.environ.get("BOX_UDN", "6f61c845-1dd2-11b2-8f7b-001185123456")
-MY_IP = os.environ.get("MY_IP", "192.168.10.10")
+
+
+def _detect_lan_ip() -> str:
+    """LAN IP used for outbound traffic.
+
+    The home LAN hands out addresses by DHCP and both this PC and the box drift
+    (observed .10 -> .11 -> .13 -> .15), so a hard-coded MY_IP silently breaks
+    the callback server: it either fails to bind or the box cannot reach it.
+    Probe the real source address instead; override with the MY_IP env var.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+MY_IP = os.environ.get("MY_IP") or _detect_lan_ip()
 MY_PORT = int(os.environ.get("MY_PORT", "8899"))
 MEDIA = os.environ.get(
     "MEDIA",
