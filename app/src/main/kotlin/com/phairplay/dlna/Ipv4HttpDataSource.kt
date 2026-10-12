@@ -21,6 +21,15 @@ import java.util.concurrent.TimeUnit
 private const val LENGTH_UNKNOWN = -1L
 
 /**
+ * v120: on an unknown-length stream (chunked, live FLV) nearly every read
+ * returns less than requested, so logging each one emitted hundreds of 8 KB
+ * lines per item and flushed the hour-long diagnostic window the box keeps for
+ * SOAP/DLNA events (diagnostic side, §114). One line per window keeps the
+ * signal; the skipped count rides along with it.
+ */
+private const val SHORT_READ_LOG_WINDOW_MS = 5_000L
+
+/**
  * v107–v110 — an HTTP data source that does not pay the IPv6 wait, and that
  * sends the correct `Host` header.
  *
@@ -66,6 +75,9 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     private val requestProperties = LinkedHashMap<String, String>()
 
     private var firstReadLogged = false
+    /** v120: short-read throttling state, see [SHORT_READ_LOG_WINDOW_MS]. */
+    private var lastShortReadLogMs = 0L
+    private var suppressedShortReads = 0
     private var streamEnded = false
     private var bytesRemaining = 0L
 
@@ -249,10 +261,19 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
                     "code=$responseCodeInternal first=$sample url=${currentUri}"
             )
         } else if (bytes < want) {
-            DebugLog.log(
-                "DECODER",
-                "Ipv4DS read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining (short)"
-            )
+            val now = System.currentTimeMillis()
+            if (now - lastShortReadLogMs >= SHORT_READ_LOG_WINDOW_MS) {
+                val skipped = suppressedShortReads
+                suppressedShortReads = 0
+                lastShortReadLogMs = now
+                DebugLog.log(
+                    "DECODER",
+                    "Ipv4DS read@${currentSpec.position}: got=$bytes want=$want " +
+                        "remaining=$bytesRemaining (short, +$skipped skipped)"
+                )
+            } else {
+                suppressedShortReads++
+            }
         }
         bytesTransferred(bytes)
         return bytes

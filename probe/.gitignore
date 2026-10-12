@@ -6,3 +6,9 @@ last_notify.txt
 boxlog.bin
 __pycache__/
 *.pyc
+
+# photo / audio-only verification harness run artifacts
+photo.jpg
+photo_err.log
+portrait.mp4
+shots/

@@ -852,6 +852,16 @@ class DlnaReceiver(
     private var photoFetchToken = 0
 
     /**
+     * The last uri handed back to the player because [looksLikeImageUri] guessed
+     * wrong and the response was not an image. Without this the mismatch branch
+     * re-enters [runStart], which re-detects the same uri as an image and
+     * re-fetches it — an unbounded fetch loop against a source that keeps
+     * answering with the wrong content type. One hand-back per uri is enough;
+     * a different uri may try again.
+     */
+    private var photoPlayerFallbackUri: String? = null
+
+    /**
      * Fires when an item starts but never reaches READY — i.e. a black screen
      * with *no* error callbacks. Nothing else in the player reports that case,
      * and it is the one that looks like a broken app rather than a broken
@@ -2198,6 +2208,16 @@ class DlnaReceiver(
                 // cannot decode — a wrong guess then costs a normal video cast
                 // nothing instead of breaking it.
                 if (!isDecodableImageMime(fetchedMime)) {
+                    if (photoPlayerFallbackUri == uri) {
+                        // v120: already handed back once. Doing it again would
+                        // re-enter the same detection → fetch → mismatch cycle.
+                        DebugLog.log(
+                            "DLNA",
+                            "判定为图片但响应是 $fetchedMime，且已回落过 → 放弃本轮: $uri"
+                        )
+                        return@post
+                    }
+                    photoPlayerFallbackUri = uri
                     DebugLog.log(
                         "DLNA",
                         "判定为图片但响应是 $fetchedMime → 回落播放器: $uri"
@@ -3324,7 +3344,14 @@ class DlnaReceiver(
             // so it must never reach setMediaItem — ExoPlayer ends within a
             // second and the sender calls it a failure. Give it to the photo
             // screen instead and leave the player untouched.
-            if (!audioOnly && looksLikeImageUri(uri)) {
+            //
+            // v120: the image test runs before the audio-only fallback, not
+            // after it. That fallback keeps sound alive when the picture layer
+            // is not ready, but an image has no audio to keep — gating the test
+            // on !audioOnly let a JPEG reach the player under load and produced
+            // ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED (diagnostic side, §114).
+            // Images opt out of the fallback entirely.
+            if (looksLikeImageUri(uri)) {
                 p.stop()
                 p.clearMediaItems()
                 mainHandler.removeCallbacks(stallWatchdog)
