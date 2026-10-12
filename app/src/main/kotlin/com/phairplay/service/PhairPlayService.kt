@@ -106,8 +106,13 @@ class PhairPlayService : Service() {
      * hint exists so a black screen comes with an explanation instead of
      * silence.
      */
-    private val _dlnaHint = MutableStateFlow<String?>(null)
-    val dlnaHint: StateFlow<String?> = _dlnaHint.asStateFlow()
+    // v121: an EVENT flow, not state. As a StateFlow this deduplicated a
+    // re-set of the same text - the second cast of the same broken uri never
+    // toasted again (field log 22:44 vs 22:45: "已请求 UI 提示" without a
+    // matching "toast 显示"). Hints are one-shot notifications; SharedFlow
+    // with replay=0 also means a later rebind cannot re-show a stale failure.
+    private val _dlnaHint = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val dlnaHint: SharedFlow<String> = _dlnaHint
 
     /**
      * Bumped whenever the DLNA player's own state moves (IDLE/BUFFERING/READY)
@@ -611,18 +616,18 @@ class PhairPlayService : Service() {
                 // the idle sweep will take it back after a minute. Say so, or
                 // the user has no idea why the slot went quiet.
                 onPauseIdleWarning = {
-                    _dlnaHint.value = "已暂停，闲置一分钟会释放解码资源（随时可回播放继续）"
+                    _dlnaHint.tryEmit("已暂停，闲置一分钟会释放解码资源（随时可回播放继续）")
                 },
                 // v101-⑩: a source that serves an anti-scraping page instead of
                 // a manifest will never fix itself, so it gets a line on screen
                 // rather than a black rectangle and no explanation.
-                onSourceHint = { text -> _dlnaHint.value = text },
+                onSourceHint = { text -> _dlnaHint.tryEmit(text) },
                 onError = { message ->
                     _dlnaError.value = message
                     Logger.e("DLNA error surfaced to UI: $message")
                 },
                 onDecoderHint = { hint ->
-                    _dlnaHint.value = hint
+                    _dlnaHint.tryEmit(hint)
                     Logger.w("DLNA decoder hint surfaced to UI: $hint")
                 },
                 // A picture arrived, so the advice is stale: retract it. The
@@ -634,10 +639,9 @@ class PhairPlayService : Service() {
                 // [_dlnaPlaybackTick].
                 onPlaybackActivityChanged = { _dlnaPlaybackTick.value++ },
                 onDecoderHintCleared = {
-                    if (_dlnaHint.value != null) {
-                        _dlnaHint.value = null
-                        Logger.i("DLNA decoder hint retracted after recovery")
-                    }
+                    // v121: nothing to retract on an event flow — replay=0
+                    // already guarantees a later rebind shows no stale notice.
+                    Logger.i("DLNA decoder hint retracted after recovery")
                 },
                 // The control point itself said Stop. Forgetting the uri here
                 // is what makes "stop, then cast the same channel again" count
@@ -1348,7 +1352,6 @@ class PhairPlayService : Service() {
         _castState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED
         _dlnaError.value = null
-        _dlnaHint.value = null
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

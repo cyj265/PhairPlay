@@ -61,6 +61,7 @@ import org.jupnp.support.model.AVTransport
 import org.jupnp.support.renderingcontrol.lastchange.RenderingControlLastChangeParser
 import org.jupnp.transport.Router
 import org.jupnp.transport.RouterImpl
+import okio.Buffer
 import java.util.UUID
 
 /**
@@ -1871,7 +1872,17 @@ class DlnaReceiver(
                 val head = try {
                     val src = resp!!.body?.source()
                     if (src != null) {
-                        val bytes = src.readByteArray(200L)
+                        // v121: readByteArray(200) throws EOFException when the
+                        // body is SHORTER than 200 bytes - which is the size of
+                        // practically every error answer. Every short reply
+                        // therefore came back as "(读取响应体失败: null)",
+                        // leaving the eight magic bytes the data source happened
+                        // to log as the only clue about what the sender said.
+                        // Read what is actually there instead of demanding a
+                        // full buffer.
+                        val buf = Buffer()
+                        src.read(buf, 200L)
+                        val bytes = buf.readByteArray()
                         if (bytes.isEmpty()) "(空响应体)"
                         else String(bytes, Charsets.UTF_8)
                             .replace('\n', ' ').replace('\r', ' ')
@@ -1946,6 +1957,34 @@ class DlnaReceiver(
                                     "→ 判为确凿非媒体，允许冷却"
                             )
                         }
+                    }
+                } else {
+                    // v121: an HTTP error status is the far end refusing the
+                    // request, not a container this box failed to parse. With
+                    // no branch here the probe stayed silent on 4xx/5xx and the
+                    // failure was filed as
+                    // ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED - which reads
+                    // like a receiver-side format gap and points the diagnosis
+                    // at the wrong app. Say which end refused, and quote it.
+                    lastProbeAtMs = System.currentTimeMillis()
+                    lastProbeUri = uri
+                    lastProbeCode = code
+                    lastProbeVerdict = PROBE_INVALID
+                    DebugLog.log(
+                        "DLNA",
+                        "源探测: 发送端返回 HTTP $code（非 2xx，Content-Type=$type）→ " +
+                            "这是源站/发送端拒绝请求，不是本机不支持该格式；响应体：$head"
+                    )
+                    // A silent black screen leaves the user blaming this app
+                    // for a refusal that happened on the phone. Say which end
+                    // failed; that is the whole difference between "the cast
+                    // is broken" and "re-pick the item on the phone".
+                    DebugLog.log("DLNA", "v121: 已请求 UI 提示（发送端 HTTP $code）")
+                    mainHandler.post {
+                        onSourceHint(
+                            "手机端投屏服务返回 HTTP $code，未能提供该片源" +
+                                "（不是本机不支持格式）。请在手机端重新选片再投。"
+                        )
                     }
                 }
             } catch (e: Exception) {

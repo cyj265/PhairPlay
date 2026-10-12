@@ -1406,6 +1406,7 @@ class MainActivity : AppCompatActivity() {
      */
     @Suppress("DEPRECATION") // Toast.setView: still honoured for foreground toasts
     private fun showTvToast(message: String) {
+        com.phairplay.util.DebugLog.log("UI", "toast 显示: $message")
         val density = resources.displayMetrics.density
         val pad = (20 * density).toInt()
         val body = TextView(this).apply {

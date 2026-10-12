@@ -255,10 +255,19 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         if (!firstReadLogged) {
             firstReadLogged = true
             val sample = buffer.copyOfRange(offset, minOf(offset + 16, offset + bytes)).toHex()
+            // v121: on a non-2xx answer the magic bytes are the sender's error
+            // text, and hex makes the reader decode it by hand. Print the
+            // printable bytes next to them - a 27-byte "Path outside root
+            // directory" is the whole diagnosis once it is readable.
+            val errText = if (responseCodeInternal in 200..299) "" else {
+                val raw = String(buffer, offset, bytes, Charsets.ISO_8859_1)
+                    .map { c -> if (c in ' '..'~') c else '.' }.joinToString("")
+                " text=\"$raw\""
+            }
             DebugLog.log(
                 "DECODER",
                 "Ipv4DS read@${currentSpec.position}: got=$bytes want=$want remaining=$bytesRemaining " +
-                    "code=$responseCodeInternal first=$sample url=${currentUri}"
+                    "code=$responseCodeInternal first=$sample$errText url=${currentUri}"
             )
         } else if (bytes < want) {
             val now = System.currentTimeMillis()
