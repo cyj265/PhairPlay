@@ -1038,6 +1038,14 @@ class DlnaReceiver(
     private var upnpService: UpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var manualSsdp: ManualSsdp? = null
+    /**
+     * Port the DLNA control server is actually on: the preferred
+     * [DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT] unless something else
+     * already held it, in which case the stream server took an ephemeral one and
+     * the SSDP LOCATION has to say so.
+     */
+    @Volatile
+    private var dlnaHttpPort: Int = DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT
     /** Set while waiting for the box to be handed a LAN IPv4 (see [waitForIpAndStartSsdp]). */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -1045,7 +1053,25 @@ class DlnaReceiver(
     fun start() {
         if (started) return
         started = true
+        // v122 — who this box is, published before the HTTP server binds and
+        // before the first NOTIFY, because ManualSsdp and the jUPnP device below
+        // both read it back from here (it used to be three independent copies of
+        // the same constant UDN, and every PhairPlay on a LAN advertised it).
+        // The id is the one AirPlay already advertises as its `pi` TXT record:
+        // per install, survives restarts, needs no permission. The name follows
+        // the same rule as MdnsService — the user's displayName, else the Android
+        // device name — so a renamed box is renamed in both pickers.
+        ManualDlnaHttp.setIdentity(
+            NetworkUtils.getPersistentUuid(context),
+            displayName.ifBlank { NetworkUtils.getDeviceName(context) },
+        )
         DlnaPlayerBridge.setControl(this)
+        // v122 — this receiver is also started again after an IP change
+        // (PhairPlayService's ipWatcher rebuilds it), and ManualDlnaHttp's
+        // transport state / auto-start timers are process-static. Without a
+        // reset the freshly advertised device still answers PLAYING for a URI
+        // no player owns, and a timer from before the teardown can still fire.
+        ManualDlnaHttp.reset()
 
         try {
             // SSDP discovery runs over UDP multicast; Android drops multicast
@@ -1063,7 +1089,7 @@ class DlnaReceiver(
             try {
                 val ip = NetworkUtils.getLocalIpv4()
                 if (!ip.isNullOrBlank()) {
-                    manualSsdp = ManualSsdp().apply { start(ip) }
+                    manualSsdp = ManualSsdp().apply { start(ip, dlnaHttpPort) }
                     Logger.i("Manual SSDP started on $ip:1900")
                 } else {
                     // Do NOT stay silent here: a blank debug card on the box
@@ -1461,7 +1487,9 @@ class DlnaReceiver(
                             // 默认先上报 STOPPED；若下方进入「静默重试」分支会立即 markPlaying
                             // 抵消，让发送端保持 PLAYING（用户无感）。仅二次失败 / 源拒绝 / 解码器
                             // 不可用等明确放弃时才真正结束（对齐光元素：出错不翻状态、静默重试）。
-                            ManualDlnaHttp.notifyPlaybackEnded()
+                            // v122: 出错上报的是 ERROR_OCCURRED 而不是「正常播完」的 OK——否则手机
+                            // 上只会显示「已停止」，用户不知道是源的问题还是自己按错了。
+                            ManualDlnaHttp.notifyPlaybackError()
                             // Transient failures (Surface recreation across a
                             // background/foreground switch, momentary network
                             // stalls) recover with a single retry — capped so a
@@ -1592,7 +1620,8 @@ class DlnaReceiver(
             // the bound service crash on modern phones (whole-process crash).
             // Our router keeps the same stack but skips that receiver; failures
             // are caught below instead of killing the app.
-            val service = object : UpnpServiceImpl(DlnaUpnpServiceConfiguration()) {
+            val config = DlnaUpnpServiceConfiguration()
+            val service = object : UpnpServiceImpl(config) {
                 override fun createRouter(
                     protocolFactory: ProtocolFactory,
                     registry: Registry
@@ -1605,6 +1634,15 @@ class DlnaReceiver(
             // null and addDevice() below would NPE.
             service.startup()
             upnpService = service
+            // Discovery started above, on purpose: it must not depend on jUPnP
+            // coming up. So if the control server had to give up its preferred
+            // port, tell the already-running SSDP and let it re-announce.
+            val actualPort = config.actualStreamPort
+            if (actualPort != dlnaHttpPort) {
+                dlnaHttpPort = actualPort
+                manualSsdp?.setHttpPort(actualPort)
+                DebugLog.log("DLNA", "${DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT} 已被占用 → 控制服务改用 $actualPort，SSDP 已重新宣告")
+            }
             service.registry.addDevice(createRendererDevice())
             // Diagnostics: how many devices/resources actually landed in the
             // registry, and the first resource path. Helps debug 404 on desc.
@@ -1728,7 +1766,7 @@ class DlnaReceiver(
                         val fresh = NetworkUtils.getLocalIpv4()
                         if (fresh.isNullOrBlank()) return@post
                         try {
-                            manualSsdp = ManualSsdp().apply { start(fresh) }
+                            manualSsdp = ManualSsdp().apply { start(fresh, dlnaHttpPort) }
                             Logger.i("Manual SSDP started on $fresh:1900（IP 就绪后补启动）")
                             DebugLog.ssdpStatus = "运行中 (端口 1900)"
                         } catch (t: Throwable) {
@@ -3311,7 +3349,7 @@ class DlnaReceiver(
                     )
                     DebugLog.log("DLNA", hevcCodecSelector.describeAvailable())
                 }
-                ManualDlnaHttp.notifyPlaybackEnded()
+                ManualDlnaHttp.notifyPlaybackError()
                 report(ProtocolState.ADVERTISING)
                 return@post
             }
@@ -3651,10 +3689,10 @@ class DlnaReceiver(
                 as LocalService<ConnectionManagerService>
 
         return LocalDevice(
-            // Fixed UDN (standard UUID format — Windows/VLC reject non-UUID
-            // UDNs) so the device-description URL is predictable:
-            // http://<ip>:8899/upnp/dev/6f61c845-1dd2-11b2-8f7b-001185123456/desc
-            DeviceIdentity(UDN("uuid:6f61c845-1dd2-11b2-8f7b-001185123456")),
+            // Same UDN the manual SSDP/descriptor layer advertises (see
+            // ManualDlnaHttp#setIdentity) — a UUID format, since Windows/VLC
+            // reject non-UUID UDNs.
+            DeviceIdentity(UDN("uuid:" + ManualDlnaHttp.getUdn())),
             UDADeviceType("MediaRenderer"),
             DeviceDetails(displayName.ifBlank { "PhairPlay" }),
             arrayOf<LocalService<*>>(avService, renderService, connService)

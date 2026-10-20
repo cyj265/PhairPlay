@@ -73,7 +73,11 @@ public class AndroidUpnpStream extends UpnpStream {
                     // has no practical way to move a clipboard elsewhere, and a
                     // phone camera pointed at a TV screen loses half the lines —
                     // this path makes the counters directly fetchable.
-                    byte[] body = DebugLog.INSTANCE.dump().getBytes("UTF-8");
+                    // Query strings are stripped first: the log carries the
+                    // signed playback URLs the phone handed over, and this port
+                    // answers anyone on the LAN.
+                    byte[] body = DebugLog.INSTANCE.redactUrls(
+                            DebugLog.INSTANCE.dump()).getBytes("UTF-8");
                     String resp = "HTTP/1.1 200 OK\r\n"
                             + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                             + "CONTENT-TYPE: text/plain; charset=utf-8\r\n"
@@ -119,12 +123,34 @@ public class AndroidUpnpStream extends UpnpStream {
             // device error" when the AVTransport subscribe does not complete).
             if (("SUBSCRIBE".equals(request.method) || "UNSUBSCRIBE".equals(request.method))
                     && ManualDlnaHttp.isService(reqPath)) {
+                // v122: a GENA subscription belongs to one service URL, and a
+                // control point opens AVTransport + RenderingControl +
+                // ConnectionManager in one burst. Everything below is keyed on
+                // the service; with the old single shared slot the last
+                // SUBSCRIBE won and the events a cast was waiting for went out
+                // under a different service's SID.
+                String service = ManualDlnaHttp.serviceOf(reqPath);
                 if ("UNSUBSCRIBE".equals(request.method)) {
                     // Never mint a new SID or re-push events on unsubscribe.
+                    //
+                    // v122: release only when the presented SID is the one we
+                    // handed out for THIS service. A stale or foreign SID used
+                    // to tear down the live subscription, which is how one
+                    // sender's cleanup could kill another's cast. It is still
+                    // answered 200 (as a no-op) rather than 453: senders echo
+                    // the SID with enough variation that a hard error reads as
+                    // broken eventing, and the failure net in GenaNotifier
+                    // eventually reclaims it.
+                    String presented = headerValue(request, "SID");
+                    String known = GenaNotifier.currentSid(service);
+                    boolean mine = presented != null && presented.equals(known);
+                    if (mine) {
+                        GenaNotifier.unsubscribe(service);
+                    }
                     String resp = "HTTP/1.1 200 OK\r\nSERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                             + "CONTENT-LENGTH: 0\r\n\r\n";
-                    DebugLog.INSTANCE.log("HTTP", "UNSUBSCRIBE " + reqPath + " -> 200");
-                    GenaNotifier.unsubscribe();
+                    DebugLog.INSTANCE.log("HTTP", "UNSUBSCRIBE " + service + " -> 200"
+                            + (mine ? " 已退订" : "（SID 不匹配，保留 " + known + "）"));
                     socket.getOutputStream().write(resp.getBytes("UTF-8"));
                     socket.getOutputStream().flush();
                     return;
@@ -135,13 +161,13 @@ public class AndroidUpnpStream extends UpnpStream {
                 // subscription and abort long casts).
                 String existingSid = headerValue(request, "SID");
                 if (existingSid != null && !existingSid.isEmpty()
-                        && existingSid.equals(GenaNotifier.currentSid())) {
+                        && existingSid.equals(GenaNotifier.currentSid(service))) {
                     String resp = "HTTP/1.1 200 OK\r\n"
                             + "SID: " + existingSid + "\r\n"
                             + "TIMEOUT: Second-1800\r\n"
                             + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                             + "CONTENT-LENGTH: 0\r\n\r\n";
-                    DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + reqPath + " -> 200 续订 sid=" + existingSid);
+                    DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 续订 sid=" + existingSid);
                     socket.getOutputStream().write(resp.getBytes("UTF-8"));
                     socket.getOutputStream().flush();
                     return;
@@ -152,33 +178,20 @@ public class AndroidUpnpStream extends UpnpStream {
                         + "TIMEOUT: Second-1800\r\n"
                         + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                         + "CONTENT-LENGTH: 0\r\n\r\n";
-                DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 200 事件订阅(手动) sid=" + sid);
+                DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 事件订阅(手动) sid=" + sid);
                 socket.getOutputStream().write(resp.getBytes("UTF-8"));
                 socket.getOutputStream().flush();
                 // Remember the subscriber's callback URL and push the initial
                 // LastChange event — Windows stalls the cast without it.
-                if ("SUBSCRIBE".equals(request.method)) {
-                    String callback = null;
-                    if (request.headers != null) {
-                        for (java.util.Map.Entry<String, java.util.List<String>> e : request.headers.entrySet()) {
-                            if ("CALLBACK".equalsIgnoreCase(e.getKey())) {
-                                java.util.List<String> vals = e.getValue();
-                                if (vals != null && !vals.isEmpty()) {
-                                    callback = vals.get(0);
-                                }
-                                break;
-                            }
-                        }
+                String callback = headerValue(request, "CALLBACK");
+                if (callback != null) {
+                    int s = callback.indexOf('<');
+                    int e2 = callback.indexOf('>');
+                    if (s >= 0 && e2 > s) {
+                        callback = callback.substring(s + 1, e2).trim();
                     }
-                    if (callback != null) {
-                        int s = callback.indexOf('<');
-                        int e2 = callback.indexOf('>');
-                        if (s >= 0 && e2 > s) {
-                            callback = callback.substring(s + 1, e2).trim();
-                        }
-                    }
-                    GenaNotifier.register(callback, sid);
                 }
+                GenaNotifier.register(service, callback, sid);
                 return;
             }
             DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");
@@ -217,6 +230,18 @@ public class AndroidUpnpStream extends UpnpStream {
 
             responseSent(responseMessage);
 
+        } catch (HttpRequest.RequestTooLarge tooLarge) {
+            // Answered as a status instead of being logged away: the socket is
+            // closed in the finally block either way, but a control point that
+            // sees a clean 4xx re-issues a normal request rather than retrying
+            // whatever it was dribbling.
+            logger.warn("Rejecting oversized request from {}: {}",
+                    socket.getInetAddress(), tooLarge.getMessage());
+            try {
+                writeStatus(socket.getOutputStream(), 413, "Request Entity Too Large");
+            } catch (IOException ioe) {
+                logger.trace("Couldn't send 413: {}", ioe.getMessage());
+            }
         } catch (Exception e) {
             logger.trace("Exception occurred during UPnP stream processing", e);
             try {
@@ -333,6 +358,26 @@ public class AndroidUpnpStream extends UpnpStream {
 
     /** A minimal parsed HTTP request. */
     static class HttpRequest {
+        /** Longest request/header line kept in memory. */
+        private static final int MAX_LINE_BYTES = 8192;
+        /** Most header lines kept in memory. */
+        private static final int MAX_HEADER_LINES = 100;
+        /** Largest body (SOAP envelope) kept in memory. */
+        private static final int MAX_BODY_BYTES = 1024 * 1024;
+
+        /**
+         * The peer sent more than this server is willing to buffer. Without
+         * these caps, one LAN device holding a TCP connection open and dribbling
+         * bytes with no line feed grows a ByteArrayOutputStream until the
+         * foreground service is killed — and every cast running at the time dies
+         * with it. Both cases answer 413 and drop the connection.
+         */
+        static final class RequestTooLarge extends IOException {
+            RequestTooLarge(String what) {
+                super("Request " + what + " too large");
+            }
+        }
+
         String method;
         URI uri;
         boolean http11;
@@ -363,8 +408,12 @@ public class AndroidUpnpStream extends UpnpStream {
                     && parts[2].toUpperCase(Locale.ROOT).equals("HTTP/1.1");
 
             long contentLength = -1;
+            int headerLines = 0;
             String line;
             while ((line = readLine(raw)) != null && !line.isEmpty()) {
+                if (++headerLines > MAX_HEADER_LINES) {
+                    throw new RequestTooLarge("headers");
+                }
                 int colon = line.indexOf(':');
                 if (colon > 0) {
                     String name = line.substring(0, colon).trim();
@@ -379,7 +428,10 @@ public class AndroidUpnpStream extends UpnpStream {
                 }
             }
 
-            if (contentLength > 0 && contentLength <= 1024 * 1024) {
+            if (contentLength > MAX_BODY_BYTES) {
+                throw new RequestTooLarge("body");
+            }
+            if (contentLength > 0) {
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 byte[] buf = new byte[8192];
                 long remaining = contentLength;
@@ -405,6 +457,9 @@ public class AndroidUpnpStream extends UpnpStream {
                     break;
                 }
                 if (c != '\r') {
+                    if (bos.size() >= MAX_LINE_BYTES) {
+                        throw new RequestTooLarge("line");
+                    }
                     bos.write(c);
                 }
             }

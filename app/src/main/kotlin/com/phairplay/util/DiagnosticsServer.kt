@@ -34,7 +34,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * SECURITY, STATED PLAINLY: no authentication, and it answers anything the LAN
  * can reach. That is the trade: the alternative is no diagnostics at all. The
  * payload is this app's own debug text (IPs, SSDP counters, playback URLs) —
- * no media, no credentials, no files from outside `filesDir`. It listens only
+ * no media, no credentials, no files from outside `filesDir`. Every route goes
+ * through [DebugLog.redactUrls] first, because a signed playback URL *is* a
+ * kind of credential and the LAN is not a trusted audience. It listens only
  * while the receiver service is running, which is also the only time there is
  * anything to diagnose.
  */
@@ -109,8 +111,8 @@ object DiagnosticsServer {
             val path = requestLine.split(" ").getOrNull(1)?.substringBefore('?') ?: "/"
             val out = client.getOutputStream()
             when (path) {
-                "/", "/dump" -> plain(out, DebugLog.dump())
-                "/log" -> plain(out, DebugLog.readFile().ifBlank { "(日志为空)" })
+                "/", "/dump" -> plain(out, DebugLog.redactUrls(DebugLog.dump()))
+                "/log" -> plain(out, DebugLog.redactUrls(DebugLog.readFile().ifBlank { "(日志为空)" }))
                 "/tail" -> tail(out)
                 "/clear" -> {
                     DebugLog.clear()
@@ -162,7 +164,7 @@ object DiagnosticsServer {
         var unsubscribe: (() -> Unit)? = null
         try {
             unsubscribe = DebugLog.addListener { line ->
-                synchronized(lock) { chunk(out, line + "\n") }
+                synchronized(lock) { chunk(out, DebugLog.redactUrls(line) + "\n") }
             }
             chunk(out, "── tail 已连接，等待新日志 ──\n")
             while (server != null) {

@@ -6,7 +6,9 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import org.jupnp.transport.Router;
 import org.jupnp.transport.spi.InitializationException;
@@ -38,9 +40,11 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
     private int localPort = -1;
 
     /**
-     * @param listenPort the TCP port to bind; pass the value from
+     * @param listenPort the preferred TCP port; pass the value from
      *                   {@link DlnaUpnpServiceConfiguration#STREAM_LISTEN_PORT}
-     *                   so the renderer is reachable at a known address.
+     *                   so the renderer keeps the address people already know.
+     *                   Taken? Bind ephemerally and report it through
+     *                   {@link #getPort()}.
      */
     public AndroidStreamServer(int listenPort) {
         this.listenPort = listenPort;
@@ -52,9 +56,33 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
             this.router = router;
             serverSocket = new ServerSocket();
             serverSocket.setReuseAddress(true);
-            serverSocket.bind(new InetSocketAddress(bindAddress, listenPort));
+            try {
+                serverSocket.bind(new InetSocketAddress(bindAddress, listenPort));
+            } catch (IOException taken) {
+                // Something else already owns the port — on these boxes it is
+                // usually another casting app. Refusing to start would take the
+                // whole renderer down (the device would not appear in any
+                // picker), whereas an ephemeral port only costs the one thing
+                // that never needed a fixed number: SSDP carries the LOCATION,
+                // and ManualSsdp reads it back from getPort().
+                serverSocket.close();
+                serverSocket = new ServerSocket();
+                serverSocket.setReuseAddress(true);
+                serverSocket.bind(new InetSocketAddress(bindAddress, 0));
+                logger.warn("Port {} is busy, DLNA control server listening on {} instead",
+                        listenPort, serverSocket.getLocalPort());
+            }
             localPort = serverSocket.getLocalPort();
-            executor = Executors.newCachedThreadPool();
+            // Bounded on purpose. A worker lives as long as the client takes to
+            // send its request (30 s socket timeout), so a cached pool lets any
+            // LAN device trade one TCP connection for one thread until the
+            // process runs out of them. When the queue fills up, the accept
+            // thread runs the request itself and stops accepting for a moment —
+            // that is the intended backpressure, and a real control point never
+            // gets near it.
+            executor = new ThreadPoolExecutor(2, 16, 30L, TimeUnit.SECONDS,
+                    new LinkedBlockingQueue<Runnable>(64),
+                    new ThreadPoolExecutor.CallerRunsPolicy());
             logger.debug("AndroidStreamServer bound on {}:{}", bindAddress, localPort);
         } catch (IOException e) {
             throw new InitializationException("Could not initialize AndroidStreamServer: " + e, e);

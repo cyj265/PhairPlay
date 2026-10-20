@@ -198,6 +198,25 @@ object DebugLog {
         }.getOrDefault("")
     } ?: ""
 
+    /** One http(s) URL with a query string, as it appears inside a log line. */
+    private val URL_QUERY = Regex("""(https?://[^"'<>\s?]+)\?[^"'<>\s，,、;；)）]*""")
+
+    /**
+     * Cuts the query string out of every URL in a diagnostic payload.
+     *
+     * A signed CDN URL is a bearer token: whoever reads it off
+     * `http://<box>:8099/` can fetch the same media until it expires, and on the
+     * 视频 platforms those URLs come from the casting phone's own session. The
+     * path alone is still enough to tell which host/CDN answered and whether the
+     * ticket was the problem, so nothing else about the line changes. Applied at
+     * the LAN exits only — the in-app dialog keeps the full URL, because that is
+     * the copy the user pastes to us when something must be reproduced.
+     */
+    @JvmStatic
+    fun redactUrls(text: String): String = URL_QUERY.replace(text) {
+        it.groupValues[1] + "?<查询串已脱敏>"
+    }
+
     /** Full diagnostic text shown in the settings dialog. */
     @JvmStatic
     fun dump(): String {

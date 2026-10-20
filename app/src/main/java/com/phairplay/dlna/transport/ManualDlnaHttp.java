@@ -28,11 +28,53 @@ import java.util.regex.Pattern;
  */
 public final class ManualDlnaHttp {
 
-    // Standard UUID format: Windows / libupnp reject UDNs that are not a
-    // valid UUID (the old "uuid-phairplay-dlna-renderer" was silently dropped
-    // by Windows Play To and VLC after the full discovery handshake).
-    public static final String UDN = "6f61c845-1dd2-11b2-8f7b-001185123456";
-    public static final String BASE = "/upnp/dev/" + UDN;
+    /**
+     * This device's UPnP identity: its UDN and the URL prefix built from it.
+     *
+     * v122 — two changes here.
+     *
+     * (1) One source of truth. The UDN and the "/upnp/dev/&lt;udn&gt;" prefix
+     * were constants duplicated in {@link ManualSsdp} (which spelled the
+     * descriptor path out a third time) and again in DlnaReceiver's jUPnP
+     * {@code DeviceIdentity}. A change that missed one copy makes SSDP
+     * advertise a LOCATION the HTTP layer answers 404 on: the box shows up in
+     * the picker and every cast to it fails.
+     *
+     * (2) Per box, not per app. Every install shipped the same UDN, and the UDN
+     * is the primary key a control point stores a device under — two PhairPlay
+     * boxes on one LAN collapse into a single picker entry whose LOCATION is
+     * whichever box answered last, so casts land on the wrong TV or flap
+     * between the two. The value is now derived from the box's ANDROID_ID;
+     * boxes where that id is absent or the well-known ROM default keep the old
+     * constant, which is no worse than today.
+     *
+     * Held as one immutable pair so a descriptor can never be generated from a
+     * UDN while the request matching uses a different prefix.
+     */
+    private static final class Identity {
+        final String udn;
+        final String base;
+
+        Identity(String udn) {
+            this.udn = udn;
+            this.base = "/upnp/dev/" + udn;
+        }
+    }
+
+    /**
+     * The identity every PhairPlay build advertised until v122. Kept as the
+     * fallback so a box with no usable ANDROID_ID still behaves.
+     */
+    public static final String DEFAULT_UDN = "6f61c845-1dd2-11b2-8f7b-001185123456";
+
+    /** {@link #DEFAULT_UDN}'s descriptor prefix, for consumers that need a
+     *  compile-time constant (see {@link ManualSsdp}). */
+    public static final String DEFAULT_BASE = "/upnp/dev/" + DEFAULT_UDN;
+
+    private static volatile Identity identity = new Identity(DEFAULT_UDN);
+
+    /** &lt;friendlyName&gt; — the name a sender's picker shows for this box. */
+    private static volatile String friendlyName = "PhairPlay";
     public static final String AVT = "urn:schemas-upnp-org:service:AVTransport:1";
     public static final String RC = "urn:schemas-upnp-org:service:RenderingControl:1";
     public static final String CM = "urn:schemas-upnp-org:service:ConnectionManager:1";
@@ -86,13 +128,25 @@ public final class ManualDlnaHttp {
         }
         return sb.append("</allowedValueList>").toString();
     }
-    private static final Pattern P_TAG = Pattern.compile("<([A-Za-z0-9_]+)>([^<]*)</\\1>");
-    private static final Pattern P_TAG_NS = Pattern.compile("<([A-Za-z_][\\w.-]*):([A-Za-z0-9_]+)>([^<]*)</[A-Za-z_][\\w.-]*:\\2>");
-
     private static volatile String currentUri = "";
     private static volatile String transportState = "STOPPED"; // NO_MEDIA_PRESENT/STOPPED/PLAYING/PAUSED_PLAYBACK — Windows PlayTo 只认 STOPPED 为就绪
+    /**
+     * v122 — AVTransport#TransportStatus, the third field of GetTransportInfo.
+     *
+     * It used to be a literal "OK" in both the polling response and the GENA
+     * event, so a rejected Play was reported as a healthy stream and the
+     * sender kept waiting. ERROR_OCCURRED is the value the SCPD at
+     * {@link #avtScpd()} already advertises; nothing ever produced it.
+     */
+    private static volatile String transportStatus = "OK";
     private static volatile long positionSeconds = 0;
     private static volatile int volume = 50;
+    /**
+     * Whether the sender has muted us. SetMute used to answer 200 and do
+     * nothing, so the phone showed a muted renderer that kept playing at full
+     * volume — and a RenderingControl event could only have reported the lie.
+     */
+    private static volatile boolean muted = false;
 
     /**
      * v99-④ — bumped by every SetAVTransportURI so the auto-start timer below
@@ -116,8 +170,52 @@ public final class ManualDlnaHttp {
     private ManualDlnaHttp() {
     }
 
+    /** The UDN without its "uuid:" prefix, as advertised in the descriptor. */
+    public static String getUdn() {
+        return identity.udn;
+    }
+
+    /** This device's URL prefix, "/upnp/dev/&lt;udn&gt;". */
+    public static String getBase() {
+        return identity.base;
+    }
+
+    public static String getFriendlyName() {
+        return friendlyName;
+    }
+
+    /**
+     * Publish this box's identity and picker name. Called from
+     * {@code DlnaReceiver#start}, i.e. once per session before the HTTP server
+     * binds and before the first SSDP announcement — a blank or absent value
+     * keeps the previous one rather than producing a device no sender can name.
+     */
+    public static void setIdentity(String udn, String name) {
+        if (udn != null && !udn.trim().isEmpty()) {
+            identity = new Identity(udn.trim());
+        }
+        if (name != null && !name.trim().isEmpty()) {
+            friendlyName = name.trim();
+        }
+    }
+
     public static String getTransportState() {
         return transportState;
+    }
+
+    /** AVTransport#TransportStatus for GetTransportInfo and the GENA event. */
+    public static String getTransportStatus() {
+        return transportStatus;
+    }
+
+    /** RenderingControl#Volume, as the last SetVolume left it. */
+    public static int getVolume() {
+        return volume;
+    }
+
+    /** RenderingControl#Mute, as the last SetMute left it. */
+    public static boolean isMuted() {
+        return muted;
     }
 
     /**
@@ -143,6 +241,7 @@ public final class ManualDlnaHttp {
      */
     public static void markPlaying() {
         transportState = "PLAYING";
+        transportStatus = "OK";
         GenaNotifier.pushAsync();
         GenaNotifier.startProgressTicker();
     }
@@ -229,6 +328,7 @@ public final class ManualDlnaHttp {
                         c.startPlaybackAuto(uri);
                     }
                     transportState = "PLAYING";
+                    transportStatus = "OK";
                     GenaNotifier.pushAsync();
                     GenaNotifier.startProgressTicker();
                 } catch (Throwable ignored) {
@@ -242,26 +342,28 @@ public final class ManualDlnaHttp {
     }
 
     public static boolean isDeviceDesc(String path) {
-        return (BASE + "/desc").equals(path);
+        return (identity.base + "/desc").equals(path);
     }
 
     public static boolean isScpd(String path) {
-        return path.startsWith(BASE + "/svc/") && path.endsWith("/desc");
+        return path.startsWith(identity.base + "/svc/") && path.endsWith("/desc");
     }
 
     public static boolean isAction(String path) {
-        return path.startsWith(BASE + "/svc/") && path.endsWith("/action");
+        return path.startsWith(identity.base + "/svc/") && path.endsWith("/action");
     }
 
     /** Any service URL (/desc, /action, /event): used for GENA SUBSCRIBE. */
     public static boolean isService(String path) {
-        return path.startsWith(BASE + "/svc/");
+        return path.startsWith(identity.base + "/svc/");
     }
 
-    /** The service id segment of a /svc/ URL, e.g. "AVTransport". */
-    private static String serviceOf(String path) {
+    /** The service id segment of a /svc/ URL, e.g. "AVTransport".
+     *  Public because GENA subscriptions are keyed the same way
+     *  ({@link GenaNotifier}). */
+    public static String serviceOf(String path) {
         // /upnp/dev/<udn>/svc/<ns>/<svc>/desc|action
-        String rest = path.substring(BASE.length() + "/svc/".length());
+        String rest = path.substring(identity.base.length() + "/svc/".length());
         String[] parts = rest.split("/");
         return parts.length >= 2 ? parts[1] : "";
     }
@@ -269,35 +371,43 @@ public final class ManualDlnaHttp {
     // ─────────────────────────────── device descriptor ───────────────────────────────
 
     public static String deviceDescriptorXml() {
+        // One snapshot: the UDN and every service URL must describe the same
+        // device, and a sender that fetches a descriptor advertising URLs under
+        // a different prefix than its own UDN fails on the first action.
+        Identity id = identity;
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             + "<root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">\n"
             + "  <specVersion><major>1</major><minor>0</minor></specVersion>\n"
             + "  <device>\n"
             + "    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>\n"
-            + "    <friendlyName>PhairPlay</friendlyName>\n"
+            // v122: was a hard-coded "PhairPlay", so the displayName setting
+            // (and the Android device name it falls back to) never reached a
+            // DLNA picker even though DlnaReceiver was handed exactly the value
+            // the AirPlay mDNS advertises, and logged "advertising as: <name>".
+            + "    <friendlyName>" + xmlEscape(friendlyName) + "</friendlyName>\n"
             + "    <manufacturer>PhairPlay</manufacturer>\n"
             + "    <manufacturerURL>https://github.com/cyj265/PhairPlay</manufacturerURL>\n"
             + "    <modelDescription>PhairPlay DLNA Media Renderer</modelDescription>\n"
             + "    <modelName>PhairPlay</modelName>\n"
             + "    <modelNumber>1.0</modelNumber>\n"
             + "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
-            + "    <UDN>uuid:" + UDN + "</UDN>\n"
+            + "    <UDN>uuid:" + id.udn + "</UDN>\n"
             + "    <serviceList>\n"
-            + serviceEntry(AVT, "AVTransport")
-            + serviceEntry(RC, "RenderingControl")
-            + serviceEntry(CM, "ConnectionManager")
+            + serviceEntry(AVT, "AVTransport", id.base)
+            + serviceEntry(RC, "RenderingControl", id.base)
+            + serviceEntry(CM, "ConnectionManager", id.base)
             + "    </serviceList>\n"
             + "  </device>\n"
             + "</root>\n";
     }
 
-    private static String serviceEntry(String type, String id) {
+    private static String serviceEntry(String type, String id, String base) {
         return "      <service>\n"
             + "        <serviceType>" + type + "</serviceType>\n"
             + "        <serviceId>urn:upnp-org:serviceId:" + id + "</serviceId>\n"
-            + "        <SCPDURL>" + BASE + "/svc/upnp-org/" + id + "/desc</SCPDURL>\n"
-            + "        <controlURL>" + BASE + "/svc/upnp-org/" + id + "/action</controlURL>\n"
-            + "        <eventSubURL>" + BASE + "/svc/upnp-org/" + id + "/event</eventSubURL>\n"
+            + "        <SCPDURL>" + base + "/svc/upnp-org/" + id + "/desc</SCPDURL>\n"
+            + "        <controlURL>" + base + "/svc/upnp-org/" + id + "/action</controlURL>\n"
+            + "        <eventSubURL>" + base + "/svc/upnp-org/" + id + "/event</eventSubURL>\n"
             + "      </service>\n";
     }
 
@@ -416,6 +526,13 @@ public final class ManualDlnaHttp {
             + "    <stateVariable sendEvents=\"no\"><name>CurrentTrackURI</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>\n"
+            // Declared because the LastChange we push carries them (see
+            // GenaNotifier#push): a control point that validates evented
+            // variables against this table drops the whole event when one is
+            // missing, and Windows "Play To" does exactly that.
+            + "    <stateVariable sendEvents=\"no\"><name>RelativeTimePosition</name><dataType>string</dataType></stateVariable>\n"
+            + "    <stateVariable sendEvents=\"no\"><name>AbsoluteTimePosition</name><dataType>string</dataType></stateVariable>\n"
+            + "    <stateVariable sendEvents=\"no\"><name>CurrentMediaDuration</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>PlayMedium</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>RecordMedium</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>WriteStatus</name><dataType>string</dataType></stateVariable>\n"
@@ -574,7 +691,23 @@ public final class ManualDlnaHttp {
             if (q > 0) path = path.substring(0, q);
             int slash = path.lastIndexOf('/');
             String name = slash >= 0 ? path.substring(slash + 1) : path;
-            return java.net.URLDecoder.decode(name, "UTF-8");
+            name = java.net.URLDecoder.decode(name, "UTF-8");
+            // The card is read by a person, not a file manager: an audio cast
+            // that arrives as M500003XFddH3QFNkO.mp3 should show the stem.
+            int dot = name.lastIndexOf('.');
+            if (dot > 0 && name.length() - dot <= 6) {
+                boolean plainExt = true;
+                for (int i = dot + 1; i < name.length(); i++) {
+                    if (!Character.isLetterOrDigit(name.charAt(i))) {
+                        plainExt = false;
+                        break;
+                    }
+                }
+                if (plainExt) {
+                    name = name.substring(0, dot);
+                }
+            }
+            return name;
         } catch (Throwable t) {
             return null;
         }
@@ -596,9 +729,6 @@ public final class ManualDlnaHttp {
                     DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI 提取失败 body=" + safeBodyPreview(body));
                     return null;
                 }
-                currentUri = uri;
-                transportState = "STOPPED";
-                positionSeconds = 0;
                 DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
                 // v101-⑦: while the user has this exact item paused, a re-send
                 // of the same URI is the sender confirming state, not a new
@@ -608,27 +738,39 @@ public final class ManualDlnaHttp {
                 // just paused would come back by itself. A Play for the same
                 // URI is still honoured; only the Set is ignored. A different
                 // URI is a genuine change of item and goes through.
+                //
+                // v122: this guard used to sit *after* the state assignments
+                // below, so its early return protected only the auto-start.
+                // The transport was already STOPPED and the position already
+                // zeroed by the time we said "ignored" - which is the paused
+                // picture being knocked back to stopped on every re-confirm.
+                // Nothing may be mutated before this check.
                 com.phairplay.dlna.renderer.DlnaPlayerControl pausedCheck = DlnaPlayerBridge.get();
                 if (pausedCheck != null && pausedCheck.isUserPaused(uri)) {
                     DebugLog.INSTANCE.log("SOAP", "暂停中收到同 URI SetAVTransportURI → 忽略（不重置状态、不调度自动起播）");
                     return avtResponse("SetAVTransportURIResponse", "");
                 }
-                // DIDL-Lite metadata (title/artist/cover) — the only place the
-                // sender tells us what this item IS. Without it an audio cast
-                // can only show a black screen, and the UI has no way to offer
-                // a "back to playback" label. Fall back to the file name so the
-                // music card is never blank.
+                currentUri = uri;
+                transportState = "STOPPED";
+                transportStatus = "OK";
+                positionSeconds = 0;
+                // DIDL-Lite metadata (title/artist/cover) — what the sender says
+                // this item IS. Without it an audio cast can only show a black
+                // screen, and the UI has no way to offer a "back to playback"
+                // label. The three sources are handed over separately: a phone
+                // music app's cache file is named after a hash, so the file name
+                // has to stay below the tags the media file carries itself
+                // (see DlnaMediaMeta).
                 String meta = tag(body, "CurrentURIMetaData");
                 String title = null, artist = null, artUri = null;
                 if (meta != null && !meta.isEmpty()) {
                     String m = xmlUnescape(meta);
-                    title = tag(m, "dc:title");
-                    artist = tag(m, "upnp:artist");
-                    artUri = tag(m, "upnp:albumArtURI");
+                    title = tag(m, "title");
+                    artist = tag(m, "artist");
+                    artUri = tag(m, "albumArtURI");
                 }
-                com.phairplay.dlna.DlnaMediaMeta.setMeta(
-                    (title != null && !title.isEmpty()) ? title : guessTitle(uri),
-                    artist, artUri);
+                com.phairplay.dlna.DlnaMediaMeta.setSenderMeta(
+                    title, artist, artUri, guessTitle(uri));
                 // v99-④: a sender that sets an item and never says Play should
                 // still get playback, three seconds after it stopped talking.
                 scheduleAutoStart(uri, setUriGeneration.incrementAndGet());
@@ -639,18 +781,40 @@ public final class ManualDlnaHttp {
                     return avtResponse("PlayResponse", "");
                 }
                 com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
-                if (c != null) {
+                boolean refused = c == null;
+                if (!refused) {
                     try {
                         c.startPlayback(currentUri);
                     } catch (Throwable t) {
-                        // surface errors as STOPPED, keep server alive
+                        refused = true;
+                        DebugLog.INSTANCE.log("SOAP", "Play 起播调用异常: " + t);
                     }
                 }
+                if (refused) {
+                    // v122: do not answer a Play we could not carry out with
+                    // PLAYING. ERROR_OCCURRED is what the SCPD advertises for
+                    // exactly this, and pushing it lets an event-driven sender
+                    // stop polling a stream that never began. Scope is honest:
+                    // this only covers a failure observable here — a player
+                    // error after startPlayback returns still arrives through
+                    // notifyPlaybackEnded().
+                    transportState = "STOPPED";
+                    transportStatus = "ERROR_OCCURRED";
+                    GenaNotifier.pushAsync();
+                    return avtResponse("PlayResponse", "");
+                }
                 transportState = "PLAYING";
+                transportStatus = "OK";
                 GenaNotifier.pushAsync();
                 return avtResponse("PlayResponse", "");
             }
             case "Pause": {
+                // v122: an explicit Pause must veto the auto-start timer that
+                // SetAVTransportURI armed; otherwise it fires 3 s later and
+                // restarts the item that was just paused. Stop/Pause used to
+                // leave setUriGeneration untouched, so the only caller of
+                // cancelPendingAutoStart() was the UI close path.
+                cancelPendingAutoStart();
                 com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
                 if (c != null) {
                     try {
@@ -659,10 +823,14 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "PAUSED_PLAYBACK";
+                transportStatus = "OK";
                 GenaNotifier.pushAsync();
                 return avtResponse("PauseResponse", "");
             }
             case "Stop": {
+                // v122: see Pause — the pending auto-start is the reason a
+                // stopped item came back by itself.
+                cancelPendingAutoStart();
                 com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
                 if (c != null) {
                     try {
@@ -671,6 +839,7 @@ public final class ManualDlnaHttp {
                     }
                 }
                 transportState = "STOPPED";
+                transportStatus = "OK";
                 positionSeconds = 0;
                 GenaNotifier.pushAsync();
                 return avtResponse("StopResponse", "");
@@ -710,7 +879,7 @@ public final class ManualDlnaHttp {
             case "GetTransportInfo": {
                 return avtResponse("GetTransportInfoResponse",
                     "<CurrentTransportState>" + transportState + "</CurrentTransportState>"
-                        + "<CurrentTransportStatus>OK</CurrentTransportStatus>"
+                        + "<CurrentTransportStatus>" + transportStatus + "</CurrentTransportStatus>"
                         + "<CurrentSpeed>1</CurrentSpeed>");
             }
             case "GetPositionInfo": {
@@ -817,27 +986,42 @@ public final class ManualDlnaHttp {
                     } catch (NumberFormatException ignored) {
                     }
                 }
-                // Keep the jUPnP-side volume state and the live player in sync,
-                // otherwise a remote SetVolume is silently ignored (the player
-                // only ever read DlnaAudioRenderingControl's separate state).
-                com.phairplay.dlna.renderer.DlnaAudioRenderingControl.setVolumeValue(volume);
-                com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
-                if (pc != null) {
-                    try {
-                        pc.setVolumePercent(volume);
-                    } catch (Throwable ignored) {
-                    }
-                }
+                applyVolume();
+                // The sender that set it is not the only one watching: another
+                // control point subscribed to RenderingControl has to hear about
+                // this or its slider keeps showing the old number.
+                GenaNotifier.pushVolumeAsync();
                 return rcResponse("SetVolumeResponse", "");
             }
             case "GetMute": {
-                return rcResponse("GetMuteResponse", "<CurrentMute>0</CurrentMute>");
+                return rcResponse("GetMuteResponse",
+                        "<CurrentMute>" + (muted ? "1" : "0") + "</CurrentMute>");
             }
             case "SetMute": {
+                String m = tag(body, "DesiredMute");
+                muted = "1".equals(m) || "true".equalsIgnoreCase(m);
+                applyVolume();
+                GenaNotifier.pushVolumeAsync();
                 return rcResponse("SetMuteResponse", "");
             }
             default:
                 return null;
+        }
+    }
+
+    /**
+     * Hand the current volume/mute to the live player and to the jUPnP-side
+     * state, which the player used to be the only reader of — a remote
+     * SetVolume was silently ignored because these two never met.
+     */
+    private static void applyVolume() {
+        com.phairplay.dlna.renderer.DlnaAudioRenderingControl.setVolumeValue(volume);
+        com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+        if (pc != null) {
+            try {
+                pc.setVolumePercent(muted ? 0 : volume);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -933,9 +1117,58 @@ public final class ManualDlnaHttp {
      *  control points see STOPPED instead of a stuck PLAYING state. */
     public static void notifyPlaybackEnded() {
         transportState = "STOPPED";
+        // The device itself is healthy — only this item finished. Clearing the
+        // flag here also stops a Play failure's ERROR_OCCURRED from outliving
+        // the item it referred to.
+        transportStatus = "OK";
         positionSeconds = 0;
         GenaNotifier.pushAsync();
         GenaNotifier.stopProgressTicker();
+    }
+
+    /**
+     * The item stopped because the player refused it, not because it finished.
+     *
+     * v122 — {@link #notifyPlaybackEnded()} alone told the sender "STOPPED, all
+     * fine", so a cast that died on a dead URL or a refusal looked exactly like
+     * the user pressing stop, and nothing on the phone said "换源". UPnP has a
+     * field for this and we now fill it: the state is still STOPPED, the status
+     * says the device hit an error. A silent retry that succeeds calls
+     * {@link #markPlaying()}, which puts the status back to OK, so a transient
+     * blip never leaves this hanging.
+     */
+    public static void notifyPlaybackError() {
+        transportState = "STOPPED";
+        transportStatus = "ERROR_OCCURRED";
+        positionSeconds = 0;
+        GenaNotifier.pushAsync();
+        GenaNotifier.stopProgressTicker();
+    }
+
+    /**
+     * v122 — drop the control-plane state a previous receiver session left
+     * behind, for the rebuild paths ({@code DlnaReceiver#start} after an IP
+     * change, {@code stopPlaybackFromUi}).
+     *
+     * Everything above is process-static, so a rebuild used to inherit the old
+     * session's transport state and timers: the SSDP LOCATION and descriptor
+     * were freshly advertised while GetTransportInfo still answered PLAYING for
+     * a URI that no player owns any more, and a timer scheduled before the
+     * teardown could still fire after it.
+     *
+     * Kept on purpose: {@code currentUri} (a rebuilt receiver is expected to
+     * carry on with the same item) and {@code volume} (whatever the sender last
+     * set is still the box's volume).
+     */
+    public static void reset() {
+        // Void every auto-start counting down for the old session.
+        setUriGeneration.incrementAndGet();
+        transportState = "STOPPED";
+        transportStatus = "OK";
+        positionSeconds = 0;
+        // The old subscriber's socket died with the old address; pushing events
+        // there would only burn the failure budget that releases the SID.
+        GenaNotifier.unsubscribe();
     }
 
     private static String extractAction(String body) {
@@ -955,24 +1188,38 @@ public final class ManualDlnaHttp {
         return null;
     }
 
+    /**
+     * v122 — one tag lookup for SOAP arguments and DIDL-Lite fields alike.
+     *
+     * Prefix-agnostic (asking for "title" matches {@code <dc:title>} and a bare
+     * {@code <title>}) and attribute-tolerant (so
+     * {@code <upnp:albumArtURI dlna:profileID="*">} parses). The previous two
+     * patterns split on ':' and compared the queried string against the LOCAL
+     * name, so a call site that passed "dc:title" could never match anything —
+     * DIDL metadata was silently dropped for every sender that did send it and
+     * the music card fell back to the file name.
+     *
+     * Patterns are cached because this runs on the socket thread once per
+     * argument per action.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Pattern> TAG_PATTERNS =
+            new java.util.concurrent.ConcurrentHashMap<String, Pattern>();
+
     private static String tag(String body, String name) {
-        if (body == null) {
+        if (body == null || name == null || name.isEmpty()) {
             return null;
         }
-        Matcher m = P_TAG.matcher(body);
-        while (m.find()) {
-            if (name.equals(m.group(1))) {
-                String v = m.group(2);
-                return v == null ? "" : xmlUnescape(v);
-            }
+        String q = Pattern.quote(name);
+        Pattern p = TAG_PATTERNS.get(name);
+        if (p == null) {
+            p = Pattern.compile("<(?:[\\w.-]+:)?" + q + "(?:\\s[^>]*)?>([^<]*)"
+                    + "</(?:[\\w.-]+:)?" + q + "\\s*>");
+            TAG_PATTERNS.put(name, p);
         }
-        // Some control points namespace the arguments, e.g. <u:CurrentURI>.
-        Matcher pm = P_TAG_NS.matcher(body);
-        while (pm.find()) {
-            if (name.equals(pm.group(2))) {
-                String v = pm.group(3);
-                return v == null ? "" : xmlUnescape(v);
-            }
+        Matcher m = p.matcher(body);
+        if (m.find()) {
+            String v = m.group(1);
+            return v == null ? "" : xmlUnescape(v);
         }
         return null;
     }

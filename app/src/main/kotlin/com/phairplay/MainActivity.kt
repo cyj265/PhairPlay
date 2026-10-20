@@ -636,6 +636,14 @@ class MainActivity : AppCompatActivity() {
     private var musicArtistView: TextView? = null
     private var musicProgressView: android.widget.ProgressBar? = null
     private var musicTimeView: TextView? = null
+    private var musicBitrateView: TextView? = null
+
+    /** Last cover source applied, so the 2 Hz tick neither refetches nor
+     *  redisplays it — and so a cast without art can be told apart from one
+     *  whose art is still in flight. */
+    private var musicArtSource: Any? = null
+    /** Bumped per cover request; a late answer from an older one is dropped. */
+    private var musicArtToken = 0
 
     /**
      * A music player card for audio-only casts (网易云/QQ音乐 投屏音乐).
@@ -692,6 +700,11 @@ class MainActivity : AppCompatActivity() {
             val v = (6 * resources.displayMetrics.density).toInt()
             setPadding(0, v, 0, v)
         }
+        musicBitrateView = TextView(this).apply {
+            setTextColor(0xFF999999.toInt())
+            textSize = 15f
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        }
         val hint = TextView(this).apply {
             text = "OK 播放/暂停 · ← → 快退/快进 · 菜单 设置 · 返回 回到首页"
             setTextColor(0xFF888888.toInt())
@@ -703,6 +716,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(musicArtistView)
         card.addView(musicProgressView)
         card.addView(musicTimeView)
+        card.addView(musicBitrateView)
         card.addView(hint)
         dlnaMusicView = card
         streamingContainer.addView(
@@ -727,15 +741,17 @@ class MainActivity : AppCompatActivity() {
         card.visibility = if (visible) View.VISIBLE else View.GONE
         if (!visible) return
         card.bringToFront()
+        val p = dlnaPlayerView?.player
+        p?.mediaMetadata?.let { syncEmbeddedTags(it) }
         musicTitleView?.text = DlnaMediaMeta.title ?: "正在播放"
         musicArtistView?.text = DlnaMediaMeta.artist ?: "来自 DLNA 投屏"
-        val p = dlnaPlayerView?.player
         val pos = (p?.currentPosition ?: 0L).coerceAtLeast(0L)
         val dur = p?.duration?.takeIf { it > 0L } ?: 0L
         musicProgressView?.progress = if (dur > 0L) (pos * 1000L / dur).toInt() else 0
         musicTimeView?.text = "${fmtTime(pos)} / ${if (dur > 0L) fmtTime(dur) else "--:--"}" +
             if (p?.playWhenReady == true) "" else "  (已暂停)"
-        loadAlbumArt(DlnaMediaMeta.albumArtUri)
+        musicBitrateView?.text = audioBitrateLabel(p) ?: ""
+        showAlbumArt(DlnaMediaMeta.albumArtUri, DlnaMediaMeta.embeddedArt)
     }
 
     private fun fmtTime(ms: Long): String {
@@ -743,28 +759,140 @@ class MainActivity : AppCompatActivity() {
         return String.format("%02d:%02d", total / 60, total % 60)
     }
 
-    /** Fetches the cover art once per URI (best effort; never blocks the UI). */
-    private fun loadAlbumArt(uri: String?) {
+    private var lastTagTitle: CharSequence? = null
+    private var lastTagArtist: CharSequence? = null
+    private var lastTagArt: ByteArray? = null
+
+    /**
+     * Hand the tags Media3 read out of the file itself (ID3 for mp3, covr for
+     * m4a) to [DlnaMediaMeta], so a sender that sent no DIDL-Lite still gets a
+     * real title, artist and cover instead of a cache-file hash.
+     *
+     * Compared by identity because this runs on a 2 Hz tick: rediscovering the
+     * same cover twice a second would mean decoding it twice a second.
+     */
+    private fun syncEmbeddedTags(mm: androidx.media3.common.MediaMetadata) {
+        if (mm.title === lastTagTitle && mm.artist === lastTagArtist &&
+            mm.artworkData === lastTagArt
+        ) {
+            return
+        }
+        lastTagTitle = mm.title
+        lastTagArtist = mm.artist
+        lastTagArt = mm.artworkData
+        DlnaMediaMeta.setTagMeta(mm.title?.toString(), mm.artist?.toString(), mm.artworkData)
+    }
+
+    /**
+     * Bitrate of the audio actually being played, or null when the source
+     * doesn't say — a live radio stream usually doesn't, and a blank beats an
+     * invented number.
+     */
+    private fun audioBitrateLabel(p: androidx.media3.common.Player?): String? {
+        var total = 0
+        for (group in p?.currentTracks?.groups ?: return null) {
+            if (group.type != androidx.media3.common.C.TRACK_TYPE_AUDIO || !group.isSelected) {
+                continue
+            }
+            for (i in 0 until group.length) {
+                if (!group.isTrackSelected(i)) continue
+                val bitrate = group.getTrackFormat(i).bitrate
+                if (bitrate > 0) total += bitrate
+            }
+        }
+        return if (total > 0) "${total / 1000} kb/s" else null
+    }
+
+    /** Covers are shown at 220 dp; past this size they only cost memory. */
+    private val maxArtPx = 512
+    private val maxArtBytes = 4 * 1024 * 1024
+
+    /**
+     * Apply the cover: the URL the sender gave us, else the artwork embedded in
+     * the media, else — and this is what used to be missing — the placeholder
+     * again. Returning early when an item has no art left the *previous* song's
+     * cover on screen, which is a wrong answer rather than a missing one.
+     *
+     * Best effort and off the main thread; never blocks playback.
+     */
+    private fun showAlbumArt(uri: String?, embedded: ByteArray?) {
         val view = musicArtView ?: return
-        if (uri.isNullOrBlank()) return
-        if (view.tag == uri) return
-        view.tag = uri
+        val remote = uri?.takeIf { it.isNotBlank() }
+        val local = embedded?.takeIf { it.isNotEmpty() }
+        val source: Any? = remote ?: local
+        if (source === musicArtSource) return
+        musicArtSource = source
+        if (source == null) {
+            showArtPlaceholder(view)
+            return
+        }
+        val token = ++musicArtToken
         Thread {
-            try {
-                val conn = java.net.URL(uri).openConnection()
-                conn.connectTimeout = 5000
-                conn.readTimeout = 8000
-                val bmp = android.graphics.BitmapFactory.decodeStream(conn.getInputStream())
-                if (bmp != null) {
-                    runOnUiThread {
-                        view.setImageBitmap(bmp)
-                        view.imageTintList = null
-                    }
+            val bytes = try {
+                if (remote == null) {
+                    local
+                } else {
+                    val conn = java.net.URL(remote).openConnection()
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 8000
+                    conn.getInputStream().use { readLimited(it, maxArtBytes) }
                 }
             } catch (t: Throwable) {
                 // A missing/expired cover is not worth failing playback over.
+                null
+            }
+            val bmp = bytes?.let { decodeArt(it) }
+            runOnUiThread {
+                if (token != musicArtToken) return@runOnUiThread
+                if (bmp != null) {
+                    view.setImageBitmap(bmp)
+                    view.imageTintList = null
+                } else {
+                    showArtPlaceholder(view)
+                }
             }
         }.start()
+    }
+
+    private fun showArtPlaceholder(view: android.widget.ImageView) {
+        view.setImageResource(android.R.drawable.ic_media_play)
+        view.imageTintList = android.content.res.ColorStateList.valueOf(0xFF8A8A8A.toInt())
+    }
+
+    /** Decodes a cover, sampling down so a 3000 px embedded image can't OOM. */
+    private fun decodeArt(bytes: ByteArray): android.graphics.Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= maxArtPx &&
+            bounds.outHeight / (sample * 2) >= maxArtPx
+        ) {
+            sample *= 2
+        }
+        return try {
+            android.graphics.BitmapFactory.decodeByteArray(
+                bytes, 0, bytes.size,
+                android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            )
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** Reads at most [limit] bytes; a cover is never worth an unbounded download. */
+    private fun readLimited(input: java.io.InputStream, limit: Int): ByteArray? {
+        val out = java.io.ByteArrayOutputStream(8 * 1024)
+        val buf = ByteArray(8 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > limit) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     // ─── "Back to playback" entry point ──────────────────────────────────

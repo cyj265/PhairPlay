@@ -51,10 +51,18 @@ public final class ManualSsdp {
         "urn:schemas-upnp-org:service:ConnectionManager:1",
     };
     // Standard UUID format — Windows/VLC drop non-UUID UDNs.
-    public static final String UDN_FULL = "uuid:6f61c845-1dd2-11b2-8f7b-001185123456";
-    public static final String USN = UDN_FULL + "::" + DEVICE_TYPE;
-    public static final String DESC_PATH =
-            "/upnp/dev/6f61c845-1dd2-11b2-8f7b-001185123456/desc";
+    //
+    // v122: this used to be three constants that copy-pasted the same UDN a
+    // second and third time (USN concatenated from it, DESC_PATH spelled the
+    // whole descriptor path out by hand). Now the identity is read from
+    // ManualDlnaHttp in start(), so SSDP can never advertise a LOCATION the
+    // HTTP layer 404s on — which is what a half-finished edit here used to
+    // produce: the box shows up in the picker and every cast to it fails.
+    // The per-instance defaults keep a ManualSsdp that was never started from
+    // announcing anything odd.
+    private String udnFull = "uuid:" + ManualDlnaHttp.DEFAULT_UDN;
+    private String deviceUsn = udnFull + "::" + DEVICE_TYPE;
+    private String descriptorPath = ManualDlnaHttp.DEFAULT_BASE + "/desc";
 
     private static final long ALIVE_INTERVAL_SECONDS = 30;
 
@@ -86,9 +94,11 @@ public final class ManualSsdp {
             this.boundPort = boundPort;
         }
 
-        /** LOCATION advertised on this face — the renderer's HTTP control URL. */
-        String location(int httpPort) {
-            return "http://" + ip.getHostAddress() + ":" + httpPort + DESC_PATH;
+        /** The face's own address only; the advertised LOCATION needs this
+         *  instance's descriptor path, so it is built by
+         *  {@link ManualSsdp#locationOf(Face)}. */
+        String hostUrl(int httpPort) {
+            return "http://" + ip.getHostAddress() + ":" + httpPort;
         }
 
         String label() {
@@ -106,16 +116,61 @@ public final class ManualSsdp {
             new java.util.concurrent.atomic.AtomicInteger();
     private ScheduledExecutorService notifier;
     private volatile String location = "";
-    /** Port the DLNA HTTP control server listens on (must match AndroidStreamServer). */
-    private volatile int httpPort = 8899;
+    /** Port the DLNA HTTP control server listens on — what it really bound,
+     *  passed in by {@link #start(String, int)} and corrected by
+     *  {@link #setHttpPort(int)}; the constant in
+     *  {@link DlnaUpnpServiceConfiguration} is only what it asked for. */
+    private volatile int httpPort = DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT;
 
-    /** Joins the multicast group on every LAN face and starts advertising. */
-    public synchronized void start(String ip) {
+    /**
+     * The LOCATION announced for one face: that face's address plus this
+     * session's descriptor path. Built here rather than on {@link Face} because
+     * the path belongs to the identity, which lives on this instance.
+     */
+    private String locationOf(Face f) {
+        return f.hostUrl(httpPort) + descriptorPath;
+    }
+
+    /**
+     * Correct the announced port once the control server has actually bound, and
+     * re-announce at once. Discovery starts before the server does — on purpose,
+     * it must not depend on jUPnP coming up — so a control point that already
+     * cached a LOCATION on the preferred port would keep 404ing until the next
+     * 30s alive cycle.
+     */
+    public synchronized void setHttpPort(int port) {
+        if (port <= 0 || port == httpPort || !running || faces.isEmpty()) {
+            return;
+        }
+        httpPort = port;
+        location = locationOf(faces.get(0));
+        DebugLog.INSTANCE.setSsdpLocation(location);
+        DebugLog.INSTANCE.log("SSDP", "控制端口改为 " + port + "，重新宣告 LOCATION=" + location);
+        broadcastAlive();
+    }
+
+    /**
+     * Joins the multicast group on every LAN face and starts advertising.
+     *
+     * @param httpPort the port the DLNA control server actually bound (it asks
+     *                 for {@code STREAM_LISTEN_PORT} but may have been pushed to
+     *                 an ephemeral one). Non-positive keeps the current value.
+     */
+    public synchronized void start(String ip, int httpPort) {
         if (running) {
             return;
         }
         running = true;
-        location = "http://" + ip + ":" + httpPort + DESC_PATH;
+        if (httpPort > 0) {
+            this.httpPort = httpPort;
+        }
+        // v122: take the identity from the HTTP layer before announcing anything,
+        // so a NOTIFY can never advertise a LOCATION the control server does not
+        // serve (the two used to be independent copies of the same UDN).
+        udnFull = "uuid:" + ManualDlnaHttp.getUdn();
+        deviceUsn = udnFull + "::" + DEVICE_TYPE;
+        descriptorPath = ManualDlnaHttp.getBase() + "/desc";
+        location = "http://" + ip + ":" + httpPort + descriptorPath;
         try {
             List<Face> built = new ArrayList<Face>();
             Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
@@ -340,22 +395,22 @@ public final class ManualSsdp {
     private void broadcastAlive() {
         DebugLog.INSTANCE.setLastNotifyAt(DebugLog.INSTANCE.now());
         for (Face f : faces) {
-            final String loc = f.location(httpPort);
+            final String loc = locationOf(f);
             // rootdevice announcement: some control points build their device tree
             // exclusively from NT: upnp:rootdevice and ignore service-level NTs.
-            send(f, notify(loc, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice"));
-            send(f, notify(loc, DEVICE_TYPE, USN));
-            send(f, notify(loc, UDN_FULL, UDN_FULL));
+            send(f, notify(loc, "upnp:rootdevice", udnFull + "::upnp:rootdevice"));
+            send(f, notify(loc, DEVICE_TYPE, deviceUsn));
+            send(f, notify(loc, udnFull, udnFull));
         }
     }
 
     private void broadcastByebye() {
         for (Face f : faces) {
-            final String loc = f.location(httpPort);
+            final String loc = locationOf(f);
             String bye = "NTS: ssdp:byebye";
-            send(f, notify(loc, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", bye));
-            send(f, notify(loc, DEVICE_TYPE, USN, bye));
-            send(f, notify(loc, UDN_FULL, UDN_FULL, bye));
+            send(f, notify(loc, "upnp:rootdevice", udnFull + "::upnp:rootdevice", bye));
+            send(f, notify(loc, DEVICE_TYPE, deviceUsn, bye));
+            send(f, notify(loc, udnFull, udnFull, bye));
         }
     }
 
@@ -460,8 +515,8 @@ public final class ManualSsdp {
         String stTrim = st.trim();
         boolean match = "ssdp:all".equals(stTrim)
                 || DEVICE_TYPE.equals(stTrim)
-                || UDN_FULL.equals(stTrim)
-                || USN.equals(stTrim)
+                || udnFull.equals(stTrim)
+                || deviceUsn.equals(stTrim)
                 || "upnp:rootdevice".equals(stTrim)
                 // Service-level probes. Most phone casting libraries search the
                 // AVTransport ST directly because that is the service they will
@@ -488,7 +543,7 @@ public final class ManualSsdp {
         }
         DebugLog.INSTANCE.setLastResponseAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port
-                + " (面=" + from.label() + ", LOCATION=" + from.location(httpPort) + ")");
+                + " (面=" + from.label() + ", LOCATION=" + locationOf(from) + ")");
         // The response ST/USN must echo what the requester asked for
         // (Windows "Play To" searches upnp:rootdevice and validates the
         // response ST against its request).
@@ -498,11 +553,11 @@ public final class ManualSsdp {
             // that filter responses by looking for a service token in ST/USN
             // (common shortcut in casting libraries) find nothing when only the
             // device-level triple is answered.
-            sendSearchResponse(from, "upnp:rootdevice", UDN_FULL + "::upnp:rootdevice", target, port);
-            sendSearchResponse(from, UDN_FULL, UDN_FULL, target, port);
-            sendSearchResponse(from, DEVICE_TYPE, USN, target, port);
+            sendSearchResponse(from, "upnp:rootdevice", udnFull + "::upnp:rootdevice", target, port);
+            sendSearchResponse(from, udnFull, udnFull, target, port);
+            sendSearchResponse(from, DEVICE_TYPE, deviceUsn, target, port);
             for (String svc : SERVICE_TYPES) {
-                sendSearchResponse(from, svc, UDN_FULL + "::" + svc, target, port);
+                sendSearchResponse(from, svc, udnFull + "::" + svc, target, port);
             }
             return;
         }
@@ -513,23 +568,23 @@ public final class ManualSsdp {
             // Echo the requested service ST verbatim (spec requirement) and
             // pair it with our UDN in the USN.
             respSt = stTrim;
-            respUsn = UDN_FULL + "::" + stTrim;
+            respUsn = udnFull + "::" + stTrim;
         } else if ("upnp:rootdevice".equals(stTrim)) {
             respSt = "upnp:rootdevice";
-            respUsn = UDN_FULL + "::upnp:rootdevice";
-        } else if (UDN_FULL.equals(stTrim)) {
-            respSt = UDN_FULL;
-            respUsn = UDN_FULL;
+            respUsn = udnFull + "::upnp:rootdevice";
+        } else if (udnFull.equals(stTrim)) {
+            respSt = udnFull;
+            respUsn = udnFull;
         } else if ("uuid:020000000000-dmr".equals(stTrim)) {
             // Echo the Windows DMR probe type; pair our real UDN with it.
             respSt = "uuid:020000000000-dmr";
-            respUsn = UDN_FULL + "::uuid:020000000000-dmr";
-        } else if (USN.equals(stTrim)) {
+            respUsn = udnFull + "::uuid:020000000000-dmr";
+        } else if (deviceUsn.equals(stTrim)) {
             respSt = DEVICE_TYPE;
-            respUsn = USN;
+            respUsn = deviceUsn;
         } else {
             respSt = DEVICE_TYPE;
-            respUsn = USN;
+            respUsn = deviceUsn;
         }
         sendSearchResponse(from, respSt, respUsn, target, port);
     }
@@ -592,7 +647,7 @@ public final class ManualSsdp {
                 + "EXT:\r\n"
                 // DLNA CORE profile header — required by several phone cast stacks.
                 + "X-User-Agent: redsonic\r\n"
-                + "LOCATION: " + f.location(httpPort) + "\r\n"
+                + "LOCATION: " + locationOf(f) + "\r\n"
                 + "SERVER: PhairPlay/1.0 UPnP/1.1\r\n"
                 + "ST: " + st + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
