@@ -50,7 +50,26 @@ public final class GenaNotifier {
         final AtomicInteger seq = new AtomicInteger(0);
         /** Consecutive failed pushes - after enough, this subscriber is gone. */
         final AtomicInteger failures = new AtomicInteger(0);
+        /**
+         * Ported from upstream: a SUBSCRIBE lives for its TIMEOUT, and a control
+         * point that stopped renewing must be dropped instead of being notified
+         * forever. Renewal (SUBSCRIBE with the current SID) pushes this out.
+         */
+        volatile long expiresAtMs = Long.MAX_VALUE;
     }
+
+    /** Upstream's bounds: the renderer accepts 30 s … 30 min. */
+    private static final int MIN_TIMEOUT_SECONDS = 30;
+    private static final int MAX_TIMEOUT_SECONDS = 1800;
+    private static final int DEFAULT_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS;
+    private static final long PURGE_INTERVAL_MS = 30_000L;
+    private static final AtomicBoolean purgeStarted = new AtomicBoolean(false);
+    private static final ScheduledExecutorService maintenance =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "gena-expiry");
+                t.setDaemon(true);
+                return t;
+            });
 
     private static final java.util.concurrent.ConcurrentHashMap<String, Sub> subs =
             new java.util.concurrent.ConcurrentHashMap<String, Sub>();
@@ -108,13 +127,32 @@ public final class GenaNotifier {
      * NOTIFY outright — the exact class of bug the AVTransport payload had.
      */
     public static void register(String service, String callback, String newSid) {
+        register(service, callback, newSid, DEFAULT_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * Ported from upstream: the callback URL is untrusted input and is checked
+     * against {@link GenaCallbackPolicy} before it is stored. A refused URL is
+     * not remembered, so no event can ever be posted to it.
+     *
+     * @return true when the subscription was registered.
+     */
+    public static boolean register(String service, String callback, String newSid, int timeoutSeconds) {
+        String refusal = GenaCallbackPolicy.check(callback);
+        if (refusal != null) {
+            DebugLog.INSTANCE.log("SOAP", "拒绝事件订阅 " + service + " callback=" + callback
+                    + " 原因=" + refusal);
+            return false;
+        }
         Sub sub = new Sub();
         sub.callback = callback;
         sub.sid = newSid;
+        sub.expiresAtMs = System.currentTimeMillis() + clampTimeout(timeoutSeconds) * 1000L;
         subs.put(service, sub);
+        startPurgeLoop();
         final boolean avt = AVT.equals(service);
         if (!avt && !RC.equals(service)) {
-            return;
+            return true;
         }
         Thread t = new Thread(() -> {
             try {
@@ -129,6 +167,21 @@ public final class GenaNotifier {
         });
         t.setDaemon(true);
         t.start();
+        return true;
+    }
+
+    /**
+     * A GENA renewal (SUBSCRIBE carrying the SID we issued) keeps the same
+     * SID but pushes the expiry out. Returns false when the SID is unknown, so
+     * the caller can answer as a fresh subscription instead.
+     */
+    public static boolean renew(String service, int timeoutSeconds) {
+        Sub sub = subs.get(service);
+        if (sub == null) {
+            return false;
+        }
+        sub.expiresAtMs = System.currentTimeMillis() + clampTimeout(timeoutSeconds) * 1000L;
+        return true;
     }
 
     /** One service cancelled (a SID-matched UNSUBSCRIBE). */
@@ -168,6 +221,45 @@ public final class GenaNotifier {
         ticking.set(false);
     }
 
+    private static int clampTimeout(int requested) {
+        if (requested <= 0) {
+            return DEFAULT_TIMEOUT_SECONDS;
+        }
+        return Math.max(MIN_TIMEOUT_SECONDS, Math.min(MAX_TIMEOUT_SECONDS, requested));
+    }
+
+    /**
+     * Ported from upstream: removes subscriptions whose TIMEOUT has passed.
+     * Runs on its own daemon task so a control point that vanishes without
+     * UNSUBSCRIBE does not stay on the push list forever.
+     */
+    private static void purgeExpired() {
+        long now = System.currentTimeMillis();
+        for (java.util.Map.Entry<String, Sub> e : subs.entrySet()) {
+            Sub sub = e.getValue();
+            if (sub != null && sub.expiresAtMs <= now) {
+                if (subs.remove(e.getKey(), sub)) {
+                    DebugLog.INSTANCE.log("SOAP", "事件订阅过期 " + e.getKey() + " sid=" + sub.sid);
+                    if (AVT.equals(e.getKey())) {
+                        stopProgressTicker();
+                    }
+                }
+            }
+        }
+    }
+
+    private static void startPurgeLoop() {
+        if (!purgeStarted.compareAndSet(false, true)) {
+            return;
+        }
+        maintenance.scheduleWithFixedDelay(() -> {
+            try {
+                purgeExpired();
+            } catch (Throwable ignored) {
+            }
+        }, PURGE_INTERVAL_MS, PURGE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
     /** Push on a background thread (for call sites on the main/player thread). */
     public static void pushAsync() {
         pusher.submit(GenaNotifier::push);
@@ -186,6 +278,7 @@ public final class GenaNotifier {
      * points read an unknown property as broken eventing.
      */
     public static void push() {
+        purgeExpired();
         Sub sub = subs.get(AVT);
         if (sub == null) {
             return;
@@ -236,6 +329,7 @@ public final class GenaNotifier {
      * volume, and the next SetVolume from that slider overwrites the real one.
      */
     public static void pushVolume() {
+        purgeExpired();
         Sub sub = subs.get(RC);
         if (sub == null) {
             return;
@@ -262,6 +356,9 @@ public final class GenaNotifier {
         String cb = sub.callback;
         String s = sub.sid;
         if (cb == null || s == null) {
+            return;
+        }
+        if (sub.expiresAtMs <= System.currentTimeMillis()) {
             return;
         }
         String body = "<?xml version=\"1.0\"?>\n"

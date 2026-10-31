@@ -371,6 +371,16 @@ public final class ManualDlnaHttp {
     // ─────────────────────────────── device descriptor ───────────────────────────────
 
     public static String deviceDescriptorXml() {
+        return deviceDescriptorXml(null);
+    }
+
+    /**
+     * @param presentationUrl absolute URL of the info page, or null to omit the
+     *     field. Ported from upstream: a Samsung TV expects a complete set of
+     *     device fields (serialNumber, modelURL, presentationURL) and skips a
+     *     device whose description is incomplete.
+     */
+    public static String deviceDescriptorXml(String presentationUrl) {
         // One snapshot: the UDN and every service URL must describe the same
         // device, and a sender that fetches a descriptor advertising URLs under
         // a different prefix than its own UDN fails on the first action.
@@ -390,6 +400,10 @@ public final class ManualDlnaHttp {
             + "    <modelDescription>PhairPlay DLNA Media Renderer</modelDescription>\n"
             + "    <modelName>PhairPlay</modelName>\n"
             + "    <modelNumber>1.0</modelNumber>\n"
+            + "    <modelURL>https://github.com/cyj265/PhairPlay</modelURL>\n"
+            + "    <serialNumber>" + xmlEscape(serialNumberFor(id.udn)) + "</serialNumber>\n"
+            + (presentationUrl != null && !presentationUrl.isEmpty()
+                    ? "    <presentationURL>" + xmlEscape(presentationUrl) + "</presentationURL>\n" : "")
             + "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
             + "    <UDN>uuid:" + id.udn + "</UDN>\n"
             + "    <serviceList>\n"
@@ -399,6 +413,104 @@ public final class ManualDlnaHttp {
             + "    </serviceList>\n"
             + "  </device>\n"
             + "</root>\n";
+    }
+
+    /**
+     * Derives a stable serial number from the UDN (ported from upstream); every
+     * character outside [A-Za-z0-9-] becomes a dash.
+     */
+    private static String serialNumberFor(String udn) {
+        String uuidPart = udn == null ? "" : udn.trim();
+        if (uuidPart.startsWith("uuid:")) {
+            uuidPart = uuidPart.substring(5);
+        } else if (uuidPart.startsWith("uuid-")) {
+            uuidPart = uuidPart.substring(5);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < uuidPart.length(); i++) {
+            char c = uuidPart.charAt(i);
+            boolean keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '-';
+            sb.append(keep ? c : '-');
+        }
+        int start = 0;
+        int end = sb.length();
+        while (start < end && sb.charAt(start) == '-') start++;
+        while (end > start && sb.charAt(end - 1) == '-') end--;
+        String serial = sb.substring(start, end);
+        return serial.isEmpty() ? "PhairPlay" : serial;
+    }
+
+    // ─────────────────────────────── DIAL (Samsung Smart View) ───────────────────────────────
+
+    /**
+     * DIAL — "Discovery And Launch" — is the second half of Samsung Smart View
+     * discovery (ported from upstream). A Samsung TV that finds us through the
+     * MultiScreen SSDP search reads the {@code Application-Url} header of the
+     * device description and asks for these documents; without them the app
+     * picker opens empty.
+     */
+    public static final String DIAL_BASE = "/dial";
+
+    /** The single app this renderer offers. Case sensitive, like DIAL ids. */
+    public static final String DIAL_APP_ID = "PhairPlay";
+
+    public static boolean isDialPath(String path) {
+        return path != null && (DIAL_BASE.equals(path) || path.startsWith(DIAL_BASE + "/"));
+    }
+
+    /** True for "/dial" and "/dial/" — the app-list document. */
+    public static boolean isDialAppListPath(String path) {
+        return DIAL_BASE.equals(path) || (DIAL_BASE + "/").equals(path);
+    }
+
+    /** The app list. Static: the renderer is the only app. */
+    public static String dialAppsXml() {
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n"
+                + "<service xmlns=\"urn:dial-multiscreen-org:schemas:dial\" dialVer=\"2.2\">\n"
+                + "  <apps>\n"
+                + "    <app name=\"" + DIAL_APP_ID + "\" id=\"" + DIAL_APP_ID + "\" />\n"
+                + "  </apps>\n"
+                + "</service>\n";
+    }
+
+    /**
+     * The DIAL app info document for [appId], or null when the id is unknown
+     * (the caller answers 404, as DIAL requires). The state is always
+     * "stopped": the media is pushed by a DLNA control point, not by a DIAL
+     * session owned by the renderer.
+     */
+    public static String dialAppInfoXml(String appId) {
+        if (appId == null || !isAllowedDialAppId(appId) || !DIAL_APP_ID.equals(appId)) {
+            return null;
+        }
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n"
+                + "<service xmlns=\"urn:dial-multiscreen-org:schemas:dial\" dialVer=\"2.2\">\n"
+                + "  <name>" + DIAL_APP_ID + "</name>\n"
+                + "  <options allowStop=\"true\" allowPause=\"true\" allowResume=\"true\" allowSeek=\"true\"/>\n"
+                + "  <state>stopped</state>\n"
+                + "  <version>1.0.0</version>\n"
+                + "</service>\n";
+    }
+
+    /**
+     * The app id comes from the request path. Only letters, digits, dash,
+     * underscore and dot are accepted, so "../.." or "a/b" never reaches the
+     * comparison. The id is never used as a path or a file name.
+     */
+    public static boolean isAllowedDialAppId(String appId) {
+        if (appId == null || appId.isEmpty() || appId.length() > 64) {
+            return false;
+        }
+        for (int i = 0; i < appId.length(); i++) {
+            char c = appId.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String serviceEntry(String type, String id, String base) {
@@ -729,6 +841,17 @@ public final class ManualDlnaHttp {
                     DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI 提取失败 body=" + safeBodyPreview(body));
                     return null;
                 }
+                // Ported from upstream (DlnaMediaUri): the URI is untrusted and
+                // the box fetches it itself. Length, control characters, scheme
+                // and the target address are checked before it reaches the
+                // player or a log line.
+                String refusal = com.phairplay.util.MediaUriPolicy.check(uri);
+                if (refusal != null) {
+                    DebugLog.INSTANCE.log("SOAP", "拒绝 SetAVTransportURI 原因=" + refusal
+                            + " uri=" + safeBodyPreview(uri));
+                    return null;
+                }
+                uri = uri.trim();
                 DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
                 // v101-⑦: while the user has this exact item paused, a re-send
                 // of the same URI is the sender confirming state, not a new
@@ -960,8 +1083,22 @@ public final class ManualDlnaHttp {
             case "Next":
             case "Previous":
                 return avtResponse(action + "Response", "");
-            case "SetNextAVTransportURI":
+            case "SetNextAVTransportURI": {
+                // Not played by this renderer (there is no queue), but an
+                // unchecked URI here would still be stored by nobody — the
+                // check keeps the answer honest: a refused URI gets a fault
+                // instead of a silent 200.
+                String next = tag(body, "NextURI");
+                if (next != null && !next.trim().isEmpty()) {
+                    String nextRefusal = com.phairplay.util.MediaUriPolicy.check(next);
+                    if (nextRefusal != null) {
+                        DebugLog.INSTANCE.log("SOAP", "拒绝 SetNextAVTransportURI 原因="
+                                + nextRefusal + " uri=" + safeBodyPreview(next));
+                        return null;
+                    }
+                }
                 return avtResponse("SetNextAVTransportURIResponse", "");
+            }
             default:
                 return null;
         }
