@@ -121,9 +121,11 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
                     }
                 }
             }
-            if (dataSpec.position != 0L && responseCodeInternal in 200..299) {
-                // A 200 answer to a request that asked for an offset has to be
-                // skipped forward, the same way the platform class does it.
+            if (dataSpec.position != 0L && responseCodeInternal == 200) {
+                // Only a 200 needs skipping: a 206 body already starts at the
+                // requested offset, and skipping there again handed the
+                // extractor a stream shifted by one position — every seek died
+                // with "Invalid NAL length" and playback restarted from 0.
                 var skipped = 0L
                 val stream = bodyStream!!
                 while (skipped < dataSpec.position) {
