@@ -1,5 +1,10 @@
 package com.phairplay.dlna.transport;
 
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructTimeval;
+
+import java.io.FileDescriptor;
 import java.net.DatagramPacket;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -9,6 +14,7 @@ import java.net.MulticastSocket;
 import java.net.NetworkInterface;
 import java.net.SocketAddress;
 import java.net.SocketException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -38,12 +44,32 @@ import com.phairplay.util.DebugLog;
  * stays invisible in the phone's cast list. This implementation therefore runs
  * one listening socket per IPv4 interface and answers with the LOCATION that
  * belongs to the subnet the requesting control point actually sits on.
+ *
+ * <p>UNICAST PROBES (Douyin and other LeLink-style cast panels): after the
+ * first multicast discovery, a control point usually stops broadcasting and
+ * re-probes each cached device with a <em>unicast</em> M-SEARCH sent straight
+ * to {@code <box-ip>:1900}. Some ROMs ship their own DMR ("光元素投屏" on the
+ * Amlogic N1) which, like us, binds the wildcard 0.0.0.0:1900; the kernel hands
+ * a unicast datagram to exactly one of those sockets, and it is not ours. The
+ * device then silently ages out of the sender's list while the multicast state
+ * still looks healthy. A socket bound to the face's own address wins unicast
+ * delivery by longest-prefix match, so each face carries one: it joins no
+ * group (multicast stays on the wildcard socket) and only answers probes.
  */
 public final class ManualSsdp {
 
     public static final String GROUP = "239.255.255.250";
     public static final int PORT = 1900;
     public static final String DEVICE_TYPE = "urn:schemas-upnp-org:device:MediaRenderer:1";
+
+    /**
+     * The search target a Samsung TV and the Samsung Smart View app use to find
+     * a receiver (ported from upstream). They do not search for a UPnP
+     * MediaRenderer; the DIAL documents behind the advertised LOCATION
+     * ({@link ManualDlnaHttp#DIAL_BASE}) are what completes the discovery.
+     */
+    public static final String SAMSUNG_MULTI_SCREEN =
+            "urn:samsung.com:service:MultiScreenService:1";
     /** Service-level STs. Video/screencast apps typically probe AVTransport directly. */
     static final String[] SERVICE_TYPES = {
         "urn:schemas-upnp-org:service:AVTransport:1",
@@ -76,6 +102,13 @@ public final class ManualSsdp {
         final MulticastSocket sock;
         final int prefixLen;
         /**
+         * AF_INET socket bound to this face's address on :1900, or null when it
+         * could not be opened. Receives the unicast M-SEARCH probes that a
+         * wildcard socket cannot win while a ROM-installed sink also holds
+         * :1900 — see the class comment.
+         */
+        final FileDescriptor unicastFd;
+        /**
          * Port this face actually bound. Anything other than {@link #PORT} means
          * the face is <em>deaf</em>: M-SEARCH probes are addressed to :1900, so
          * a socket parked on an ephemeral port never sees one. Reported on the
@@ -86,19 +119,14 @@ public final class ManualSsdp {
         final java.util.concurrent.atomic.AtomicInteger searches =
                 new java.util.concurrent.atomic.AtomicInteger();
 
-        Face(InetAddress ip, NetworkInterface ni, MulticastSocket sock, int prefixLen, int boundPort) {
+        Face(InetAddress ip, NetworkInterface ni, MulticastSocket sock, int prefixLen,
+             int boundPort, FileDescriptor unicastFd) {
             this.ip = ip;
             this.ni = ni;
             this.sock = sock;
             this.prefixLen = prefixLen;
             this.boundPort = boundPort;
-        }
-
-        /** The face's own address only; the advertised LOCATION needs this
-         *  instance's descriptor path, so it is built by
-         *  {@link ManualSsdp#locationOf(Face)}. */
-        String hostUrl(int httpPort) {
-            return "http://" + ip.getHostAddress() + ":" + httpPort;
+            this.unicastFd = unicastFd;
         }
 
         String label() {
@@ -126,9 +154,22 @@ public final class ManualSsdp {
      * The LOCATION announced for one face: that face's address plus this
      * session's descriptor path. Built here rather than on {@link Face} because
      * the path belongs to the identity, which lives on this instance.
+     *
+     * <p>The address is read from the interface on every call instead of the
+     * copy taken at start(). A box that briefly brought up Wi-Fi (wlan0 held
+     * 192.168.10.13 for a few minutes) kept advertising that address after the
+     * interface lost it — Douyin then fetched the descriptor from a dead IP,
+     * failed, and silently dropped the device from its list.
      */
     private String locationOf(Face f) {
-        return f.hostUrl(httpPort) + descriptorPath;
+        InetAddress ip = f.ip;
+        if (f.ni != null) {
+            Inet4Address live = firstIPv4(f.ni);
+            if (live != null) {
+                ip = live;
+            }
+        }
+        return "http://" + ip.getHostAddress() + ":" + httpPort + descriptorPath;
     }
 
     /**
@@ -222,9 +263,11 @@ public final class ManualSsdp {
                         }
                         continue;
                     }
-                    Face f = new Face(addr, ni, sock, prefixOf(ni, addr), sock.getLocalPort());
+                    Face f = new Face(addr, ni, sock, prefixOf(ni, addr), sock.getLocalPort(),
+                            openUnicastSocket(addr, ni.getName()));
                     built.add(f);
-                    DebugLog.INSTANCE.log("SSDP", "监听面 " + f.label());
+                    DebugLog.INSTANCE.log("SSDP", "监听面 " + f.label()
+                            + (f.unicastFd != null ? " + 单播探活" : ""));
                 }
             }
             if (built.isEmpty()) {
@@ -237,10 +280,10 @@ public final class ManualSsdp {
                     sock.bind(new InetSocketAddress(0));
                 }
                 joinGroup(sock, GROUP, null);
-                built.add(new Face(InetAddress.getByName(ip), null, sock, 24, sock.getLocalPort()));
+                built.add(new Face(InetAddress.getByName(ip), null, sock, 24, sock.getLocalPort(), null));
             }
             faces.clear();
-            faces.addAll(built);
+            faces.addAll(oneFacePerSubnet(built));
             // Fresh start => fresh probe counters, so the status card always
             // describes the current run rather than accumulating across restarts.
             totalSearches.set(0);
@@ -285,6 +328,15 @@ public final class ManualSsdp {
             }, "phairplay-ssdp");
             t.setDaemon(true);
             t.start();
+            if (f.unicastFd != null) {
+                Thread u = new Thread(new Runnable() {
+                    public void run() {
+                        unicastLoop(f);
+                    }
+                }, "phairplay-ssdp-unicast");
+                u.setDaemon(true);
+                u.start();
+            }
         }
         // Announce on every face (each with its own reachable LOCATION) so a
         // sender on any subnet sees a valid control URL, then re-announce.
@@ -318,8 +370,77 @@ public final class ManualSsdp {
                 f.sock.close();
             } catch (Exception ignored) {
             }
+            if (f.unicastFd != null) {
+                try {
+                    Os.close(f.unicastFd);
+                } catch (Exception ignored) {
+                }
+            }
         }
         faces.clear();
+    }
+
+    private static void closeFace(Face f) {
+        try {
+            f.sock.close();
+        } catch (Exception ignored) {
+        }
+        if (f.unicastFd != null) {
+            try {
+                Os.close(f.unicastFd);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * Reduces the announced faces to one per subnet, preferring the wired one.
+     * These boxes are routinely dual-homed on the same /24 (eth0 plus a wlan0
+     * whose SDIO link keeps timing out); both faces would otherwise answer the
+     * same probe with different LOCATIONs, and a control point that cached the
+     * Wi-Fi address is left pointing at an interface that silently stops
+     * answering. One face per subnet makes the announced LOCATION stable.
+     */
+    private static List<Face> oneFacePerSubnet(List<Face> built) {
+        List<Face> kept = new ArrayList<Face>();
+        for (Face f : built) {
+            Face same = null;
+            for (Face k : kept) {
+                if (sameSubnet(k, f.ip)) {
+                    same = k;
+                    break;
+                }
+            }
+            if (same == null) {
+                kept.add(f);
+                continue;
+            }
+            if (isWireless(same) && !isWireless(f)) {
+                kept.remove(same);
+                kept.add(f);
+                closeFace(same);
+                DebugLog.INSTANCE.log("SSDP", "同一网段只保留有线面，丢弃 "
+                        + same.label() + "（保留 " + f.label() + "）");
+            } else {
+                closeFace(f);
+                DebugLog.INSTANCE.log("SSDP", "同一网段已有面，丢弃 " + f.label()
+                        + "（保留 " + same.label() + "）");
+            }
+        }
+        return kept;
+    }
+
+    private static boolean isWireless(Face f) {
+        if (f.ni == null) {
+            return false;
+        }
+        String n = f.ni.getName();
+        if (n == null) {
+            return false;
+        }
+        n = n.toLowerCase(java.util.Locale.US);
+        return n.startsWith("wlan") || n.startsWith("ap") || n.startsWith("p2p")
+                || n.startsWith("wifi");
     }
 
     /** First usable LAN IPv4 on an interface (link-local and loopback skipped). */
@@ -401,6 +522,9 @@ public final class ManualSsdp {
             send(f, notify(loc, "upnp:rootdevice", udnFull + "::upnp:rootdevice"));
             send(f, notify(loc, DEVICE_TYPE, deviceUsn));
             send(f, notify(loc, udnFull, udnFull));
+            // A Samsung TV also listens for the passive announcement of a
+            // receiver, not only for the answer to its M-SEARCH.
+            send(f, notify(loc, SAMSUNG_MULTI_SCREEN, udnFull + "::" + SAMSUNG_MULTI_SCREEN));
         }
     }
 
@@ -411,6 +535,7 @@ public final class ManualSsdp {
             send(f, notify(loc, "upnp:rootdevice", udnFull + "::upnp:rootdevice", bye));
             send(f, notify(loc, DEVICE_TYPE, deviceUsn, bye));
             send(f, notify(loc, udnFull, udnFull, bye));
+            send(f, notify(loc, SAMSUNG_MULTI_SCREEN, udnFull + "::" + SAMSUNG_MULTI_SCREEN, bye));
         }
     }
 
@@ -498,6 +623,87 @@ public final class ManualSsdp {
         return sb.length() == 0 ? "—" : sb.toString();
     }
 
+    /**
+     * Opens a plain AF_INET socket bound to one face's address on :1900.
+     *
+     * <p>This must be a real AF_INET socket, not a {@link java.net.DatagramSocket}:
+     * Android's libcore creates those as dual-stack AF_INET6 sockets, and the
+     * kernel's IPv4 unicast lookup prefers the ROM sink's AF_INET wildcard over
+     * them — which is the whole reason this socket exists.
+     *
+     * <p>SO_REUSEADDR lets it coexist with the wildcard :1900 holders; binding a
+     * specific address is what makes unicast probes land here.
+     */
+    private static FileDescriptor openUnicastSocket(InetAddress addr, String ifName) {
+        FileDescriptor fd = null;
+        try {
+            fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, OsConstants.IPPROTO_UDP);
+            Os.setsockoptInt(fd, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1);
+            // Bounded receive so stop() does not need to interrupt a blocked
+            // syscall on an fd that close() alone may not wake.
+            Os.setsockoptTimeval(fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
+                    StructTimeval.fromMillis(1000));
+            Os.bind(fd, addr, PORT);
+            return fd;
+        } catch (Exception e) {
+            if (fd != null) {
+                try {
+                    Os.close(fd);
+                } catch (Exception ignored) {
+                }
+            }
+            DebugLog.INSTANCE.log("SSDP", "接口 " + ifName + " 单播 :1900 未绑定: "
+                    + e.getClass().getSimpleName() + "（多播发现不受影响）");
+            return null;
+        }
+    }
+
+    private void unicastLoop(final Face face) {
+        final FileDescriptor fd = face.unicastFd;
+        if (fd == null) {
+            return;
+        }
+        ByteBuffer bb = ByteBuffer.allocate(4096);
+        byte[] buf = new byte[4096];
+        while (running) {
+            try {
+                bb.clear();
+                InetSocketAddress from = new InetSocketAddress(0);
+                int n = Os.recvfrom(fd, bb, 0, from);
+                if (n <= 0) {
+                    continue;
+                }
+                bb.clear();
+                bb.get(buf, 0, n);
+                String data = new String(buf, 0, n, StandardCharsets.UTF_8);
+                InetAddress src = from.getAddress();
+                if (!data.startsWith("M-SEARCH") || src == null) {
+                    continue;
+                }
+                face.searches.incrementAndGet();
+                DebugLog.INSTANCE.setSearchTotal(totalSearches.incrementAndGet());
+                DebugLog.INSTANCE.setSearchByFace(faceDistribution());
+                respondToSearch(data, src, from.getPort(), face, fd);
+            } catch (android.system.ErrnoException e) {
+                // SO_RCVTIMEO fires as EAGAIN; it only exists to re-check `running`.
+                if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) {
+                    continue;
+                }
+                if (!running) {
+                    break;
+                }
+                DebugLog.INSTANCE.log("SSDP", "单播监听异常: " + e.getClass().getSimpleName());
+                pauseBeforeRetry();
+            } catch (Exception e) {
+                if (!running) {
+                    break;
+                }
+                DebugLog.INSTANCE.log("SSDP", "单播监听异常: " + e.getClass().getSimpleName());
+                pauseBeforeRetry();
+            }
+        }
+    }
+
     /** Backs off the receive loop so a failing socket can never burn a CPU core. */
     private static void pauseBeforeRetry() {
         try {
@@ -508,6 +714,17 @@ public final class ManualSsdp {
     }
 
     private void respondToSearch(String data, InetAddress target, int port, Face from) {
+        respondToSearch(data, target, port, from, null);
+    }
+
+    /**
+     * @param unicastFd the socket the probe arrived on when it was a unicast
+     *                  M-SEARCH, so the answer goes back from the address the
+     *                  sender actually probed (and :1900), not from the
+     *                  multicast socket; null for multicast probes.
+     */
+    private void respondToSearch(String data, InetAddress target, int port, Face from,
+                                 FileDescriptor unicastFd) {
         String st = header(data, "ST");
         if (st == null) {
             return;
@@ -523,6 +740,9 @@ public final class ManualSsdp {
                 // drive; without this the probe fell into the "not matched"
                 // branch and the sender's list stayed empty forever.
                 || serviceTypeOf(stTrim) != null
+                // Samsung Smart View probes this MultiScreen ST instead of a
+                // UPnP device type; without it the Samsung app list is empty.
+                || SAMSUNG_MULTI_SCREEN.equals(stTrim)
                 // Windows Play-To also probes this well-known DLNA DMR UUID;
                 // answering it makes the renderer show up as a DMR in
                 // Windows' dedicated search pass.
@@ -534,16 +754,22 @@ public final class ManualSsdp {
             DebugLog.INSTANCE.log("SSDP", "收到 M-SEARCH ST=" + stTrim + " 来自 " + target.getHostAddress() + "（不匹配，忽略）");
             return;
         }
-        // Answer through the face the requester can actually reach: on a
-        // dual-homed box a LOCATION pointing into another subnet is
-        // unreachable, and the sender silently drops the device.
-        Face best = bestFaceFor(target);
-        if (best != null) {
-            from = best;
+        // Answer through the face the probe actually arrived on: that is the
+        // network the sender can reach. Re-picking "the last face in the same
+        // subnet" used to override it, and when a Wi-Fi face outlived its
+        // address the response carried a dead LOCATION (see locationOf) that
+        // the sender could not fetch — it then dropped the device.
+        // Only the fallback face (no interface) needs a subnet-based guess.
+        if (from.ni == null) {
+            Face best = bestFaceFor(target);
+            if (best != null) {
+                from = best;
+            }
         }
         DebugLog.INSTANCE.setLastResponseAt(DebugLog.INSTANCE.now());
         DebugLog.INSTANCE.log("SSDP", "响应 M-SEARCH ST=" + stTrim + " -> " + target.getHostAddress() + ":" + port
-                + " (面=" + from.label() + ", LOCATION=" + locationOf(from) + ")");
+                + " (面=" + from.label() + (unicastFd != null ? " 单播" : "")
+                + ", LOCATION=" + locationOf(from) + ")");
         // The response ST/USN must echo what the requester asked for
         // (Windows "Play To" searches upnp:rootdevice and validates the
         // response ST against its request).
@@ -553,11 +779,11 @@ public final class ManualSsdp {
             // that filter responses by looking for a service token in ST/USN
             // (common shortcut in casting libraries) find nothing when only the
             // device-level triple is answered.
-            sendSearchResponse(from, "upnp:rootdevice", udnFull + "::upnp:rootdevice", target, port);
-            sendSearchResponse(from, udnFull, udnFull, target, port);
-            sendSearchResponse(from, DEVICE_TYPE, deviceUsn, target, port);
+            sendSearchResponse(from, "upnp:rootdevice", udnFull + "::upnp:rootdevice", target, port, unicastFd);
+            sendSearchResponse(from, udnFull, udnFull, target, port, unicastFd);
+            sendSearchResponse(from, DEVICE_TYPE, deviceUsn, target, port, unicastFd);
             for (String svc : SERVICE_TYPES) {
-                sendSearchResponse(from, svc, udnFull + "::" + svc, target, port);
+                sendSearchResponse(from, svc, udnFull + "::" + svc, target, port, unicastFd);
             }
             return;
         }
@@ -572,6 +798,10 @@ public final class ManualSsdp {
         } else if ("upnp:rootdevice".equals(stTrim)) {
             respSt = "upnp:rootdevice";
             respUsn = udnFull + "::upnp:rootdevice";
+        } else if (SAMSUNG_MULTI_SCREEN.equals(stTrim)) {
+            // Echo the Samsung target verbatim and pair our UDN with it.
+            respSt = stTrim;
+            respUsn = udnFull + "::" + stTrim;
         } else if (udnFull.equals(stTrim)) {
             respSt = udnFull;
             respUsn = udnFull;
@@ -586,7 +816,7 @@ public final class ManualSsdp {
             respSt = DEVICE_TYPE;
             respUsn = deviceUsn;
         }
-        sendSearchResponse(from, respSt, respUsn, target, port);
+        sendSearchResponse(from, respSt, respUsn, target, port, unicastFd);
     }
 
     /**
@@ -604,15 +834,30 @@ public final class ManualSsdp {
         return null;
     }
 
-    /** The face whose subnet contains `target`, or null when nothing matches. */
+    /** The live face whose subnet contains `target`, or null when nothing matches. */
     private Face bestFaceFor(InetAddress target) {
         Face hit = null;
         for (Face f : faces) {
+            if (!faceLive(f)) {
+                continue;
+            }
             if (sameSubnet(f, target)) {
                 hit = f;
             }
         }
         return hit;
+    }
+
+    /** Interface still up and still holding an IPv4 address (DHCP leases move). */
+    private static boolean faceLive(Face f) {
+        if (f.ni == null) {
+            return true;
+        }
+        try {
+            return f.ni.isUp() && firstIPv4(f.ni) != null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static boolean sameSubnet(Face f, InetAddress other) {
@@ -640,7 +885,8 @@ public final class ManualSsdp {
                 | ((b[2] & 0xFF) << 8) | (b[3] & 0xFF);
     }
 
-    private void sendSearchResponse(Face f, String st, String usn, InetAddress target, int port) {
+    private void sendSearchResponse(Face f, String st, String usn, InetAddress target, int port,
+                                    FileDescriptor unicastFd) {
         String resp = "HTTP/1.1 200 OK\r\n"
                 + "CACHE-CONTROL: max-age=1800\r\n"
                 + "DATE: " + httpDate() + "\r\n"
@@ -651,7 +897,19 @@ public final class ManualSsdp {
                 + "SERVER: PhairPlay/1.0 UPnP/1.1\r\n"
                 + "ST: " + st + "\r\n"
                 + "USN: " + usn + "\r\n\r\n";
-        send(f, resp, target.getHostAddress(), port);
+        if (unicastFd != null) {
+            sendUnicast(unicastFd, resp, target, port);
+        } else {
+            send(f, resp, target.getHostAddress(), port);
+        }
+    }
+
+    private static void sendUnicast(FileDescriptor fd, String msg, InetAddress target, int port) {
+        try {
+            byte[] b = msg.getBytes(StandardCharsets.UTF_8);
+            Os.sendto(fd, ByteBuffer.wrap(b), 0, target, port);
+        } catch (Exception ignored) {
+        }
     }
 
     private static String header(String data, String name) {

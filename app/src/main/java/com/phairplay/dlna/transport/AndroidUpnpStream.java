@@ -90,7 +90,35 @@ public class AndroidUpnpStream extends UpnpStream {
                 }
                 if (ManualDlnaHttp.isDeviceDesc(reqPath)) {
                     DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 200 设备描述");
-                    writeXml(socket.getOutputStream(), ManualDlnaHttp.deviceDescriptorXml());
+                    String baseUrl = requestBaseUrl(request);
+                    // No Application-Url here: advertising DIAL in the descriptor
+                    // response makes ByteDance's cast SDK (Douyin/Toutiao) drop
+                    // the device from its panel — it fetches the descriptor and
+                    // never issues a control call, while plain-DMR clients work.
+                    // The /dial documents stay served for a Samsung TV that
+                    // navigates to them directly.
+                    writeXml(socket.getOutputStream(),
+                            ManualDlnaHttp.deviceDescriptorXml(baseUrl + "/debug"), null);
+                    return;
+                }
+                if (ManualDlnaHttp.isDialPath(reqPath)) {
+                    // DIAL (Samsung Smart View): GET /dial[/] (app list) and
+                    // GET /dial/<appId> (app info). Static documents — the
+                    // request can neither read a file nor inject XML.
+                    String dialBody;
+                    if (ManualDlnaHttp.isDialAppListPath(reqPath)) {
+                        dialBody = ManualDlnaHttp.dialAppsXml();
+                    } else {
+                        String appId = reqPath.substring(ManualDlnaHttp.DIAL_BASE.length() + 1);
+                        dialBody = ManualDlnaHttp.dialAppInfoXml(appId);
+                        if (dialBody == null) {
+                            DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 404 DIAL 未知 app");
+                            writeStatus(socket.getOutputStream(), 404, "Not Found");
+                            return;
+                        }
+                    }
+                    DebugLog.INSTANCE.log("HTTP", "GET " + reqPath + " -> 200 DIAL");
+                    writeXml(socket.getOutputStream(), dialBody);
                     return;
                 }
                 if (ManualDlnaHttp.isScpd(reqPath)) {
@@ -160,8 +188,12 @@ public class AndroidUpnpStream extends UpnpStream {
                 // (a fresh SID + re-sent SEQ 0 makes control points drop the
                 // subscription and abort long casts).
                 String existingSid = headerValue(request, "SID");
+                int timeoutSeconds = parseTimeoutSeconds(headerValue(request, "TIMEOUT"));
                 if (existingSid != null && !existingSid.isEmpty()
                         && existingSid.equals(GenaNotifier.currentSid(service))) {
+                    // Ported from upstream: renewal pushes the expiry out; a
+                    // subscription that is never renewed is dropped.
+                    GenaNotifier.renew(service, timeoutSeconds);
                     String resp = "HTTP/1.1 200 OK\r\n"
                             + "SID: " + existingSid + "\r\n"
                             + "TIMEOUT: Second-1800\r\n"
@@ -173,16 +205,10 @@ public class AndroidUpnpStream extends UpnpStream {
                     return;
                 }
                 String sid = "uuid:" + java.util.UUID.randomUUID().toString();
-                String resp = "HTTP/1.1 200 OK\r\n"
-                        + "SID: " + sid + "\r\n"
-                        + "TIMEOUT: Second-1800\r\n"
-                        + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
-                        + "CONTENT-LENGTH: 0\r\n\r\n";
-                DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 事件订阅(手动) sid=" + sid);
-                socket.getOutputStream().write(resp.getBytes("UTF-8"));
-                socket.getOutputStream().flush();
-                // Remember the subscriber's callback URL and push the initial
-                // LastChange event — Windows stalls the cast without it.
+                // Remember the subscriber's callback URL — but only when it
+                // passes the SSRF policy (see GenaCallbackPolicy). A refused
+                // callback is answered 412 (UPnP: precondition failed) instead
+                // of a SID that would never deliver an event.
                 String callback = headerValue(request, "CALLBACK");
                 if (callback != null) {
                     int s = callback.indexOf('<');
@@ -191,7 +217,25 @@ public class AndroidUpnpStream extends UpnpStream {
                         callback = callback.substring(s + 1, e2).trim();
                     }
                 }
-                GenaNotifier.register(service, callback, sid);
+                if (!GenaNotifier.register(service, callback, sid, timeoutSeconds)) {
+                    String resp = "HTTP/1.1 412 Precondition Failed\r\n"
+                            + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                            + "CONTENT-LENGTH: 0\r\n\r\n";
+                    DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 412 回调地址被策略拒绝 callback=" + callback);
+                    socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                    socket.getOutputStream().flush();
+                    return;
+                }
+                String resp = "HTTP/1.1 200 OK\r\n"
+                        + "SID: " + sid + "\r\n"
+                        + "TIMEOUT: Second-1800\r\n"
+                        + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
+                        + "CONTENT-LENGTH: 0\r\n\r\n";
+                DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 事件订阅(手动) sid=" + sid);
+                socket.getOutputStream().write(resp.getBytes("UTF-8"));
+                socket.getOutputStream().flush();
+                // The initial LastChange event runs on GenaNotifier's own
+                // delayed task (Windows stalls the cast without it).
                 return;
             }
             DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");
@@ -307,9 +351,30 @@ public class AndroidUpnpStream extends UpnpStream {
         os.flush();
     }
 
+    /**
+     * Parses a GENA TIMEOUT header ("Second-1800", "Second-infinite"), returning
+     * 0 when it is absent or unreadable. The notifier clamps the value.
+     */
+    private static int parseTimeoutSeconds(String header) {
+        if (header == null) {
+            return 0;
+        }
+        String value = header.trim();
+        if (value.regionMatches(true, 0, "Second-", 0, 7)) {
+            value = value.substring(7).trim();
+        }
+        if (value.isEmpty() || value.equalsIgnoreCase("infinite")) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     /** Case-insensitive single header lookup (headers are stored as received). */
-    private static String headerValue(HttpRequest request, String name) {
-        if (request.headers == null) {
+    private static String headerValue(HttpRequest request, String name) {        if (request.headers == null) {
             return null;
         }
         for (Map.Entry<String, List<String>> e : request.headers.entrySet()) {
@@ -321,8 +386,27 @@ public class AndroidUpnpStream extends UpnpStream {
         return null;
     }
 
+    /**
+     * Absolute base URL ("http://host:port") of this server as the requesting
+     * control point sees it, taken from the HOST header it used. Falls back to
+     * the socket's own address when a minimal client sends no HOST.
+     */
+    private String requestBaseUrl(HttpRequest request) {
+        String host = headerValue(request, "HOST");
+        if (host != null && !host.trim().isEmpty()) {
+            return "http://" + host.trim();
+        }
+        InetAddress local = socket.getLocalAddress();
+        String ip = local != null ? local.getHostAddress() : "127.0.0.1";
+        return "http://" + ip + ":" + socket.getLocalPort();
+    }
+
     /** Writes a 200 response with an XML body (device descriptor / SCPD / SOAP). */
     private void writeXml(OutputStream os, String xml) throws IOException {
+        writeXml(os, xml, null);
+    }
+
+    private void writeXml(OutputStream os, String xml, String extraHeader) throws IOException {
         byte[] body = xml.getBytes("UTF-8");
         StringBuilder head = new StringBuilder();
         head.append("HTTP/1.1 200 OK\r\n");
@@ -331,6 +415,9 @@ public class AndroidUpnpStream extends UpnpStream {
         head.append("Connection: close\r\n");
         head.append("Server: PhairPlay/1.0 UPnP/1.0\r\n");
         head.append("EXT:\r\n");
+        if (extraHeader != null) {
+            head.append(extraHeader).append("\r\n");
+        }
         head.append("\r\n");
         os.write(head.toString().getBytes("UTF-8"));
         os.write(body);
