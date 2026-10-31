@@ -2237,6 +2237,7 @@ class DlnaReceiver(
             val bytes = ByteArrayOutputStream()
             var mime: String? = null
             var ok = false
+            var tooLarge = false
             try {
                 val conn = (URL(uri).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 10000
@@ -2250,15 +2251,39 @@ class DlnaReceiver(
                 mime = conn.contentType
                 DebugLog.log("DLNA", "照片源 HTTP $code content-type=$mime url=$uri")
                 if (code in 200..299) {
-                    conn.inputStream.use { input ->
-                        val buf = ByteArray(64 * 1024)
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            bytes.write(buf, 0, n)
+                    // Ported from upstream (DlnaImageDecoder): a 20 MB cap on
+                    // the payload. A bigger photo is refused before a single
+                    // byte is buffered when the length is declared, and the
+                    // stream is abandoned mid-read when it is not — otherwise
+                    // one sender can hand us an arbitrarily large body.
+                    val declared = conn.contentLengthLong
+                    if (declared > MAX_IMAGE_BYTES) {
+                        tooLarge = true
+                        DebugLog.log(
+                            "DLNA",
+                            "照片超过 20MB 上限（Content-Length=$declared），放弃: $uri"
+                        )
+                    } else {
+                        conn.inputStream.use { input ->
+                            val buf = ByteArray(64 * 1024)
+                            var total = 0L
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                total += n
+                                if (total > MAX_IMAGE_BYTES) {
+                                    tooLarge = true
+                                    DebugLog.log(
+                                        "DLNA",
+                                        "照片超过 20MB 上限（已读 $total B），中止: $uri"
+                                    )
+                                    break
+                                }
+                                bytes.write(buf, 0, n)
+                            }
                         }
                     }
-                    ok = true
+                    ok = !tooLarge
                 }
             } catch (t: Throwable) {
                 DebugLog.log("DLNA", "照片下载失败: ${t.message}")
@@ -3700,6 +3725,8 @@ class DlnaReceiver(
     }
 
     companion object {
+        /** Hard limit for a photo payload (20 MB), ported from upstream. */
+        private const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
         // ── v97: "is the picture late because the source is slow, or because
         // the decoder is dead?" — these constant belong here, next to the
         // one [firstPictureWatchdog] has to consult before it takes the
