@@ -294,10 +294,26 @@ class HomeFragment : Fragment() {
             dlnaConnected -> {
                 val media = com.phairplay.dlna.DlnaMediaMeta.title
                 if (media.isNullOrBlank()) getString(R.string.home_title_streaming, "DLNA")
-                else getString(R.string.home_title_streaming_media, "DLNA", media)
+                else getString(R.string.home_title_streaming_media, "DLNA", headerTitle(media))
             }
             airPlayConnected -> getString(R.string.home_title_streaming, "AirPlay")
             else -> getString(R.string.home_title)
         }
+    }
+
+    /**
+     * Douyin and Toutiao put the whole post caption in DIDL's `dc:title`:
+     * newlines, a disclaimer sentence and a run of #topics. The header is one
+     * 32sp line, so the raw value wrapped to five lines and pushed every card
+     * below the fold. Prefer the 《title》 the caption names, else the first
+     * sentence, and never more than one short line.
+     */
+    private fun headerTitle(raw: String): String {
+        val clean = raw.replace(Regex("#\\S*"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val base = Regex("《[^》]{1,20}》").find(clean)?.value
+            ?: clean.substringBefore('。').substringBefore('…').trim()
+        return if (base.length <= 20) base else base.take(20).trimEnd() + "…"
     }
 }

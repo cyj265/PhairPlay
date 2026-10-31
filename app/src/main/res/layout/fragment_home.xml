@@ -61,6 +61,8 @@
                     android:text="@string/home_title"
                     android:textColor="@color/text_primary"
                     android:textSize="32sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:fontFamily="sans-serif-light" />
 
                 <TextView
