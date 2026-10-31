@@ -29,6 +29,7 @@ import re
 import socket
 import sys
 import time
+import html
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.request import Request, urlopen
@@ -95,7 +96,11 @@ class Handler(BaseHTTPRequestHandler):
             body = b""
             sys.stderr.write(f"[notify-err] read: {e}\n")
         self._empty(200)
-        text = body.decode("utf-8", "replace")
+        # The LastChange document is a string property, so its inner XML is
+        # escaped once by the renderer (&quot;, &lt;). Unescape before looking
+        # for the attribute values (the v122 payload is correct; this reader
+        # was written against the older unescaped body).
+        text = html.unescape(body.decode("utf-8", "replace"))
         rt = re.search(r"RelativeTimePosition val=\"([^\"]*)\"", text)
         dur = re.search(r"CurrentMediaDuration val=\"([^\"]*)\"", text)
         rtv = rt.group(1) if rt else ""
@@ -117,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
             body = b""
             sys.stderr.write(f"[post-err] read: {e}\n")
         self._empty(200)
-        text = body.decode("utf-8", "replace")
+        text = html.unescape(body.decode("utf-8", "replace"))
         rt = re.search(r"RelativeTimePosition val=\"([^\"]*)\"", text)
         dur = re.search(r"CurrentMediaDuration val=\"([^\"]*)\"", text)
         rtv = rt.group(1) if rt else ""
