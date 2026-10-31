@@ -631,12 +631,15 @@ class MainActivity : AppCompatActivity() {
     // ─── Audio-only (music) DLNA card ────────────────────────────────────
 
     /** Album art view of [dlnaMusicView]; loaded asynchronously when set. */
-    private var musicArtView: android.widget.ImageView? = null
+    private var musicArtView: com.phairplay.ui.VinylDiscView? = null
+    /** Full-screen blurred copy of the same cover. */
+    private var musicBackdrop: com.phairplay.ui.BlurBackdropView? = null
     private var musicTitleView: TextView? = null
     private var musicArtistView: TextView? = null
     private var musicProgressView: android.widget.ProgressBar? = null
     private var musicTimeView: TextView? = null
     private var musicBitrateView: TextView? = null
+    private var musicCardShown = false
 
     /** Last cover source applied, so the 2 Hz tick neither refetches nor
      *  redisplays it — and so a cast without art can be told apart from one
@@ -652,72 +655,131 @@ class MainActivity : AppCompatActivity() {
      * never takes focus, so the D-pad keeps driving the (bound) player.
      */
     private fun setupDlnaMusicCard() {
-        val card = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setBackgroundColor(0xF2101010.toInt())
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
-            val p = (32 * resources.displayMetrics.density).toInt()
-            setPadding(p, p, p, p)
+        val d = resources.displayMetrics.density
+        val card = android.widget.FrameLayout(this).apply {
+            // The blurred cover backdrop paints every pixel; this is only the
+            // colour seen for the one frame before the cover is decoded.
+            setBackgroundColor(0xFF0E0E10.toInt())
             visibility = View.GONE
             // Must not steal the D-pad from the player underneath.
             isFocusable = false
             descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
-        musicArtView = android.widget.ImageView(this).apply {
-            val side = (220 * resources.displayMetrics.density).toInt()
+        musicBackdrop = com.phairplay.ui.BlurBackdropView(this)
+        card.addView(
+            musicBackdrop,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val row = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            val p = (44 * d).toInt()
+            setPadding(p, p, p, p)
+        }
+
+        // Left: record with the stylus arm resting on it.
+        val stage = android.widget.FrameLayout(this).apply {
+            val side = (360 * d).toInt()
             layoutParams = android.widget.LinearLayout.LayoutParams(side, side)
-            setImageResource(android.R.drawable.ic_media_play)
-            imageTintList = android.content.res.ColorStateList.valueOf(0xFF8A8A8A.toInt())
-            val v = (16 * resources.displayMetrics.density).toInt()
-            setPadding(0, 0, 0, v)
+        }
+        musicArtView = com.phairplay.ui.VinylDiscView(this)
+        stage.addView(
+            musicArtView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        stage.addView(
+            com.phairplay.ui.TonearmView(this),
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        row.addView(stage)
+
+        // Right: title / artist / progress / time / bitrate / key hints.
+        val col = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { marginStart = (40 * d).toInt() }
         }
         musicTitleView = TextView(this).apply {
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 30f
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            textSize = 42f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setShadowLayer(12f, 0f, 2f, 0x99000000.toInt())
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
         musicArtistView = TextView(this).apply {
-            setTextColor(0xFFBBBBBB.toInt())
-            textSize = 20f
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
-            val v = (10 * resources.displayMetrics.density).toInt()
-            setPadding(0, 0, 0, v)
+            setTextColor(0xFFE4E4E6.toInt())
+            textSize = 25f
+            setShadowLayer(8f, 0f, 1f, 0x99000000.toInt())
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (10 * d).toInt() }
         }
         musicProgressView = android.widget.ProgressBar(
             this, null, android.R.attr.progressBarStyleHorizontal
         ).apply {
             max = 1000
+            progressTintList = android.content.res.ColorStateList.valueOf(
+                getColor(com.phairplay.R.color.protocol_dlna)
+            )
             layoutParams = android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                (6 * resources.displayMetrics.density).toInt()
-            ).apply { topMargin = (8 * resources.displayMetrics.density).toInt() }
+                (5 * d).toInt()
+            ).apply { topMargin = (32 * d).toInt() }
         }
         musicTimeView = TextView(this).apply {
-            setTextColor(0xFFDDDDDD.toInt())
-            textSize = 18f
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
-            val v = (6 * resources.displayMetrics.density).toInt()
-            setPadding(0, v, 0, v)
+            setTextColor(0xFFE8E8EA.toInt())
+            textSize = 19f
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (12 * d).toInt() }
         }
         musicBitrateView = TextView(this).apply {
-            setTextColor(0xFF999999.toInt())
-            textSize = 15f
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            setTextColor(0xFFB9B9BE.toInt())
+            textSize = 16f
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (6 * d).toInt() }
         }
         val hint = TextView(this).apply {
             text = "OK 播放/暂停 · ← → 快退/快进 · 菜单 设置 · 返回 回到首页"
-            setTextColor(0xFF888888.toInt())
-            textSize = 16f
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            setTextColor(0x88FFFFFF.toInt())
+            textSize = 15f
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (30 * d).toInt() }
         }
-        card.addView(musicArtView)
-        card.addView(musicTitleView)
-        card.addView(musicArtistView)
-        card.addView(musicProgressView)
-        card.addView(musicTimeView)
-        card.addView(musicBitrateView)
-        card.addView(hint)
+        col.addView(musicTitleView)
+        col.addView(musicArtistView)
+        col.addView(musicProgressView)
+        col.addView(musicTimeView)
+        col.addView(musicBitrateView)
+        col.addView(hint)
+        row.addView(col)
+
+        card.addView(
+            row,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = android.view.Gravity.CENTER }
+        )
         dlnaMusicView = card
         streamingContainer.addView(
             card,
@@ -739,7 +801,23 @@ class MainActivity : AppCompatActivity() {
         val hasVideo = pvVideo != null && pvVideo.width > 0 && pvVideo.height > 0
         val visible = isDlnaPlayerVisible && DlnaMediaMeta.audioOnly && !hasVideo
         card.visibility = if (visible) View.VISIBLE else View.GONE
-        if (!visible) return
+        if (!visible) {
+            musicCardShown = false
+            musicArtView?.setSpinning(false)
+            return
+        }
+        if (!musicCardShown) {
+            musicCardShown = true
+            // The card used to pop in at full size over the player. A short
+            // fade keeps the switch from feeling like a glitch.
+            card.alpha = 0f
+            card.scaleX = 0.94f
+            card.scaleY = 0.94f
+            card.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                .setDuration(200L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+        }
         card.bringToFront()
         val p = dlnaPlayerView?.player
         p?.mediaMetadata?.let { syncEmbeddedTags(it) }
@@ -750,7 +828,15 @@ class MainActivity : AppCompatActivity() {
         musicProgressView?.progress = if (dur > 0L) (pos * 1000L / dur).toInt() else 0
         musicTimeView?.text = "${fmtTime(pos)} / ${if (dur > 0L) fmtTime(dur) else "--:--"}" +
             if (p?.playWhenReady == true) "" else "  (已暂停)"
-        musicBitrateView?.text = audioBitrateLabel(p) ?: ""
+        val unsupported = audioUnsupportedLabel(p)
+        musicBitrateView?.text = unsupported ?: audioBitrateLabel(p) ?: ""
+        musicBitrateView?.setTextColor(
+            if (unsupported != null) 0xFFFFA726.toInt() else 0xFFB9B9BE.toInt()
+        )
+        musicArtView?.setSpinning(
+            p?.playWhenReady == true &&
+                p.playbackState != androidx.media3.common.Player.STATE_ENDED
+        )
         showAlbumArt(DlnaMediaMeta.albumArtUri, DlnaMediaMeta.embeddedArt)
     }
 
@@ -781,6 +867,33 @@ class MainActivity : AppCompatActivity() {
         lastTagArtist = mm.artist
         lastTagArt = mm.artworkData
         DlnaMediaMeta.setTagMeta(mm.title?.toString(), mm.artist?.toString(), mm.artworkData)
+    }
+
+    /**
+     * Warning for an audio track this device has no decoder for.
+     *
+     * N1/P230 ships a FLAC *encoder* and no decoder at all, and ExoPlayer does
+     * not fail in that case: the track is simply never selected, the clock
+     * keeps running and the sender sees a healthy playback — a silent cast with
+     * a normal-looking card. `Tracks.Group.isSupported` is the one honest
+     * signal, because it comes from the renderer that had to accept the format.
+     */
+    private fun audioUnsupportedLabel(p: androidx.media3.common.Player?): String? {
+        val audio = p?.currentTracks?.groups
+            ?.firstOrNull { it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO }
+            ?: return null
+        if (audio.isSupported) return null
+        val mime = (0 until audio.length)
+            .mapNotNull { audio.getTrackFormat(it).sampleMimeType }
+            .firstOrNull()
+        val name = when {
+            mime == null -> "该音频"
+            mime.contains("flac") -> "FLAC 无损"
+            mime.contains("alac") -> "ALAC 无损"
+            mime.contains("ape") -> "APE 无损"
+            else -> mime.substringAfter('/').uppercase()
+        }
+        return "⚠ 本机没有 $name 解码器，投屏无声"
     }
 
     /**
@@ -845,8 +958,8 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (token != musicArtToken) return@runOnUiThread
                 if (bmp != null) {
-                    view.setImageBitmap(bmp)
-                    view.imageTintList = null
+                    view.setArt(bmp)
+                    musicBackdrop?.setArt(bmp)
                 } else {
                     showArtPlaceholder(view)
                 }
@@ -854,9 +967,9 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun showArtPlaceholder(view: android.widget.ImageView) {
-        view.setImageResource(android.R.drawable.ic_media_play)
-        view.imageTintList = android.content.res.ColorStateList.valueOf(0xFF8A8A8A.toInt())
+    private fun showArtPlaceholder(view: com.phairplay.ui.VinylDiscView) {
+        view.clearArt()
+        musicBackdrop?.setArt(null)
     }
 
     /** Decodes a cover, sampling down so a 3000 px embedded image can't OOM. */
@@ -1772,6 +1885,8 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.visibility = View.GONE
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         dlnaMusicView?.visibility = View.GONE
+        musicCardShown = false
+        musicArtView?.setSpinning(false)
         updateResumePill()
         // Nothing is playing behind the home screen any more: handing the screen
         // back also releases the MediaSession, so the TV may idle again.
