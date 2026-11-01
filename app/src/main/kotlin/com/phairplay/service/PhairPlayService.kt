@@ -82,6 +82,16 @@ class PhairPlayService : Service() {
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()
 
+    // ─── Start idempotency (v1.0.126) ───────────────────────────────────────
+    // Four boot/wake broadcasts can now issue ACTION_START within milliseconds
+    // of each other (cold boot is often immediately followed by the screen
+    // coming on). startReceivers() binds the SSDP/mDNS sockets, so a second
+    // pass would double-advertise or throw EADDRINUSE. Guarded here rather than
+    // in the receiver because only the service knows whether the sockets are
+    // actually bound.
+    private val receiversLock = Any()
+    @Volatile private var receiversActive = false
+
     private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
     val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
 
@@ -298,25 +308,44 @@ class PhairPlayService : Service() {
      * receivers according to the enabled flags.
      */
     private suspend fun startReceivers() {
-        val settings = settingsRepository.settingsFlow.first()
-        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
+        // Idempotency guard — see [receiversActive]. A duplicate ACTION_START
+        // (boot broadcast immediately followed by SCREEN_ON, or the periodic
+        // user-present wake) must not re-bind the discovery sockets.
+        synchronized(receiversLock) {
+            if (receiversActive) {
+                Logger.i("startReceivers ignored — receivers already active")
+                com.phairplay.util.DebugLog.log("SVC", "接收器已在运行，忽略重复启动请求")
+                return
+            }
+            receiversActive = true
+        }
 
-        // Watch the LAN address first: every receiver captures the IP at start
-        // time, so a subnet change must rebuild them on the new address.
-        ensureLocalIpWatcher()
+        try {
+            val settings = settingsRepository.settingsFlow.first()
+            Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
 
-        _serviceState.value = ServiceState.Running
-        updateNotification(isRunning = true)
+            // Watch the LAN address first: every receiver captures the IP at start
+            // time, so a subnet change must rebuild them on the new address.
+            ensureLocalIpWatcher()
 
-        // Diagnostics live as long as the receivers do: there is nothing to
-        // diagnose before they start, and a listening socket with no receiver
-        // behind it would only be an open door.
-        com.phairplay.util.DiagnosticsServer.start()
+            _serviceState.value = ServiceState.Running
+            updateNotification(isRunning = true)
 
-        if (settings.airPlayEnabled)   startAirPlay(settings)
-        if (settings.miracastEnabled)  startMiracast()
-        if (settings.castEnabled)      startCast()
-        if (settings.dlnaEnabled)      startDlna(settings)
+            // Diagnostics live as long as the receivers do: there is nothing to
+            // diagnose before they start, and a listening socket with no receiver
+            // behind it would only be an open door.
+            com.phairplay.util.DiagnosticsServer.start()
+
+            if (settings.airPlayEnabled)   startAirPlay(settings)
+            if (settings.miracastEnabled)  startMiracast()
+            if (settings.castEnabled)      startCast()
+            if (settings.dlnaEnabled)      startDlna(settings)
+        } catch (e: Exception) {
+            // Release the guard so a later ACTION_START can retry instead of the
+            // receivers staying dead for the rest of the process lifetime.
+            synchronized(receiversLock) { receiversActive = false }
+            throw e
+        }
     }
 
     /**
@@ -1338,6 +1367,9 @@ class PhairPlayService : Service() {
     }
 
     private fun stopAllReceiversInternal() {
+        // Clearing the flag is what makes a later ACTION_START rebuild the
+        // receivers instead of no-op'ing against a stale "active" state.
+        synchronized(receiversLock) { receiversActive = false }
         com.phairplay.util.DiagnosticsServer.stop()
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }

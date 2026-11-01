@@ -94,6 +94,7 @@
     <string name="setting_pin_auth">需要配对 PIN</string>
     <string name="setting_pin_auth_subtitle">在电视上显示验证码，连接前需输入</string>
     <string name="setting_start_on_boot">开机自启</string>
+    <string name="setting_start_on_boot_subtitle">部分盒子需在系统设置里放行自启</string>
     <string name="setting_debug_overlay">调试信息浮层</string>
     <string name="setting_debug_overlay_subtitle">投屏时实时显示 FPS、队列与丢帧统计</string>
     <string name="setting_force_high_res">高分辨率（1440p）</string>

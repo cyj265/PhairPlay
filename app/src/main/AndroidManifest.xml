@@ -132,15 +132,24 @@
             android:exported="false" />
 
         <!--
-            BootReceiver — listens for BOOT_COMPLETED and starts PhairPlayService
-            if the "Start on boot" setting is enabled.
-            exported="false" because it is only triggered by the system broadcast.
+            BootReceiver — brings PhairPlayService back after every lifecycle
+            event that can stop it, when "Start on boot" is enabled:
+              • BOOT_COMPLETED         — cold boot
+              • MY_PACKAGE_REPLACED    — cover-install / APK upgrade (BOOT_COMPLETED
+                                         is NOT re-sent here, which used to leave the
+                                         box silent after every `adb install -r`)
+              • USER_PRESENT/SCREEN_ON — wake-up where the ROM treats the remote's
+                                         power button as suspend, not a real boot
+            exported="false" because they are all system broadcasts.
         -->
         <receiver
             android:name=".service.BootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="android.intent.action.SCREEN_ON" />
             </intent-filter>
         </receiver>
 

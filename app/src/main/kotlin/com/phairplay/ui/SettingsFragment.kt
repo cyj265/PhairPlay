@@ -118,7 +118,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowDlna,         R.string.setting_dlna_enabled,       R.string.setting_dlna_subtitle)
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
-        configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
+        configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      R.string.setting_start_on_boot_subtitle)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 

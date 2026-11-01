@@ -105,6 +105,7 @@
     <string name="setting_pin_auth">Require pairing PIN</string>
     <string name="setting_pin_auth_subtitle">Show a code on the TV that must be entered to connect</string>
     <string name="setting_start_on_boot">Start on boot</string>
+    <string name="setting_start_on_boot_subtitle">Allow PhairPlay in the box ROM\'s auto-start manager if present.</string>
     <string name="setting_debug_overlay">Debug overlay</string>
     <string name="setting_debug_overlay_subtitle">Show live FPS, queue and drop stats while streaming</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>
