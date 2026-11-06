@@ -34,3 +34,16 @@ target_compile_options(alac PRIVATE -w)
 # __android_log_print for native error logging.
 find_library(log-lib log)
 target_link_libraries(alac ${log-lib})
+
+# wpa_supplicant control-interface client used to inject the Wi-Fi Display Sink IE.
+# The app-level WifiP2pManager.setWFDInfo() needs the signature-level
+# CONFIGURE_WIFI_DISPLAY permission, so on a normal install the only path is root.
+#
+# This is an executable, but it must be named libwfdctl.so: only that naming makes AGP
+# package it into the APK's jniLibs, extract it to nativeLibraryDir with the executable
+# bit set, and allow `su -c libwfdctl.so ...`.
+add_executable(wfdctl wfdctl.c)
+set_target_properties(wfdctl PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "wfdctl.so")
+

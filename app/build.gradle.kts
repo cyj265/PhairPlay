@@ -271,6 +271,9 @@ dependencies {
     // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
     implementation(libs.ddplist)
 
+    // JSON — Cast V2 control messages (Default Media Receiver protocol)
+    implementation(libs.gson)
+
     // DLNA/UPnP — jUPnP renderer stack (SSDP discovery + AVTransport control)
     // Exclude slf4j 2.x: its ServiceLoader-based provider discovery is
     // unreliable on Android and can surface as NoClassDefFoundError at runtime.

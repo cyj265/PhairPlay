@@ -107,6 +107,8 @@ class MainActivity : AppCompatActivity() {
     private var uiWindowFocused = false
 
     private var currentAirPlayState = ProtocolState.DISABLED
+    private var currentCastState = ProtocolState.DISABLED
+    private var currentMiracastState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
@@ -366,6 +368,8 @@ class MainActivity : AppCompatActivity() {
         // foreground service can never start and the receiver stays completely
         // invisible to phones (no mDNS/SSDP advertisement at all).
         requestNearbyWifiPermission()
+        // Android ≤12L still gates Wi-Fi P2P (Miracast) behind location.
+        requestP2pLocationPermission()
     }
 
     /**
@@ -1484,9 +1488,31 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * Wi-Fi P2P discovery used by Miracast requires location on Android ≤12L.
+     * Only ask when the user actually enabled Miracast, and only once per install
+     * (a permanent denial just degrades Miracast to ERROR).
+     */
+    private fun requestP2pLocationPermission() {
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.S_V2) return
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) return
+        lifecycleScope.launch {
+            if (!SettingsRepository(this@MainActivity).settingsFlow.first().miracastEnabled) return@launch
+            ActivityCompat.requestPermissions(
+                this@MainActivity,
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
+                PERMISSION_REQUEST_LOCATION
+            )
+        }
+    }
+
     companion object {
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
         private const val PERMISSION_REQUEST_NEARBY_WIFI = 1002
+        private const val PERMISSION_REQUEST_LOCATION = 1003
 
         /** How far the D-pad left/right seek (±10 s). */
         private const val SEEK_STEP_MS = 10_000L
@@ -1520,6 +1546,18 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             svc.airPlayState.collectLatest { state ->
                 currentAirPlayState = state
+                updateOverlay()
+            }
+        }
+        lifecycleScope.launch {
+            svc.castState.collectLatest { state ->
+                currentCastState = state
+                updateOverlay()
+            }
+        }
+        lifecycleScope.launch {
+            svc.miracastState.collectLatest { state ->
+                currentMiracastState = state
                 updateOverlay()
             }
         }
@@ -1680,7 +1718,9 @@ class MainActivity : AppCompatActivity() {
             // the PlayerView up would cover the picture with a black surface
             // that has nothing behind it.
             photoFrame != null -> showPhotoScreen(photoFrame)
-            currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
+            currentAirPlayState == ProtocolState.CONNECTED ||
+                currentCastState == ProtocolState.CONNECTED ||
+                currentMiracastState == ProtocolState.CONNECTED -> showStreamingScreen()
             else -> hideStreamingScreen()
         }
     }
@@ -1873,16 +1913,19 @@ class MainActivity : AppCompatActivity() {
         dlnaOsd?.hide()
         dlnaDebugHandler.removeCallbacks(dlnaDebugTick)
         dlnaDebugView?.visibility = View.GONE
-        // DLNA ended: tear down the whole full-screen overlay, exactly like
-        // hideStreamingScreen does. Leaving streamingContainer visible with
-        // the (black, no-video) AirPlay streamingScreen on top is what caused
-        // the "computer ended cast -> phone goes black until you re-enter the
-        // app" symptom: the PlayerView was hidden but the black Surface stayed.
+        // DLNA ended: tear down its layer, then let the shared overlay decide
+        // again. A hard-coded GONE here hid whatever else had just claimed the
+        // container: Miracast/Cast connections usually start while the Activity
+        // is in the background, so the state collector shows the streaming
+        // surface first and this method (bound-service restore, window focus)
+        // ran right after and hid it again — the sender reported "casting"
+        // while the Surface never existed and every frame was dropped.
         streamingScreen.visibility = View.GONE
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
         streamingContainer.visibility = View.GONE
+        updateOverlay()
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         dlnaMusicView?.visibility = View.GONE
         musicCardShown = false

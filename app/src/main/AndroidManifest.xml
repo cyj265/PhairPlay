@@ -12,7 +12,7 @@
     FOREGROUND_SERVICE          — required for persistent background receiver service (Android 9+)
     FOREGROUND_SERVICE_CONNECTED_DEVICE — required for connectedDevice foreground service type (Android 14+)
     CHANGE_WIFI_STATE           — required by WifiP2pManager for Miracast Wi-Fi Direct
-    ACCESS_FINE_LOCATION        — required by Wi-Fi P2P / Miracast discovery on Android 10+
+    ACCESS_FINE_LOCATION        — required by Wi-Fi P2P / Miracast discovery on Android ≤12L
     RECEIVE_BOOT_COMPLETED      — required for "start on boot" feature
 
     Explicitly NOT requested:
@@ -39,12 +39,13 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!--
         Android 13+ device discovery uses NEARBY_WIFI_DEVICES instead of legacy
-        location. Declaring any location permission would make the system ignore
-        NEARBY_WIFI_DEVICES entirely, so location is intentionally NOT declared:
-        the app only discovers and talks to Wi-Fi devices (DLNA/AirPlay/Miracast),
-        not geolocation. On Android 14+ NEARBY_WIFI_DEVICES is also the permission
-        required to start the connectedDevice foreground service.
+        location. Declaring any location permission without maxSdkVersion would make
+        the system ignore NEARBY_WIFI_DEVICES entirely, so location is capped at
+        Android 12L — Wi-Fi P2P discovery on older releases genuinely requires it.
     -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
     <!-- Start on boot -->

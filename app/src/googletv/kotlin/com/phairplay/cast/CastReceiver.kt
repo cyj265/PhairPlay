@@ -1,6 +1,7 @@
 package com.phairplay.cast
 
 import android.content.Context
+import android.view.Surface
 import com.google.android.gms.cast.tv.CastReceiverContext
 import com.phairplay.BuildConfig
 import com.phairplay.service.ProtocolState
@@ -15,6 +16,8 @@ import com.phairplay.util.Logger
  */
 class CastReceiver(
     private val context: Context,
+    @Suppress("UNUSED_PARAMETER") displayName: String = "",
+    @Suppress("UNUSED_PARAMETER") videoSurfaceProvider: () -> Surface? = { null },
     private val onStateChanged: (ProtocolState) -> Unit
 ) {
     private var started = false

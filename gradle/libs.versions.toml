@@ -33,6 +33,9 @@ play-services-cast-tv = "20.0.0"
 # (GET /info, SETUP) for encoding/decoding NSDictionary-style payloads.
 ddplist = "1.28"
 
+# JSON — Cast V2 control messages (Default Media Receiver protocol).
+gson = "2.11.0"
+
 # DLNA/UPnP — jUPnP (active fork of Cling) media renderer stack, CDDL-1.0
 jupnp = "3.0.3"
 # slf4j 1.7.x + slf4j-android: statically binds jUPnP logging to Logcat.
@@ -76,6 +79,9 @@ play-services-cast-tv = { group = "com.google.android.gms", name = "play-service
 
 # Binary property list parser/writer (pure Java)
 ddplist = { group = "com.googlecode.plist", name = "dd-plist", version.ref = "ddplist" }
+
+# JSON control messages for the Cast V2 receiver
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 
 # DLNA/UPnP — jUPnP core + support + Android transport
 jupnp = { group = "org.jupnp", name = "jupnp", version.ref = "jupnp" }

@@ -1,439 +1,195 @@
+// Ported from weekdayjast/MiracastReceiver (MIT). See THIRD_PARTY_NOTICES.md.
 package com.phairplay.miracast
 
 import android.content.Context
-import android.content.pm.PackageManager
-import android.net.wifi.p2p.WifiP2pManager
-import android.net.wifi.p2p.WifiP2pManager.Channel
-import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
-import android.os.Build
-import com.phairplay.airplay.RtspRequest
-import com.phairplay.airplay.RtspRequestReader
-import com.phairplay.airplay.RtspResponse
+import android.provider.Settings
+import android.view.Surface
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.OutputStream
-import java.net.ServerSocket
-import java.net.Socket
 
 /**
- * MiracastReceiver — Miracast (Wi-Fi Display / WFD) receiver service advertiser.
+ * Miracast (Wi-Fi Display) receiver entry point.
  *
- * WHY: Miracast allows Windows 10+ and Android devices to wirelessly mirror
- * their screen without being on the same Wi-Fi network. It uses Wi-Fi Direct
- * (P2P) to create a direct device-to-device connection.
+ * Orchestrates the three pieces:
+ * - [WifiDirectManager] forms the P2P group and tries framework-level WFD advertising,
+ * - [WfdRootHelper] injects the WFD IE into wpa_supplicant on rooted devices (the only
+ *   way Windows can discover a normal app install),
+ * - [WfdServer] dials the Source's RTSP port and receives RTP.
  *
- * HOW: Implementation proceeds in phases:
- * - Phase 1: Architecture defined, P2P manager initialized
- * - Phase 2: Wi-Fi P2P service discovery advertised
- * - WFD RTSP session negotiation
- * - Phase 4 (M6): H.264 video decode + audio playback
+ * Miracast cannot work at all on a non-rooted device whose system is not already
+ * advertising WFD; in that case the state goes to ERROR while AirPlay / DLNA / Cast keep
+ * running untouched.
  *
- * Miracast protocol stack:
- *   Wi-Fi Direct (P2P) → WFD RTSP → RTP/H.264 → MediaCodec → SurfaceView
- *
- * Key Android APIs used:
- *   - [WifiP2pManager]: for discovering peers and accepting connections
- *   - [WifiP2pManager.Channel]: communication channel to the P2P framework
- *   - Custom WFD RTSP: similar to AirPlay RTSP but with WFD-specific methods
- *
- * IMPORTANT LIMITATIONS (see ADR-001):
- * - Miracast requires Wi-Fi Direct, which some Android TV devices disable
- * - The WFD stack on Android TV is partly hidden (system APIs)
- * - Real-world compatibility must be tested on actual hardware
- * - Miracast is NOT available on Fire TV with standard APIs
- *
- * Example:
- *   val receiver = MiracastReceiver(context) { state -> updateUI(state) }
- *   receiver.start()  // begins P2P service advertisement
- *   receiver.stop()   // stops advertisement and closes session
+ * @param displayName name shown in the sender's cast list (shared with AirPlay / DLNA)
+ * @param videoSurfaceProvider display target; null while the player UI has no Surface
  */
 class MiracastReceiver(
     private val context: Context,
+    private val displayName: String,
+    private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit
 ) {
+    companion object {
+        const val WFD_RTSP_PORT = 7236
+        private const val RTP_PORT = 19000
+    }
 
-    // Android's Wi-Fi P2P manager — the entry point for all Wi-Fi Direct operations
-    private var wifiP2pManager: WifiP2pManager? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // The communication channel between the app and the Wi-Fi P2P framework
-    private var channel: Channel? = null
+    @Volatile private var stopped = false
+    @Volatile private var streaming = false
+    @Volatile private var advertisingInFlight = false
+    @Volatile private var rootAdvertisingActive = false
+    @Volatile private var startupFailed = false
 
-    // The local DNS-SD service record advertised through Wi-Fi Direct.
-    private var serviceInfo: WifiP2pDnsSdServiceInfo? = null
-
-    // Whether the P2P service advertisement is currently active
-    @Volatile
-    private var isAdvertising = false
-
-    private val job = SupervisorJob()
-    private val scope = CoroutineScope(Dispatchers.IO + job)
-    private val rtspServer = WfdRtspServer(
-        onSessionStarted = {
-            Logger.i("Miracast WFD session connected")
-            onStateChanged(ProtocolState.CONNECTED)
-        },
-        onSessionStopped = {
-            Logger.i("Miracast WFD session stopped")
-            if (isAdvertising) onStateChanged(ProtocolState.ADVERTISING)
-        }
+    private val wfdServer = WfdServer(
+        context = context,
+        port = WFD_RTSP_PORT,
+        rtpPort = RTP_PORT,
+        surfaceProvider = { videoSurfaceProvider() }
     )
 
-    /**
-     * Starts the Miracast receiver.
-     *
-     * Current implementation:
-     * - Initializes the WifiP2pManager and Channel
-     * - Logs availability of Wi-Fi Direct on this device
-     * - Registers a local Wi-Fi Direct DNS-SD WFD service
-     * - Opens the WFD RTSP control server on port 7236
-     */
+    private var wifiDirect: WifiDirectManager? = null
+
     fun start() {
-        Logger.i("MiracastReceiver starting")
-        initializeWifiP2p()
-    }
+        stopped = false
+        streaming = false
+        startupFailed = false
 
-    /**
-     * Stops the Miracast receiver.
-     *
-     * Unregisters P2P service, disconnects any active WFD session,
-     * and releases the WifiP2pManager channel.
-     */
-    fun stop() {
-        Logger.i("MiracastReceiver stopping")
-        try {
-            stopP2pAdvertisement()
-            rtspServer.stop()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                channel?.close()
+        wfdServer.apply {
+            onConnectionRequested = { clientName, clientAddress ->
+                Logger.i("Miracast connection requested: $clientName from $clientAddress")
             }
-        } catch (e: Exception) {
-            Logger.e("Error stopping MiracastReceiver (non-fatal)", e)
-        } finally {
-            wifiP2pManager = null
-            channel = null
-            isAdvertising = false
-            job.cancel()
-            onStateChanged(ProtocolState.DISABLED)
-        }
-    }
-
-    /**
-     * Initializes the WifiP2pManager and Channel.
-     *
-     * The [WifiP2pManager] is retrieved from Android's system services.
-     * The [Channel] is the app's communication link to the P2P framework.
-     *
-     * If Wi-Fi Direct is not available on this device (some Android TV boxes
-     * don't support it), [wifiP2pManager] will be null and we emit an ERROR state.
-     */
-    private fun initializeWifiP2p() {
-        wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
-        if (wifiP2pManager == null) {
-            Logger.w("WifiP2pManager not available on this device — Miracast not supported")
-            onStateChanged(ProtocolState.ERROR)
-            return
+            onConnectionEstablished = { sessionId ->
+                Logger.i("Miracast session established: $sessionId")
+            }
+            onStreamStarted = { rtpPort ->
+                Logger.i("Miracast stream started on RTP port $rtpPort")
+                streaming = true
+                onStateChanged(ProtocolState.CONNECTED)
+            }
+            onStreamStopped = {
+                Logger.i("Miracast stream stopped")
+                if (streaming) {
+                    streaming = false
+                    if (!stopped) onStateChanged(ProtocolState.ADVERTISING)
+                }
+            }
+            start()
         }
 
-        // Initialize the channel: connects the app to the Wi-Fi P2P framework
-        // The looper parameter specifies which thread receives P2P framework callbacks
-        channel = wifiP2pManager!!.initialize(
-            context,
-            context.mainLooper,
-            object : WifiP2pManager.ChannelListener {
-                override fun onChannelDisconnected() {
-                    // P2P framework disconnected — this can happen if Wi-Fi is turned off
-                    Logger.w("WifiP2p channel disconnected")
+        wifiDirect = WifiDirectManager(context, displayName).apply {
+            onStartupState = stateChanged@{ state ->
+                if (stopped) return@stateChanged
+                val failure = when (state) {
+                    WifiDirectManager.StartupState.STARTING -> null
+                    WifiDirectManager.StartupState.UNSUPPORTED -> "Wi-Fi Direct unsupported"
+                    WifiDirectManager.StartupState.PERMISSION_REQUIRED ->
+                        "Wi-Fi Direct needs the location permission"
+                    WifiDirectManager.StartupState.WIFI_DISABLED -> "Wi-Fi is disabled"
+                    WifiDirectManager.StartupState.FAILED -> "Wi-Fi Direct setup failed"
+                }
+                if (failure != null) {
+                    Logger.w("Miracast: $failure")
+                    startupFailed = true
                     onStateChanged(ProtocolState.ERROR)
                 }
             }
-        )
+            onWfdConfigured = { if (!stopped) onStateChanged(ProtocolState.ADVERTISING) }
+            onGroupCreated = { group ->
+                Logger.i("Miracast: P2P group ready (${group.networkName})")
+                advertiseViaRootIfNeeded()
+            }
+            onDeviceConnected = { device ->
+                Logger.i("Miracast device connected: ${device.deviceName}")
+            }
+            onDeviceDisconnected = { Logger.i("Miracast device disconnected") }
+        }.also { it.start() }
 
-        Logger.i("WifiP2pManager initialized — registering P2P service")
-        registerP2pService()
+        if (!startupFailed) onStateChanged(ProtocolState.ADVERTISING)
     }
 
     /**
-     * Stops the P2P service advertisement.
+     * Windows only sees the sink through the WFD IE. The framework refuses that to normal
+     * apps, so try root injection once the P2P group exists; without root and without a
+     * system-wide WFD advertisement the receiver cannot be discovered.
      */
-    private fun stopP2pAdvertisement() {
-        val manager = wifiP2pManager ?: return
-        val activeChannel = channel ?: return
-        val activeService = serviceInfo ?: return
-        if (!isAdvertising) return
+    private fun advertiseViaRootIfNeeded() {
+        if (stopped || advertisingInFlight) return
 
-        try {
-            manager.removeLocalService(
-                activeChannel,
-                activeService,
-                object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        Logger.d("P2P service advertisement stopped")
-                    }
-
-                    override fun onFailure(reason: Int) {
-                        Logger.w("P2P service removal failed, reason=$reason (non-fatal)")
-                    }
-                }
-            )
-        } catch (e: SecurityException) {
-            Logger.e("Missing Wi-Fi P2P permission while removing Miracast service", e)
-        }
-        serviceInfo = null
-        isAdvertising = false
-    }
-
-    /**
-     * Registers the WFD local service record used by Wi-Fi Direct discovery.
-     *
-     * Android exposes Wi-Fi Direct service discovery through DNS-SD TXT records.
-     * Miracast senders look for `_wfd._tcp` and then continue with WFD capability
-     * negotiation over RTSP after the P2P group is formed.
-     */
-    private fun registerP2pService() {
-        val manager = wifiP2pManager
-        val activeChannel = channel
-        if (manager == null || activeChannel == null) {
-            Logger.w("Cannot register Miracast P2P service before Wi-Fi P2P initialization")
-            onStateChanged(ProtocolState.ERROR)
+        if (wifiDirect?.isWfdConfigured == true) {
+            Logger.i("Miracast: WFD already advertised by the framework")
+            onStateChanged(ProtocolState.ADVERTISING)
             return
         }
-        if (!hasWifiP2pPermission()) {
-            Logger.w("Cannot register Miracast P2P service: missing Wi-Fi Direct permission")
-            onStateChanged(ProtocolState.ERROR)
+        if (systemWfdEnabled()) {
+            // A ROM-level WFD sink may work even though this app cannot read its state.
+            Logger.i("Miracast: system reports wifi_display_on=1")
+            onStateChanged(ProtocolState.ADVERTISING)
             return
         }
 
-        val txtRecord = mapOf(
-            "wfd_device_type" to "primary_sink",
-            "wfd_session_available" to "1",
-            "wfd_rtsp_port" to WFD_RTSP_PORT.toString(),
-            "wfd_video_formats" to "h264-chp,h264-cbp",
-            "wfd_audio_codecs" to "lpcm"
-        )
-        val localService = WifiP2pDnsSdServiceInfo.newInstance(
-            SERVICE_INSTANCE_NAME,
-            SERVICE_TYPE_WFD,
-            txtRecord
-        )
+        advertisingInFlight = true
+        scope.launch {
+            val result = runCatching { WfdRootHelper.advertiseSinkResult(context, WFD_RTSP_PORT) }
+                .getOrDefault(WfdRootHelper.AdvertiseResult.COMMAND_FAILED)
+            advertisingInFlight = false
+            rootAdvertisingActive = result == WfdRootHelper.AdvertiseResult.COMMAND_SENT
+            if (stopped) return@launch
 
-        try {
-            manager.addLocalService(
-                activeChannel,
-                localService,
-                object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        serviceInfo = localService
-                        isAdvertising = true
-                        rtspServer.start(scope)
-                        Logger.i("Miracast WFD P2P service advertised")
-                        onStateChanged(ProtocolState.ADVERTISING)
-                    }
-
-                    override fun onFailure(reason: Int) {
-                        serviceInfo = null
-                        isAdvertising = false
-                        Logger.e("Miracast WFD P2P service registration failed, reason=$reason")
-                        onStateChanged(ProtocolState.ERROR)
-                    }
+            when (result) {
+                WfdRootHelper.AdvertiseResult.COMMAND_SENT -> {
+                    WfdRootHelper.setDeviceName(context, displayName)
+                    onStateChanged(ProtocolState.ADVERTISING)
                 }
-            )
-        } catch (e: SecurityException) {
-            serviceInfo = null
-            isAdvertising = false
-            Logger.e("Missing Wi-Fi P2P permission while registering Miracast service", e)
-            onStateChanged(ProtocolState.ERROR)
+                WfdRootHelper.AdvertiseResult.ROOT_UNAVAILABLE -> {
+                    Logger.w("Miracast: root unavailable — Windows cannot discover this device")
+                    onStateChanged(ProtocolState.ERROR)
+                }
+                WfdRootHelper.AdvertiseResult.HELPER_MISSING,
+                WfdRootHelper.AdvertiseResult.SOCKET_UNAVAILABLE,
+                WfdRootHelper.AdvertiseResult.COMMAND_FAILED -> {
+                    Logger.w("Miracast: WFD advertisement failed ($result)")
+                    onStateChanged(ProtocolState.ERROR)
+                }
+            }
         }
     }
 
-    private fun hasWifiP2pPermission(): Boolean {
-        return context.checkSelfPermission(PERMISSION_NEARBY_WIFI_DEVICES) ==
-            PackageManager.PERMISSION_GRANTED ||
-            context.checkSelfPermission(PERMISSION_ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-    companion object {
-        const val WFD_RTSP_PORT = 7236
-        private const val SERVICE_INSTANCE_NAME = "PhairPlay"
-        private const val SERVICE_TYPE_WFD = "_wfd._tcp"
-        private const val PERMISSION_ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
-        private const val PERMISSION_NEARBY_WIFI_DEVICES = "android.permission.NEARBY_WIFI_DEVICES"
-    }
-}
-
-internal class WfdRtspServer(
-    private val onSessionStarted: () -> Unit,
-    private val onSessionStopped: () -> Unit
-) {
-    private val requestReader = RtspRequestReader(
-        maxMessageBytes = MAX_MESSAGE_BYTES,
-        maxPhotoBytes = MAX_MESSAGE_BYTES
-    )
-
-    @Volatile private var running = false
-    @Volatile private var serverSocket: ServerSocket? = null
-    @Volatile private var activeClient: Socket? = null
-    private var currentCSeq = 0
-    private var sessionStarted = false
-
-    fun start(scope: CoroutineScope) {
-        if (running) return
-        running = true
-        scope.launch(Dispatchers.IO) {
-            runServer(this)
-        }
-    }
+    private fun systemWfdEnabled(): Boolean = runCatching {
+        Settings.Global.getInt(context.contentResolver, "wifi_display_on", 0) == 1
+    }.getOrDefault(false)
 
     fun stop() {
-        running = false
-        try {
-            activeClient?.close()
-            serverSocket?.close()
-        } catch (e: Exception) {
-            Logger.e("Error closing WFD RTSP sockets (non-fatal)", e)
+        stopped = true
+        streaming = false
+
+        runCatching { wfdServer.stop() }
+        runCatching { wifiDirect?.stop() }
+        wifiDirect = null
+
+        if (rootAdvertisingActive) {
+            rootAdvertisingActive = false
+            // WFD IE lives in wpa_supplicant and outlives the app; withdraw it even though
+            // this scope is about to be cancelled.
+            val appContext = context.applicationContext
+            Thread({ runCatching { WfdRootHelper.stopAdvertising(appContext) } }, "wfd-stop").start()
         }
-        activeClient = null
-        serverSocket = null
-        if (sessionStarted) {
-            sessionStarted = false
-            onSessionStopped()
-        }
+
+        scope.cancel()
+        Logger.i("MiracastReceiver stopped")
+        onStateChanged(ProtocolState.DISABLED)
     }
 
-    private fun runServer(scope: CoroutineScope) {
-        try {
-            serverSocket = ServerSocket(MiracastReceiver.WFD_RTSP_PORT)
-            Logger.i("WFD RTSP server listening on port ${MiracastReceiver.WFD_RTSP_PORT}")
-            while (running && scope.isActive) {
-                val client = serverSocket!!.accept()
-                if (activeClient != null && !activeClient!!.isClosed) {
-                    sendServiceUnavailable(client)
-                    client.close()
-                    continue
-                }
-                activeClient = client
-                handleClient(client)
-            }
-        } catch (e: Exception) {
-            if (running) Logger.e("WFD RTSP server error", e)
-        }
-    }
+    fun isRunning(): Boolean = !stopped
 
-    private fun handleClient(socket: Socket) {
-        try {
-            val input = socket.getInputStream()
-            val output = socket.getOutputStream()
-            while (running && !socket.isClosed) {
-                val request = requestReader.read(input) ?: break
-                currentCSeq = request.headers["CSeq"]?.toIntOrNull() ?: 0
-                val response = routeRequest(request)
-                sendResponse(output, response)
-                if (request.method == "TEARDOWN") break
-            }
-        } catch (e: Exception) {
-            if (running) Logger.e("Error handling WFD RTSP client", e)
-        } finally {
-            try {
-                socket.close()
-            } catch (e: Exception) {
-                Logger.e("Error closing WFD RTSP client socket (non-fatal)", e)
-            }
-            activeClient = null
-            if (sessionStarted) {
-                sessionStarted = false
-                onSessionStopped()
-            }
-        }
-    }
-
-    internal fun routeRequest(request: RtspRequest): RtspResponse {
-        Logger.d("WFD RTSP ${request.method} ${request.uri}")
-        return when (request.method) {
-            "OPTIONS" -> RtspResponse(
-                statusCode = 200,
-                statusMessage = "OK",
-                headers = mapOf("Public" to "org.wfa.wfd1.0, GET_PARAMETER, SET_PARAMETER")
-            )
-            "GET_PARAMETER" -> RtspResponse(
-                statusCode = 200,
-                statusMessage = "OK",
-                headers = mapOf("Content-Type" to "text/parameters"),
-                body = sinkParameters()
-            )
-            "SET_PARAMETER" -> RtspResponse(statusCode = 200, statusMessage = "OK")
-            "SETUP" -> RtspResponse(
-                statusCode = 200,
-                statusMessage = "OK",
-                headers = mapOf(
-                    "Session" to WFD_SESSION_ID,
-                    "Transport" to "RTP/AVP/TCP;unicast;interleaved=0-1"
-                )
-            )
-            "PLAY" -> {
-                if (!sessionStarted) {
-                    sessionStarted = true
-                    onSessionStarted()
-                }
-                RtspResponse(
-                    statusCode = 200,
-                    statusMessage = "OK",
-                    headers = mapOf("Session" to WFD_SESSION_ID)
-                )
-            }
-            "PAUSE" -> RtspResponse(
-                statusCode = 200,
-                statusMessage = "OK",
-                headers = mapOf("Session" to WFD_SESSION_ID)
-            )
-            "TEARDOWN" -> RtspResponse(
-                statusCode = 200,
-                statusMessage = "OK",
-                headers = mapOf("Session" to WFD_SESSION_ID)
-            )
-            else -> RtspResponse(statusCode = 501, statusMessage = "Not Implemented")
-        }
-    }
-
-    private fun sinkParameters(): String =
-        listOf(
-            "wfd_audio_codecs: LPCM 00000003 00",
-            "wfd_video_formats: 00 00 02 10 0001FFFF 00000000 00000000 00 0000 0000 00 none none",
-            "wfd_client_rtp_ports: RTP/AVP/TCP;unicast 0 0 mode=play",
-            "wfd_content_protection: none",
-            "wfd_display_edid: none",
-            "wfd_coupled_sink: none",
-            "wfd_connector_type: 05"
-        ).joinToString(separator = "\r\n", postfix = "\r\n")
-
-    private fun sendResponse(outputStream: OutputStream, response: RtspResponse) {
-        val sb = StringBuilder()
-        sb.append("${response.protocol} ${response.statusCode} ${response.statusMessage}\r\n")
-        sb.append("CSeq: $currentCSeq\r\n")
-        sb.append("Server: PhairPlay/1.0\r\n")
-        response.headers.forEach { (key, value) -> sb.append("$key: $value\r\n") }
-        if (response.body.isNotEmpty()) {
-            sb.append("Content-Length: ${response.body.toByteArray(Charsets.UTF_8).size}\r\n")
-        }
-        sb.append("\r\n")
-        sb.append(response.body)
-        outputStream.write(sb.toString().toByteArray(Charsets.UTF_8))
-        outputStream.flush()
-    }
-
-    private fun sendServiceUnavailable(socket: Socket) {
-        val response = "RTSP/1.0 503 Service Unavailable\r\nCSeq: 0\r\n\r\n"
-        socket.outputStream.write(response.toByteArray(Charsets.UTF_8))
-        socket.outputStream.flush()
-    }
-
-    companion object {
-        private const val MAX_MESSAGE_BYTES = 65536
-        private const val WFD_SESSION_ID = "PhairPlayWfdSession"
+    fun disconnectSender() {
+        runCatching { wfdServer.disconnectSender() }
+        runCatching { wifiDirect?.disconnectSender() }
     }
 }

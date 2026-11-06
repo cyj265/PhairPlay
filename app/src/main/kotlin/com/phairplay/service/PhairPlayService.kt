@@ -341,8 +341,8 @@ class PhairPlayService : Service() {
             com.phairplay.util.DiagnosticsServer.start()
 
             if (settings.airPlayEnabled)   startAirPlay(settings)
-            if (settings.miracastEnabled)  startMiracast()
-            if (settings.castEnabled)      startCast()
+            if (settings.miracastEnabled)  startMiracast(settings)
+            if (settings.castEnabled)      startCast(settings)
             if (settings.dlnaEnabled)      startDlna(settings)
         } catch (e: Exception) {
             // Release the guard so a later ACTION_START can retry instead of the
@@ -571,20 +571,66 @@ class PhairPlayService : Service() {
         Logger.d("AirPlay receiver started (displayName='${settings.effectiveDisplayName}')")
     }
 
-    private fun startMiracast() {
+    private fun startMiracast(settings: AppSettings) {
         _miracastState.value = ProtocolState.ADVERTISING
         miracastReceiver = MiracastReceiver(
             context = applicationContext,
-            onStateChanged = { state -> _miracastState.value = state }
+            displayName = settings.effectiveDisplayName.ifBlank {
+                NetworkUtils.getDeviceName(applicationContext)
+            },
+            videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            onStateChanged = { state ->
+                _miracastState.value = state
+                when (state) {
+                    ProtocolState.CONNECTED -> {
+                        _activeConnection.value =
+                            ActiveConnection("Miracast", Protocol.MIRACAST)
+                        updateNotification(isRunning = true, streamingSenderName = "Miracast")
+                        bringActivityToForeground("Miracast 投屏")
+                    }
+                    ProtocolState.ADVERTISING,
+                    ProtocolState.DISABLED,
+                    ProtocolState.ERROR -> {
+                        if (_activeConnection.value?.protocol == Protocol.MIRACAST) {
+                            _activeConnection.value = null
+                        }
+                        updateNotification(isRunning = state != ProtocolState.DISABLED &&
+                                                       state != ProtocolState.ERROR)
+                    }
+                }
+            }
         ).also { it.start() }
         Logger.d("Miracast receiver started")
     }
 
-    private fun startCast() {
+    private fun startCast(settings: AppSettings) {
         _castState.value = ProtocolState.ADVERTISING
         castReceiver = CastReceiver(
             context = applicationContext,
-            onStateChanged = { state -> _castState.value = state }
+            displayName = settings.effectiveDisplayName.ifBlank {
+                NetworkUtils.getDeviceName(applicationContext)
+            },
+            videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            onStateChanged = { state ->
+                _castState.value = state
+                when (state) {
+                    ProtocolState.CONNECTED -> {
+                        _activeConnection.value =
+                            ActiveConnection("Google Cast", Protocol.CAST)
+                        updateNotification(isRunning = true, streamingSenderName = "Google Cast")
+                        bringActivityToForeground("Cast 投送")
+                    }
+                    ProtocolState.ADVERTISING,
+                    ProtocolState.DISABLED,
+                    ProtocolState.ERROR -> {
+                        if (_activeConnection.value?.protocol == Protocol.CAST) {
+                            _activeConnection.value = null
+                        }
+                        updateNotification(isRunning = state != ProtocolState.DISABLED &&
+                                                       state != ProtocolState.ERROR)
+                    }
+                }
+            }
         ).also { it.start() }
         Logger.d("Cast receiver started")
     }
