@@ -43,12 +43,25 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
      * @param listenPort the preferred TCP port; pass the value from
      *                   {@link DlnaUpnpServiceConfiguration#STREAM_LISTEN_PORT}
      *                   so the renderer keeps the address people already know.
-     *                   Taken? Bind ephemerally and report it through
-     *                   {@link #getPort()}.
+     *                   Taken? Scan a few neighbours, then bind ephemerally and
+     *                   report the result through {@link #getPort()}.
      */
     public AndroidStreamServer(int listenPort) {
         this.listenPort = listenPort;
     }
+
+    /**
+     * How many ports above {@link #listenPort} are tried before falling back to
+     * an arbitrary one.
+     *
+     * The ephemeral fallback already kept the renderer discoverable, but the
+     * number changed on every restart (field finding: com.shafa.marke on this
+     * box owns :8899, so the DLNA server never got its usual port and the
+     * bookmark http://box:8899/debug never worked). 8899 is also the port the
+     * debug page is documented under; staying one step above it keeps both the
+     * LOCATION and the debug URL stable across restarts.
+     */
+    private static final int PORT_SCAN_SPAN = 8;
 
     @Override
     public void init(InetAddress bindAddress, Router router) throws InitializationException {
@@ -62,13 +75,11 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
                 // Something else already owns the port — on these boxes it is
                 // usually another casting app. Refusing to start would take the
                 // whole renderer down (the device would not appear in any
-                // picker), whereas an ephemeral port only costs the one thing
-                // that never needed a fixed number: SSDP carries the LOCATION,
-                // and ManualSsdp reads it back from getPort().
-                serverSocket.close();
-                serverSocket = new ServerSocket();
-                serverSocket.setReuseAddress(true);
-                serverSocket.bind(new InetSocketAddress(bindAddress, 0));
+                // picker), whereas another port only costs a bookmark: SSDP
+                // carries the LOCATION, and ManualSsdp reads it back from
+                // getPort().
+                closeQuietly(serverSocket);
+                serverSocket = bindFirstFree(bindAddress);
                 logger.warn("Port {} is busy, DLNA control server listening on {} instead",
                         listenPort, serverSocket.getLocalPort());
             }
@@ -92,6 +103,34 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
     @Override
     public int getPort() {
         return localPort;
+    }
+
+    /** First free port in {@code listenPort+1 … listenPort+PORT_SCAN_SPAN}, else ephemeral. */
+    private ServerSocket bindFirstFree(InetAddress bindAddress) throws IOException {
+        for (int port = listenPort + 1; port <= listenPort + PORT_SCAN_SPAN; port++) {
+            ServerSocket candidate = new ServerSocket();
+            candidate.setReuseAddress(true);
+            try {
+                candidate.bind(new InetSocketAddress(bindAddress, port));
+                return candidate;
+            } catch (IOException alsoTaken) {
+                closeQuietly(candidate);
+            }
+        }
+        ServerSocket fallback = new ServerSocket();
+        fallback.setReuseAddress(true);
+        fallback.bind(new InetSocketAddress(bindAddress, 0));
+        return fallback;
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) {
+            return;
+        }
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
     }
 
     @Override

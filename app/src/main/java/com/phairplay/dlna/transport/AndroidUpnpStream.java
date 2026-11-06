@@ -141,9 +141,11 @@ public class AndroidUpnpStream extends UpnpStream {
                     writeXml(socket.getOutputStream(), fullResp);
                     return;
                 }
-                // Unknown action -> SOAP fault (500 with fault body)
-                DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP fault (未知动作) action=" + actionName);
-                writeXml(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(ManualDlnaHttp.faultBody()));
+                // The handler parked the UPnP error code for this request (402,
+                // 701, 702, 710–714) or left none, in which case it is 501.
+                String faultBody = ManualDlnaHttp.takeFaultBody();
+                DebugLog.INSTANCE.log("HTTP", "POST " + reqPath + " -> SOAP fault action=" + actionName);
+                writeFault(socket.getOutputStream(), ManualDlnaHttp.wrapEnvelope(faultBody));
                 return;
             }
             // GENA event subscription: answer manually instead of relying on
@@ -406,10 +408,20 @@ public class AndroidUpnpStream extends UpnpStream {
         writeXml(os, xml, null);
     }
 
+    /** A SOAP fault is a 500 on the wire, not a 200 with a fault-shaped body. */
+    private void writeFault(OutputStream os, String xml) throws IOException {
+        writeStatusAndXml(os, "HTTP/1.1 500 Internal Server Error", xml, null);
+    }
+
     private void writeXml(OutputStream os, String xml, String extraHeader) throws IOException {
+        writeStatusAndXml(os, "HTTP/1.1 200 OK", xml, extraHeader);
+    }
+
+    private void writeStatusAndXml(OutputStream os, String statusLine, String xml,
+                                   String extraHeader) throws IOException {
         byte[] body = xml.getBytes("UTF-8");
         StringBuilder head = new StringBuilder();
-        head.append("HTTP/1.1 200 OK\r\n");
+        head.append(statusLine).append("\r\n");
         head.append("Content-Type: text/xml; charset=\"utf-8\"\r\n");
         head.append("Content-Length: ").append(body.length).append("\r\n");
         head.append("Connection: close\r\n");

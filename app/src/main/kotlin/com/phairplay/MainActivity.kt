@@ -2018,14 +2018,14 @@ class MainActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_MEDIA_REWIND,
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS,
                 KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> {
-                    transportBackward(event.keyCode)
+                    transportBackward(event.keyCode, event.repeatCount)
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT,
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
                 KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> {
-                    transportForward(event.keyCode)
+                    transportForward(event.keyCode, event.repeatCount)
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_CENTER,
@@ -2076,11 +2076,13 @@ class MainActivity : AppCompatActivity() {
      * "previous" cannot mean another track — it seeks back, which is the same
      * intent the sender receives in the AirPlay case.
      */
-    private fun transportBackward(keyCode: Int) {
+    private fun transportBackward(keyCode: Int, repeatCount: Int = 0) {
         if (isDlnaPlayerVisible) {
-            val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) -30_000L else -SEEK_STEP_MS
-            seekBy(step)
-            showDlnaOsd()
+            if (heldSeekAllowed(repeatCount)) {
+                val base = if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) 30_000L else SEEK_STEP_MS
+                seekBy(-heldSeekStepMs(base, repeatCount))
+                showDlnaOsd()
+            }
         } else {
             sendDacp(
                 when (keyCode) {
@@ -2093,11 +2095,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun transportForward(keyCode: Int) {
+    private fun transportForward(keyCode: Int, repeatCount: Int = 0) {
         if (isDlnaPlayerVisible) {
-            val step = if (keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) 30_000L else SEEK_STEP_MS
-            seekBy(step)
-            showDlnaOsd()
+            if (heldSeekAllowed(repeatCount)) {
+                val base = if (keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) 30_000L else SEEK_STEP_MS
+                seekBy(heldSeekStepMs(base, repeatCount))
+                showDlnaOsd()
+            }
         } else {
             sendDacp(
                 when (keyCode) {
@@ -2108,6 +2112,31 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         }
+    }
+
+    /**
+     * v123 — 长按方向键加速：第一下 10 秒，按住后 15 秒，再久 30 秒。
+     *
+     * 遥控器按住时会以约 50ms 的间隔连发 repeat 事件；每个 repeat 都 seek
+     * 会让 ExoPlayer 连续 flush 缓冲，画面反而卡住。这里把 250ms 当一帧，
+     * 一帧只落地一次 seek，步长按按住时长放大。
+     */
+    private var lastHeldSeekAtMs = 0L
+
+    private fun heldSeekAllowed(repeatCount: Int): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (repeatCount > 0 && now - lastHeldSeekAtMs < 250L) return false
+        lastHeldSeekAtMs = now
+        return true
+    }
+
+    private fun heldSeekStepMs(baseMs: Long, repeatCount: Int): Long {
+        val scaled = when {
+            repeatCount <= 0 -> baseMs
+            repeatCount <= 2 -> baseMs * 3 / 2
+            else -> baseMs * 3
+        }
+        return scaled.coerceAtMost(30_000L)
     }
 
     private fun sendDacp(command: String) {
@@ -2192,13 +2221,41 @@ class MainActivity : AppCompatActivity() {
             listOf(
                 "播放 / 暂停" to { transportPlayPause() },
                 "快退 ${SEEK_STEP_MS / 1000} 秒" to { seekBy(-SEEK_STEP_MS); showDlnaOsd() },
-                "快进 ${SEEK_STEP_MS / 1000} 秒" to { seekBy(SEEK_STEP_MS); showDlnaOsd() },
+                "快进 ${SEEK_STEP_MS / 1000} 秒（长按加速）" to { seekBy(SEEK_STEP_MS); showDlnaOsd() },
+                "重新加载视频" to { reloadCurrentCast() },
                 "画面比例：${resizeModeName(pv.resizeMode)}" to { showResizeSettings(pv) },
                 "播放速度：${speedLabel(p)}" to { showSpeedSettings(p) },
-                "音轨 / 字幕" to { showTrackSettings(p) },
+                "音轨：${currentTrackLabel(p, androidx.media3.common.C.TRACK_TYPE_AUDIO)}"
+                    to { showAudioTrackSettings(p) },
+                "字幕：${currentTrackLabel(p, androidx.media3.common.C.TRACK_TYPE_TEXT)}"
+                    to { showSubtitleSettings(p) },
                 "关闭" to {}
             )
         )
+    }
+
+    /**
+     * v123 — 「重新加载视频」: tear the item down and build it again.
+     *
+     * For a live source that wedged, the sender keeps polling the *same* URI,
+     * and the idempotent duplicate guard in the receiver correctly refuses to
+     * rebuild it. Nothing the sender can send fixes that, so the user needs a
+     * local way to force it. The stop is the UI's own (not a dismissal), which
+     * is what lets the rebuild come straight back on screen.
+     */
+    private fun reloadCurrentCast() {
+        val svc = service
+        val uri = svc?.dlnaCurrentUri()
+        if (uri.isNullOrBlank()) {
+            showTvToast("没有可重新加载的视频")
+            return
+        }
+        com.phairplay.util.DebugLog.log("UI", "用户点「重新加载视频」→ 重建: ${uri.take(64)}…")
+        // Both calls post to the same main-thread handler, in this order, so
+        // the teardown always lands before the rebuild.
+        svc.stopDlnaPlayback(false)
+        com.phairplay.dlna.renderer.DlnaPlayerBridge.get()?.startPlayback(uri)
+        showTvToast("正在重新加载…")
     }
 
     /** Same hand-drawn menu, but marks the row that is currently selected. */
@@ -2279,43 +2336,139 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Audio/text track chooser via the Tracks API. Selecting a group override
-     * is how an unsupported audio codec (AC3/DTS on a TV box) gets swapped for
-     * a track the hardware can decode.
+     * v123 — 音轨与字幕拆成两张菜单。
+     *
+     * 老菜单把两类轨道平铺在一张列表里，末尾一个空行「关闭」——从沙发上看
+     * 不出那行关的是字幕还是全部，而且盒子硬解不了的音轨（AC3/DTS）也照样
+     * 列出来：选中它只会黑屏。现在每类第一行是「自动/关闭」，只列设备真能
+     * 解的轨道，语言显示成「国语」而不是「zh」。
      */
-    private fun showTrackSettings(p: androidx.media3.common.Player) {
+    private fun showAudioTrackSettings(p: androidx.media3.common.Player) {
+        val audio = androidx.media3.common.C.TRACK_TYPE_AUDIO
         val groups = p.currentTracks.groups.filter {
-            it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO ||
-                it.type == androidx.media3.common.C.TRACK_TYPE_TEXT
+            it.type == audio && (0 until it.length).any { i -> it.isTrackSupported(i) }
         }
         if (groups.isEmpty()) {
-            // showTvToast, not Toast: the system toast is ~14 sp and sits on
-            // the very bottom edge — unreadable from a sofa.
-            showTvToast("该媒体没有可选音轨/字幕")
+            showTvToast("该媒体没有可选音轨")
             return
         }
+        val params = p.trackSelectionParameters
         val entries = ArrayList<Pair<String, () -> Unit>>()
+        entries.add("自动" to {
+            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(audio)
+                .setTrackTypeDisabled(audio, false)
+                .build()
+            showTvToast("音轨: 自动")
+        })
+        // No explicit override means the player is choosing for itself, which
+        // is what "自动" is; the row that happens to be selected is not a
+        // decision the user made.
+        var checked = if (params.overrides.keys.none { it.type == audio }) 0 else -1
         for (group in groups) {
-            val kind = if (group.type == androidx.media3.common.C.TRACK_TYPE_AUDIO) "音轨" else "字幕"
             for (i in 0 until group.length) {
+                if (!group.isTrackSupported(i)) continue
                 val fmt = group.getTrackFormat(i)
-                val lang = fmt.language?.takeIf { it.isNotBlank() && it != "und" } ?: "默认"
-                val label = fmt.label ?: fmt.codecs ?: ""
-                // Mark the row that is actually in use, same as the speed and
-                // aspect menus do.
-                val selected = if (group.isTrackSelected(i)) " ✓" else ""
-                entries.add("$kind $i · $lang ${label.ifBlank { "" }}$selected".trim() to {
-                    p.trackSelectionParameters = p.trackSelectionParameters
-                        .buildUpon()
+                if (group.isTrackSelected(i)) checked = entries.size
+                entries.add(trackLabel(fmt) to {
+                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
                         .setOverrideForType(
                             androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i)
                         )
                         .build()
+                    showTvToast("音轨: ${trackLabel(fmt)}")
                 })
             }
         }
-        entries.add("关闭" to {})
-        showMenuDialog("音轨 / 字幕", entries)
+        showMenuDialogChecked("音轨", entries, checked)
+    }
+
+    /** Subtitle chooser; see [showAudioTrackSettings] for the reasoning. */
+    private fun showSubtitleSettings(p: androidx.media3.common.Player) {
+        val text = androidx.media3.common.C.TRACK_TYPE_TEXT
+        val groups = p.currentTracks.groups.filter { g ->
+            g.type == text && (0 until g.length).any { i ->
+                g.isTrackSupported(i) && !isCaptionPlaceholder(g.getTrackFormat(i))
+            }
+        }
+        if (groups.isEmpty()) {
+            showTvToast("该媒体没有可选字幕")
+            return
+        }
+        val params = p.trackSelectionParameters
+        val entries = ArrayList<Pair<String, () -> Unit>>()
+        entries.add("关闭" to {
+            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(text)
+                .setTrackTypeDisabled(text, true)
+                .build()
+            showTvToast("字幕: 关闭")
+        })
+        entries.add("自动" to {
+            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(text)
+                .setTrackTypeDisabled(text, false)
+                .build()
+            showTvToast("字幕: 自动")
+        })
+        var checked = when {
+            params.disabledTrackTypes.contains(text) -> 0
+            params.overrides.keys.none { it.type == text } -> 1
+            else -> -1
+        }
+        for (group in groups) {
+            for (i in 0 until group.length) {
+                val fmt = group.getTrackFormat(i)
+                if (!group.isTrackSupported(i) || isCaptionPlaceholder(fmt)) continue
+                if (group.isTrackSelected(i)) checked = entries.size
+                entries.add(trackLabel(fmt) to {
+                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(text, false)
+                        .setOverrideForType(
+                            androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i)
+                        )
+                        .build()
+                    showTvToast("字幕: ${trackLabel(fmt)}")
+                })
+            }
+        }
+        showMenuDialogChecked("字幕", entries, checked)
+    }
+
+    /**
+     * ExoPlayer injects a CEA-608/708 text track for every video that carries
+     * embedded captions. On this box that row decodes to nothing and just
+     * lengthens the menu, so it is not offered.
+     */
+    private fun isCaptionPlaceholder(fmt: androidx.media3.common.Format): Boolean {
+        val mime = fmt.sampleMimeType ?: return false
+        return mime == androidx.media3.common.MimeTypes.APPLICATION_CEA608 ||
+            mime == androidx.media3.common.MimeTypes.APPLICATION_CEA708
+    }
+
+    /** What the player is using right now, in the same words as the menu rows. */
+    private fun currentTrackLabel(p: androidx.media3.common.Player, type: Int): String {
+        val fallback = if (type == androidx.media3.common.C.TRACK_TYPE_TEXT) "关闭" else "自动"
+        val group = p.currentTracks.groups.firstOrNull { it.type == type && it.isSelected }
+            ?: return fallback
+        for (i in 0 until group.length) {
+            if (group.isTrackSelected(i)) return trackLabel(group.getTrackFormat(i))
+        }
+        return fallback
+    }
+
+    /** "国语 · ac-3 6ch" — language display name first, codec as the detail. */
+    private fun trackLabel(fmt: androidx.media3.common.Format): String {
+        val tag = fmt.language?.takeIf { it.isNotBlank() && it != "und" }
+        val lang = tag?.let {
+            runCatching {
+                java.util.Locale.forLanguageTag(it).getDisplayName(java.util.Locale.getDefault())
+            }.getOrNull()?.takeIf { n -> n.isNotBlank() } ?: it
+        } ?: "默认"
+        val codec = fmt.codecs ?: fmt.sampleMimeType?.substringAfter('/') ?: ""
+        val detail = if (codec.isBlank()) "" else
+            if (fmt.channelCount > 1) "$codec ${fmt.channelCount}ch" else codec
+        return if (detail.isBlank()) lang else "$lang · $detail"
     }
 
 }

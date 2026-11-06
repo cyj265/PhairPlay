@@ -109,13 +109,26 @@ public final class ManualDlnaHttp {
     /** CSV form used in the GetProtocolInfo response. */
     private static final String SINK_PROTOCOL_INFO = buildSinkProtocolInfo();
 
+    /**
+     * The fourth protocol-info field is not optional decoration. A DLNA 1.5
+     * control point reads it to decide what it may ask of the renderer:
+     * {@code OP=01} means TimeSeek is not available but byte-range seek is
+     * (ExoPlayer issues Range requests, not UPnP Seek for the media itself),
+     * and the flags word marks streaming transfer, connection-stall support
+     * and DLNA 1.5 — the values Mimmserver/Windows expect from a DMR.
+     * Without this field the device is treated as a bare UPnP renderer and
+     * some senders grey out the seek bar entirely.
+     */
+    private static final String DLNA_PROFILE_4TH =
+        "DLNA.ORG_OP=01;DLNA.ORG_FLAGS=21700000000000000000000000000000";
+
     private static String buildSinkProtocolInfo() {
         StringBuilder sb = new StringBuilder();
         for (String t : SINK_TYPES) {
             if (sb.length() > 0) {
                 sb.append(',');
             }
-            sb.append("http-get:*:").append(t).append(":*");
+            sb.append("http-get:*:").append(t).append(":").append(DLNA_PROFILE_4TH);
         }
         return sb.toString();
     }
@@ -124,11 +137,14 @@ public final class ManualDlnaHttp {
     private static String sinkAllowedValueList() {
         StringBuilder sb = new StringBuilder("<allowedValueList>");
         for (String t : SINK_TYPES) {
-            sb.append("<allowedValue>http-get:*:").append(t).append(":*</allowedValue>");
+            sb.append("<allowedValue>http-get:*:").append(t).append(":")
+                .append(DLNA_PROFILE_4TH).append("</allowedValue>");
         }
         return sb.append("</allowedValueList>").toString();
     }
     private static volatile String currentUri = "";
+    /** DIDL-Lite exactly as the sender wrote it (after one unescape). */
+    private static volatile String currentMetaXml = "";
     private static volatile String transportState = "STOPPED"; // NO_MEDIA_PRESENT/STOPPED/PLAYING/PAUSED_PLAYBACK — Windows PlayTo 只认 STOPPED 为就绪
     /**
      * v122 — AVTransport#TransportStatus, the third field of GetTransportInfo.
@@ -597,6 +613,14 @@ public final class ManualDlnaHttp {
             + "    <action><name>Stop</name><argumentList>"
             + "<argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>"
             + "</argumentList></action>\n"
+            + "    <action><name>GetCurrentTransportActions</name><argumentList>"
+            + "<argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>"
+            + "<argument><name>Actions</name><direction>out</direction><relatedStateVariable>CurrentTransportActions</relatedStateVariable></argument>"
+            + "</argumentList></action>\n"
+            + "    <action><name>SetPlayMode</name><argumentList>"
+            + "<argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>"
+            + "<argument><name>NewPlayMode</name><direction>in</direction><relatedStateVariable>CurrentPlayMode</relatedStateVariable></argument>"
+            + "</argumentList></action>\n"
             + "    <action><name>Play</name><argumentList>"
             + "<argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>"
             + "<argument><name>Speed</name><direction>in</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument>"
@@ -626,6 +650,7 @@ public final class ManualDlnaHttp {
             + "<allowedValueList><allowedValue>1</allowedValue></allowedValueList></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>CurrentPlayMode</name><dataType>string</dataType>"
             + "<allowedValueList><allowedValue>NORMAL</allowedValue></allowedValueList></stateVariable>\n"
+            + "    <stateVariable sendEvents=\"yes\"><name>CurrentTransportActions</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>CurrentRecordQualityMode</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"yes\"><name>AVTransportURI</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"yes\"><name>AVTransportURIMetaData</name><dataType>string</dataType></stateVariable>\n"
@@ -651,7 +676,8 @@ public final class ManualDlnaHttp {
             + "    <stateVariable sendEvents=\"no\"><name>PossiblePlaybackStorageMedia</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>PossibleRecordStorageMedia</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>PossibleRecordQualityModes</name><dataType>string</dataType></stateVariable>\n"
-            + "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType></stateVariable>\n"
+            + "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType>"
+            + "<allowedValueList><allowedValue>REL_TIME</allowedValue><allowedValue>ABS_TIME</allowedValue></allowedValueList></stateVariable>\n"
             + "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SeekTarget</name><dataType>string</dataType></stateVariable>\n"
             + "    <stateVariable sendEvents=\"yes\"><name>LastChange</name><dataType>string</dataType></stateVariable>\n"
             + "  </serviceStateTable>\n"
@@ -778,7 +804,15 @@ public final class ManualDlnaHttp {
                 break;
         }
         if (result == null) {
-            DebugLog.INSTANCE.log("SOAP", "未知动作 " + actionName + " svc=" + svc);
+            // A null result is either a deliberate fault (the handler parked a
+            // code) or an action this renderer does not implement.
+            int[] pending = PENDING_FAULT.get();
+            if (pending != null) {
+                DebugLog.INSTANCE.log("SOAP", "动作 " + actionName + " svc=" + svc
+                        + " -> fault " + pending[0]);
+            } else {
+                DebugLog.INSTANCE.log("SOAP", "未知动作 " + actionName + " svc=" + svc);
+            }
         } else {
             // Log only state-changing actions; polling actions would flood the log.
             boolean keyAction = "SetAVTransportURI".equals(actionName)
@@ -839,7 +873,7 @@ public final class ManualDlnaHttp {
                 String uri = tag(body, "CurrentURI");
                 if (uri == null || uri.isEmpty()) {
                     DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI 提取失败 body=" + safeBodyPreview(body));
-                    return null;
+                    return fault(402, "Invalid Args");
                 }
                 // Ported from upstream (DlnaMediaUri): the URI is untrusted and
                 // the box fetches it itself. Length, control characters, scheme
@@ -849,7 +883,7 @@ public final class ManualDlnaHttp {
                 if (refusal != null) {
                     DebugLog.INSTANCE.log("SOAP", "拒绝 SetAVTransportURI 原因=" + refusal
                             + " uri=" + safeBodyPreview(uri));
-                    return null;
+                    return fault(714, "Illegal MIME-type");
                 }
                 uri = uri.trim();
                 DebugLog.INSTANCE.log("SOAP", "SetAVTransportURI uri=" + uri);
@@ -886,12 +920,24 @@ public final class ManualDlnaHttp {
                 // (see DlnaMediaMeta).
                 String meta = tag(body, "CurrentURIMetaData");
                 String title = null, artist = null, artUri = null;
+                String metaXml = "";
                 if (meta != null && !meta.isEmpty()) {
-                    String m = xmlUnescape(meta);
+                    // tag() has already unescaped the SOAP value once, which is
+                    // exactly one layer: what remains is the DIDL document the
+                    // sender wrote. Unescaping a second time (what this did
+                    // until v123) turned a title's &amp; into a bare & and made
+                    // the echo below different from what was sent.
+                    String m = meta;
+                    metaXml = m;
                     title = tag(m, "title");
                     artist = tag(m, "artist");
                     artUri = tag(m, "albumArtURI");
                 }
+                // Kept verbatim for GetMediaInfo / GetPositionInfo: several
+                // control points read the item back from the renderer instead of
+                // remembering what they sent, and an empty answer makes the
+                // "now playing" row go blank on the phone.
+                currentMetaXml = metaXml;
                 com.phairplay.dlna.DlnaMediaMeta.setSenderMeta(
                     title, artist, artUri, guessTitle(uri));
                 // v99-④: a sender that sets an item and never says Play should
@@ -901,7 +947,16 @@ public final class ManualDlnaHttp {
             }
             case "Play": {
                 if (currentUri.isEmpty()) {
-                    return avtResponse("PlayResponse", "");
+                    // 702 is "No contents": the sender asked us to start
+                    // something we do not have. Answering 200 left it showing
+                    // a playing state over a black screen.
+                    return fault(702, "No contents");
+                }
+                String speed = tag(body, "Speed");
+                if (speed != null && !speed.trim().isEmpty() && !"1".equals(speed.trim())) {
+                    // The SCPD lists exactly one allowed TransportPlaySpeed, so
+                    // anything else is 712 rather than a silent normal-speed play.
+                    return fault(712, "Play speed not supported");
                 }
                 com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
                 boolean refused = c == null;
@@ -968,36 +1023,89 @@ public final class ManualDlnaHttp {
                 return avtResponse("StopResponse", "");
             }
             case "Seek": {
-                String target = tag(body, "Target");
-                if (target != null && !target.isEmpty()) {
-                    try {
-                        long seconds = parseDuration(target);
-                        com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
-                        long current = c != null ? c.getPositionSeconds() : -1L;
-                        // Senders re-issue SetAVTransportURI + Play + Seek on
-                        // every poll. A Seek landing on the position we are
-                        // already at is a no-op semantically, but ExoPlayer does
-                        // not treat it as one: it flushes the buffer and
-                        // re-fetches the segment (and the AES key on HLS), which
-                        // is another few seconds before a frame can show —
-                        // restarting that cycle every 12-30 s is exactly what
-                        // keeps the picture black.
-                        if (current >= 0 && Math.abs(current - seconds) <= 3) {
-                            DebugLog.INSTANCE.log(
-                                "SOAP", "Seek 忽略(位置未变): target=" + target
-                                    + " 当前=" + current + "s");
-                        } else {
-                            if (c != null) {
-                                c.seekTo(seconds);
-                            }
-                            positionSeconds = seconds;
-                            DebugLog.INSTANCE.log(
-                                "SOAP", "Seek -> " + seconds + "s (原 " + current + "s)");
-                        }
-                    } catch (Throwable ignored) {
+                if (currentUri.isEmpty()) {
+                    return fault(701, "Transition not available");
+                }
+                String unit = tag(body, "Unit");
+                if (unit != null && !unit.trim().isEmpty()) {
+                    String u = unit.trim();
+                    // Only time-based seeking is implemented. TRACK_NR is a
+                    // queue operation there is no queue for, so the sender is
+                    // told instead of being handed a progress bar that never
+                    // moves.
+                    if (!"REL_TIME".equals(u) && !"ABS_TIME".equals(u)) {
+                        return fault(710, "Seek mode not supported");
                     }
                 }
+                String target = tag(body, "Target");
+                if (target == null || !isDuration(target.trim())) {
+                    return fault(711, "Illegal seek target");
+                }
+                try {
+                    long seconds = parseDuration(target);
+                    com.phairplay.dlna.renderer.DlnaPlayerControl c = DlnaPlayerBridge.get();
+                    long current = c != null ? c.getPositionSeconds() : -1L;
+                    // Senders re-issue SetAVTransportURI + Play + Seek on
+                    // every poll. A Seek landing on the position we are
+                    // already at is a no-op semantically, but ExoPlayer does
+                    // not treat it as one: it flushes the buffer and
+                    // re-fetches the segment (and the AES key on HLS), which
+                    // is another few seconds before a frame can show —
+                    // restarting that cycle every 12-30 s is exactly what
+                    // keeps the picture black.
+                    if (current >= 0 && Math.abs(current - seconds) <= 3) {
+                        DebugLog.INSTANCE.log(
+                            "SOAP", "Seek 忽略(位置未变): target=" + target
+                                + " 当前=" + current + "s");
+                    } else {
+                        if (c != null) {
+                            c.seekTo(seconds);
+                        }
+                        positionSeconds = seconds;
+                        DebugLog.INSTANCE.log(
+                            "SOAP", "Seek -> " + seconds + "s (原 " + current + "s)");
+                    }
+                } catch (Throwable ignored) {
+                }
                 return avtResponse("SeekResponse", "");
+            }
+            case "GetCurrentTransportActions": {
+                // Tells the sender which buttons to enable. Derived from the
+                // same state the transport reports, so a sender cannot be
+                // offered Play on an empty renderer or Seek with no media.
+                // Live sources report no duration and are not seekable — a
+                // seek bar there only invites a request we cannot honour.
+                boolean hasMedia = !currentUri.isEmpty();
+                com.phairplay.dlna.renderer.DlnaPlayerControl pc = DlnaPlayerBridge.get();
+                boolean seekable = pc != null && pc.getDurationSeconds() > 0;
+                StringBuilder actions = new StringBuilder();
+                if (hasMedia) {
+                    if ("PLAYING".equals(transportState)) {
+                        actions.append("Pause,Stop");
+                    } else if ("PAUSED_PLAYBACK".equals(transportState)) {
+                        actions.append("Play,Stop");
+                    } else {
+                        actions.append("Play");
+                    }
+                    if (seekable) {
+                        actions.append(",Seek");
+                    }
+                }
+                return avtResponse("GetCurrentTransportActionsResponse",
+                    "<Actions>" + actions + "</Actions>");
+            }
+            case "SetPlayMode": {
+                // A renderer without a queue has exactly one mode. Accepting
+                // "REPEAT_ONE" and silently playing NORMAL is the kind of lie
+                // that makes a sender show the wrong icon forever.
+                String mode = tag(body, "NewPlayMode");
+                if (mode == null || mode.trim().isEmpty()) {
+                    return fault(402, "Invalid Args");
+                }
+                if (!"NORMAL".equals(mode.trim())) {
+                    return fault(712, "Play mode not supported");
+                }
+                return avtResponse("SetPlayModeResponse", "");
             }
             case "GetTransportInfo": {
                 return avtResponse("GetTransportInfoResponse",
@@ -1036,7 +1144,7 @@ public final class ManualDlnaHttp {
                 return avtResponse("GetPositionInfoResponse",
                     "<Track>" + (hasMedia ? "1" : "0") + "</Track>"
                         + "<TrackDuration>" + dur + "</TrackDuration>"
-                        + "<TrackMetaData></TrackMetaData>"
+                        + "<TrackMetaData>" + xmlEscape(currentMetaXml) + "</TrackMetaData>"
                         + "<TrackURI>" + xmlEscape(currentUri) + "</TrackURI>"
                         + "<RelTime>" + pos + "</RelTime>"
                         + "<AbsTime>" + pos + "</AbsTime>"
@@ -1059,7 +1167,7 @@ public final class ManualDlnaHttp {
                     "<NrTracks>" + (hasMedia ? "1" : "0") + "</NrTracks>"
                         + "<MediaDuration>" + mediaDur + "</MediaDuration>"
                         + "<CurrentURI>" + xmlEscape(currentUri) + "</CurrentURI>"
-                        + "<CurrentURIMetaData></CurrentURIMetaData>"
+                        + "<CurrentURIMetaData>" + xmlEscape(currentMetaXml) + "</CurrentURIMetaData>"
                         + "<NextURI></NextURI>"
                         + "<NextURIMetaData></NextURIMetaData>"
                         + "<PlayMedium>NONE</PlayMedium>"
@@ -1237,12 +1345,47 @@ public final class ManualDlnaHttp {
 
     /** Standard UPnP SOAP fault body (action failed / unknown). */
     public static String faultBody() {
+        return faultBody(501, "Action Failed");
+    }
+
+    /** A UPnP fault with the AVTransport error code the control point expects. */
+    public static String faultBody(int code, String description) {
         return "<s:Fault>"
             + "<faultcode>s:Client</faultcode>"
             + "<faultstring>UPnPError</faultstring>"
-            + "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>501</errorCode>"
-            + "<errorDescription>Action Failed</errorDescription></UPnPError></detail>"
+            + "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>" + code + "</errorCode>"
+            + "<errorDescription>" + xmlEscape(description) + "</errorDescription></UPnPError></detail>"
             + "</s:Fault>";
+    }
+
+    /**
+     * The AVTransport spec has one fault code per failure, and control points
+     * act on it: a 701 on Play means "this file cannot be played, do not retry",
+     * while a silent 200 means the sender keeps a dead cast on screen. The
+     * handler therefore answers a fault by returning {@code null} and parking
+     * the code here; the HTTP layer asks for it instead of always emitting 501.
+     * A ThreadLocal is enough because one request is handled start-to-finish on
+     * one thread.
+     */
+    private static final ThreadLocal<int[]> PENDING_FAULT = new ThreadLocal<>();
+    private static final ThreadLocal<String> PENDING_FAULT_DESC = new ThreadLocal<>();
+
+    private static String fault(int code, String description) {
+        PENDING_FAULT.set(new int[]{code});
+        PENDING_FAULT_DESC.set(description);
+        return null;
+    }
+
+    /** Fault body for the action that just returned null. Defaults to 501. */
+    public static String takeFaultBody() {
+        int[] code = PENDING_FAULT.get();
+        String desc = PENDING_FAULT_DESC.get();
+        PENDING_FAULT.remove();
+        PENDING_FAULT_DESC.remove();
+        if (code == null) {
+            return faultBody();
+        }
+        return faultBody(code[0], desc != null ? desc : "Action Failed");
     }
 
     /** Public action-name extractor for logging (null when unparseable). */
@@ -1394,6 +1537,11 @@ public final class ManualDlnaHttp {
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    /** Accepts the time forms {@link #parseDuration} actually understands. */
+    private static boolean isDuration(String s) {
+        return s.matches("\\d{1,6}(:\\d{1,2}){2}(\\.\\d+)?") || s.matches("\\d{1,9}");
     }
 
     /** Seconds field may carry a fractional part ("45.678") — UPnP targets do. */
