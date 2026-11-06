@@ -107,7 +107,7 @@ class SettingsRepository(private val context: Context) {
     private fun Preferences.toAppSettings(): AppSettings = AppSettings(
         displayName        = this[Keys.DISPLAY_NAME]            ?: "",
         airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
-        miracastEnabled    = this[Keys.MIRACAST_ENABLED]        ?: false,
+        mirrorEnabled      = this[Keys.MIRROR_ENABLED]          ?: true,
         castEnabled        = this[Keys.CAST_ENABLED]            ?: false,
         dlnaEnabled        = this[Keys.DLNA_ENABLED]            ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
@@ -124,7 +124,7 @@ class SettingsRepository(private val context: Context) {
     private fun MutablePreferences.fromAppSettings(settings: AppSettings) {
         this[Keys.DISPLAY_NAME]         = settings.displayName
         this[Keys.AIRPLAY_ENABLED]      = settings.airPlayEnabled
-        this[Keys.MIRACAST_ENABLED]     = settings.miracastEnabled
+        this[Keys.MIRROR_ENABLED]       = settings.mirrorEnabled
         this[Keys.CAST_ENABLED]         = settings.castEnabled
         this[Keys.DLNA_ENABLED]         = settings.dlnaEnabled
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
@@ -143,7 +143,7 @@ class SettingsRepository(private val context: Context) {
     private object Keys {
         val DISPLAY_NAME        = stringPreferencesKey("display_name")
         val AIRPLAY_ENABLED     = booleanPreferencesKey("airplay_enabled")
-        val MIRACAST_ENABLED    = booleanPreferencesKey("miracast_enabled")
+        val MIRROR_ENABLED      = booleanPreferencesKey("mirror_enabled")
         val CAST_ENABLED        = booleanPreferencesKey("cast_enabled")
         val DLNA_ENABLED        = booleanPreferencesKey("dlna_enabled")
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")

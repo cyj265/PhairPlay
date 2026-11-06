@@ -107,6 +107,7 @@ class MainActivity : AppCompatActivity() {
     private var uiWindowFocused = false
 
     private var currentAirPlayState = ProtocolState.DISABLED
+    private var currentMirrorState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
@@ -1524,6 +1525,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
+            svc.mirrorState.collectLatest { state ->
+                currentMirrorState = state
+                updateOverlay()
+            }
+        }
+        lifecycleScope.launch {
             svc.photoFrame.collectLatest { frame ->
                 currentPhotoFrame = frame
                 updateOverlay()
@@ -1681,6 +1688,7 @@ class MainActivity : AppCompatActivity() {
             // that has nothing behind it.
             photoFrame != null -> showPhotoScreen(photoFrame)
             currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
+            currentMirrorState == ProtocolState.CONNECTED -> showStreamingScreen()
             else -> hideStreamingScreen()
         }
     }
@@ -1989,6 +1997,18 @@ class MainActivity : AppCompatActivity() {
                     // The layer goes away, the session does not.
                     hideDlnaPlayer()
                     refreshResumePillText()
+                    val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
+                    target.requestFocus()
+                    return true
+                }
+                if (currentMirrorState == ProtocolState.CONNECTED &&
+                    currentAirPlayState != ProtocolState.CONNECTED
+                ) {
+                    // Mirroring has no transport controls on the TV — the phone
+                    // owns its own picture. Back means "stop showing it", and
+                    // closing the socket is what makes the sender stop capturing.
+                    service?.stopMirrorSession()
+                    hideStreamingScreen()
                     val target = if (selectedNavIndex == 0) navItemHome else navItemSettings
                     target.requestFocus()
                     return true

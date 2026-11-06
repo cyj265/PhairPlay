@@ -163,7 +163,7 @@ class SettingsFragment : Fragment() {
             getString(R.string.setting_display_name_system_default)
         }
         setToggle(rowAirPlay,      settings.airPlayEnabled)
-        setToggle(rowMiracast,     settings.miracastEnabled)
+        setToggle(rowMiracast,     settings.mirrorEnabled)
         setToggle(rowCast,         settings.castEnabled)
         setToggle(rowDlna,         settings.dlnaEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
@@ -188,7 +188,7 @@ class SettingsFragment : Fragment() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
         setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
-        setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
+        setToggleListener(rowMiracast)     { enabled -> save { it.copy(mirrorEnabled = enabled) } }
         setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
         setToggleListener(rowDlna)         { enabled -> save { it.copy(dlnaEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }

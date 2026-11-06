@@ -196,7 +196,7 @@ class HomeFragment : Fragment() {
             }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
+            svc.mirrorState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state) }
@@ -255,13 +255,12 @@ class HomeFragment : Fragment() {
         detail.setText(detailRes)
         dot.background.setTint(requireContext().getColor(colorRes))
 
-        // Miracast and Cast are still being worked on, and Cast cannot run on
-        // this Fire TV flavor at all (no Play Services). Their detail line says
-        // so instead of "Enable in Settings" / "Waiting for sender…", which
-        // reads as a broken promise. Applied last so it wins over the generic
-        // line; the status row above still reports the real state, which keeps
-        // this card useful for diagnostics.
-        if (card === cardMiracast || card === cardCast) {
+        // Cast is still being worked on, and it cannot run on this Fire TV flavor
+        // at all (no Play Services). Its detail line says so instead of "Enable in
+        // Settings" / "Waiting for sender…", which reads as a broken promise. Applied
+        // last so it wins over the generic line; the status row above still reports
+        // the real state, which keeps this card useful for diagnostics.
+        if (card === cardCast) {
             detail.setText(R.string.protocol_detail_in_development)
         }
 

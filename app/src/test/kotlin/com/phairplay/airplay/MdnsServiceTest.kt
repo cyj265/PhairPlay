@@ -1,6 +1,7 @@
 package com.phairplay.airplay
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.nsd.NsdManager
 import io.mockk.every
 import io.mockk.mockk
@@ -32,15 +33,26 @@ class MdnsServiceTest {
     // Mock objects — these simulate Android system services without real hardware
     private lateinit var mockContext: Context
     private lateinit var mockNsdManager: NsdManager
+    private lateinit var mockPrefs: SharedPreferences
 
     @Before
     fun setup() {
         // Create mocks for Android dependencies
         mockContext = mockk(relaxed = true)
         mockNsdManager = mockk(relaxed = true)
+        mockPrefs = mockk(relaxed = true)
 
         // Tell the mock context to return our mock NsdManager
         every { mockContext.getSystemService(Context.NSD_SERVICE) } returns mockNsdManager
+
+        // The _airplay._tcp TXT record carries the pairing public key, which PairingKeys
+        // derives from a 32-byte seed stored in SharedPreferences. A relaxed mock answers
+        // getString() with "", and "" is not a valid seed (Ed25519PrivateKeyParameters
+        // rejects it), so the seed key needs a real 64-hex-char value.
+        every { mockContext.getSharedPreferences(any(), any()) } returns mockPrefs
+        every { mockPrefs.getString(any(), any()) } answers {
+            if (firstArg<String>() == "pairing_ed25519_seed") "11".repeat(32) else ""
+        }
 
         mdnsService = MdnsService(mockContext)
     }

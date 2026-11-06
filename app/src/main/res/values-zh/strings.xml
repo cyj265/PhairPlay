@@ -26,7 +26,7 @@
 
     <!-- ── 协议名称 ────────────────────────────────────────────── -->
     <string name="protocol_airplay">AirPlay</string>
-    <string name="protocol_miracast">Miracast</string>
+    <string name="protocol_miracast">手机镜像</string>
     <string name="protocol_cast">Cast</string>
     <string name="protocol_dlna">DLNA</string>
 
@@ -83,8 +83,8 @@
     <string name="setting_display_name_collision_note">已注册为：%1$s</string>
     <string name="setting_airplay_enabled">AirPlay 接收器</string>
     <string name="setting_airplay_subtitle">接受来自 macOS 的连接</string>
-    <string name="setting_miracast_enabled">Miracast 接收器</string>
-    <string name="setting_miracast_subtitle">接受来自 Windows 和 Android 的连接</string>
+    <string name="setting_miracast_enabled">手机镜像接收</string>
+    <string name="setting_miracast_subtitle">手机安装 PhairPlay 投屏 App 后，在本机选择要投屏的设备</string>
     <string name="setting_cast_enabled">Google Cast 接收器</string>
     <string name="setting_cast_subtitle">接受来自 Chrome 和 Android 的连接</string>
     <string name="setting_dlna_enabled">DLNA 接收器</string>
