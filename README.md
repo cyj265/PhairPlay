@@ -1,244 +1,199 @@
 # PhairPlay
 
-PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and Fire TV. It lets your macOS or iOS/iPadOS device mirror its screen and audio directly to your TV — no Apple TV required.
+**把电视盒子变成一块「谁都能投」的屏幕。**
+
+开源、无广告、不联网的 Android TV / Fire TV 投屏接收端，一个 App 同时接下
+AirPlay、DLNA、Google Cast 和 Miracast。
+
+<p align="left">
+  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Android%207.1%2B-3ddc84">
+  <img alt="kotlin" src="https://img.shields.io/badge/Kotlin-1.9-7f52ff">
+  <img alt="release" src="https://img.shields.io/github/v/release/cyj265/PhairPlay?display_name=tag">
+</p>
 
 ```
- macOS (Monterey+)            Android TV / Fire TV
- iOS / iPadOS (16+)           ┌──────────────────────┐
- ┌────────────────┐  AirPlay  │                      │
- │  [Your Screen] │ ────────► │  [Your TV Screen]    │
- │                │           │                      │
- └────────────────┘           └──────────────────────┘
-      Click AirPlay →              PhairPlay
-      Select your TV →             (this app)
-      Done. ✓
+ macOS / iPhone          Windows / Android            电视盒子
+ ┌────────────┐          ┌────────────┐          ┌──────────────────┐
+ │  AirPlay   │ ───────► │  Miracast  │ ───────► │                  │
+ │  DLNA App  │ ───────► │  Cast V2   │ ───────► │    PhairPlay     │
+ └────────────┘          └────────────┘          └──────────────────┘
+        同一条局域网，不经过云端，不注册账号，不需要 Apple TV / Chromecast
 ```
 
 ---
 
-## Current Status — v1.0.0-beta.1
+## 支持矩阵
 
-PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed beta release. Download the APK directly from the [GitHub Releases page](https://github.com/mazer666/PhairPlay/releases).
+| 协议 | 发送端 | 状态 | 说明 |
+|------|--------|------|------|
+| **AirPlay 2** | macOS 12+、iOS / iPadOS 16+ | ✅ 可用 | 镜像 + 音频 + 照片 + 视频 URL，HomeKit 配对、FairPlay 解密、AAC-ELD/ALAC、NTP 音画同步、DACP 反向遥控 |
+| **DLNA / UPnP** | Android 手机上的 B 站、腾讯视频、抖音等 | ✅ 可用 | 自写 SSDP + SOAP，HLS / FLV / MPEG-TS，HEVC 硬解；按 Back 暂停回首页，投屏会话不中断 |
+| **Google Cast V2** | VLC 等走 LAN Cast V2 的发送端 | ✅ 可用 | TLS `8009` + mDNS `_googlecast._tcp`，内置 Default Media Receiver (`CC1AD845`)，ExoPlayer 直接播放 |
+| **Miracast (WFD)** | Windows「连接」、Android「无线投屏」 | ✅ 可用 | Wi-Fi Direct 组网、WFD RTSP 握手、MPEG-TS / H.264 / AAC 硬解渲染；Windows 已复验 1080p30，5 GHz 组信道下 5 分钟零丢包 |
 
-The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
-
-The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from scratch rather than on top of a UPnP stack library — and is validated on Amlogic Android TV hardware (Fire TV, N1 boxes) for live TV and on-demand video.
-
-**Currently verified on hardware:** `v1.0.107-firetv` (2026-10-07) — the IPv4-only resolver, the TV-native playback OSD and the bounded source probe were each validated on a real N1 box against real sources.
-
-Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
-
-## Features
-
-### AirPlay 2 (fully implemented)
-- Screen mirroring from macOS 12+ and iOS/iPadOS 16+ — H.264 hardware decode
-- FairPlay session decryption (fp-setup v2/v3 + legacy rsaaeskey) via native libplayfair
-- HomeKit-style pairing (Ed25519/X25519) and legacy SRP PIN pairing
-- Mirroring audio: AAC-ELD, AAC-LC, ALAC — with independent A/V start/stop
-- System audio streaming (ALAC, unencrypted) — reliable path for app audio
-- AirPlay video URL mode (`/play` content) + transport controls (play/pause/scrub)
-- Now-playing metadata (DMAP) with album artwork overlay
-- DACP reverse remote — TV remote controls the sender's playback
-- NTP timing and UDP audio retransmit (packet-loss recovery)
-- AirPlay photo receiver — JPEG/PNG from iOS Photos app displayed full-screen
-- Access-control lockout after repeated failed pairing attempts
-
-### DLNA / UPnP (fully implemented)
-- Self-written SSDP + SOAP control plane — no third-party UPnP stack, so the device description and the AVTransport actions are ours to get right (SCPD completeness, `ssdp:all` replies, notification of the `1900` port)
-- Live TV and on-demand video: HLS, FLV and MPEG-TS, including the relay/proxy URLs Chinese phone apps hand out
-- HEVC (H.265) hardware decode on Amlogic boxes, with a decoder-slot guard that hands the slot back instead of freezing when a stream fails
-- **Back key built for a TV remote:** Back pauses the cast and returns to the home screen, the session stays alive, and a second Back ends it — the picture never comes back on its own
-- Sender-aware playback: a Play instruction resumes from the pause point, a repeated Set of the same item is ignored, and the picture is never dragged back over the home screen by a polling sender
-- Source diagnostics: a source that answers with a challenge page instead of a media manifest is reported as such on screen, instead of leaving a black rectangle
-- A source that refuses us twice is named on screen instead of being retried silently; the refusal is tracked per URL, so giving up on one channel never poisons the next one
-- Bounded source probe: name resolution runs on its own 3 s deadline before the request is made, because `connectTimeout` does not cover DNS — the log then separates "the name took 42 s" from "the origin is slow"
-- Live diagnostic port (`8099`) exposing the running log for field debugging without a USB cable
-
-### Playback UI (TV-native)
-- Self-drawn playback OSD and menus in one visual language: rounded dark panels, orange accent, oversized text sized for a living-room screen
-- The full-screen player no longer shows Media3's phone-style control bar (thin progress line, 9 sp captions); progress, elapsed time, state and key hints are drawn for a D-pad and auto-hide after 5 s
-- The OSD is never focusable, so it cannot swallow the remote; audio-only casts keep the single artwork card instead of showing two progress bars
-- One "投屏控制" menu for both DLNA and AirPlay, with each row carrying its current value and submenus marking the active entry
-- Every dialog and toast is drawn by the app — the platform's own dialogs render as blank boxes on these boxes
-
-### App & Platform
-- Android TV / Fire TV app shell with foreground service and status UI
-- Mirror audio toggle and PIN-auth toggle in Settings
-- Works on Google TV (Android 10+) and Fire TV (Android 7+)
-- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane
-- Google TV Cast Connect SDK lifecycle (full testing requires Cast app ID)
-- Zero ads, zero analytics, zero internet required
-- Open source — Apache 2.0 license
-
-## What PhairPlay Does NOT Do
-
-- **FairPlay DRM content** (Netflix, Disney+, Apple TV+) — Apple DRM; not decryptable by any open-source receiver
-- **Apple Music in-app audio** — protected on every AirPlay path; use system audio output instead
-- **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
-- **Cloud/remote streaming** — local network only
-- **Miracast / Cast media playback** — control plane is ready; media decode integration is in progress
-- **DRM-protected streaming** (DRM-protected HLS, e.g. some IPTV/OTT portals) — the source serves an encrypted stream, so no receiver can play it
+> **Cast 的真实边界**：本项目使用自签名证书，Chrome 投屏菜单、YouTube、Google Home
+> 会校验 Google Cast CA，因此不会接受本接收端；能连上的是只要求 Cast V2 over TLS 的
+> 局域网发送端（VLC 是参考客户端）。Google TV flavor 改走官方 Cast Connect SDK，
+> 不受这条限制。详见 [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md)。
+>
+> **Miracast 的前提**：盒子必须支持 Wi-Fi Direct。系统已开启无线显示
+> （`wifi_display_on=1`）时由框架直接广播；否则 App 需要 root 才能通过
+> `libwfdctl.so` 注入 WFD IE。没有 root 且系统未开启时，协议卡片会显示「出错」，
+> 其余三种协议不受影响。
 
 ---
 
-## Requirements
+## 为什么用它
 
-**On your TV:**
-- Google TV (Android 10+) or Amazon Fire TV (Android 7+)
-- Connected to the same Wi-Fi network as your Mac
-- Sideloading enabled (for Fire TV) or ADB enabled (for Google TV)
-
-**On your Mac:**
-- macOS 12 (Monterey) or later
-- Connected to the same Wi-Fi network as your TV
-
-**Network:**
-- Both devices on the same subnet (common home router setup works)
-- Multicast/mDNS must not be blocked (most home routers are fine)
-- 5 GHz Wi-Fi or Ethernet strongly recommended for best performance
+- **四个协议，一个 App** —— 家里有 Mac、iPhone、Windows 和安卓手机，不用为每种设备准备一台不同的接收器。
+- **遥控器优先的界面** —— 首页、设置、播放控制全部为 D-pad 设计，字号按客厅观看距离放大，不使用手机风格的控件条。
+- **本地直连** —— 没有账号、没有云中转、没有统计 SDK；断网也能投。
+- **诚实的失败提示** —— 源站拒绝、证书不匹配、编码不支持都会在屏幕上说清楚，而不是留一块黑屏。
+- **现场可诊断** —— `8099` 端口实时暴露运行日志，盒子出问题时不用插 USB。
 
 ---
 
-## Installation
+## 安装
 
-### Option A: Download a Release APK (easiest)
+### 直接下载 Release
 
-Go to the [Releases page](https://github.com/mazer666/PhairPlay/releases) and download the APK for your device:
+到 [Releases](https://github.com/cyj265/PhairPlay/releases) 下载对应 APK：
 
-| APK | Device |
-|-----|--------|
-| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV, Android TV (Android 10+) |
-| `PhairPlay-vX.Y.Z-firetv.apk` | Amazon Fire TV (Android 7.1+) |
+| APK | 设备 |
+|-----|------|
+| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV / Android TV（Android 10+），启用官方 Cast Connect |
+| `PhairPlay-vX.Y.Z-firetv.apk` | Fire TV、Amlogic / N1 等盒子（Android 7.1+） |
 
-Then install it via ADB (see the Sideloading Guide below) or a sideloading app like *Downloader* on Fire TV.
+```bash
+adb connect <盒子IP>
+adb install -r PhairPlay-vX.Y.Z-firetv.apk
+```
 
-### Option B: Build from Source
+电视端开启 ADB 的方法见 [docs/guides/INSTALLATION.md](docs/guides/INSTALLATION.md)。
 
-1. **Install prerequisites**
-   ```bash
-   # Install Android Studio from https://developer.android.com/studio
-   # Install JDK 17 or later
-   ```
+### 从源码编译
 
-2. **Clone the repository**
-   ```bash
-   git clone https://github.com/mazer666/PhairPlay.git
-   cd PhairPlay
-   ```
+需要 JDK 17、Android SDK（`compileSdk` 见 `app/build.gradle.kts`）。根目录 `local.properties` 写：
 
-3. **Build the APK**
-   ```bash
-   # For Google TV:
-   ./gradlew assembleGoogletvDebug
+```properties
+sdk.dir=C:/Android
+```
 
-   # Google TV with a registered Cast App ID:
-   ./gradlew assembleGoogletvDebug -Pphairplay.castAppId=<APP_ID>
+```bash
+git clone https://github.com/cyj265/PhairPlay.git
+cd PhairPlay
 
-   # For Fire TV:
-   ./gradlew assembleFiretvDebug
-   ```
-   The APK will be in `app/build/outputs/apk/`.
+# Fire TV / 普通盒子
+./gradlew assembleFiretvDebug
 
-   To run the same local checks used by CI before testing on a TV:
-   ```bash
-   ./gradlew :test-runner:test
-   ./gradlew :app:lintGoogletvDebug :app:lintFiretvDebug \
-     :app:assembleGoogletvDebug :app:assembleFiretvDebug
-   ```
+# Google TV（替换成已注册的 Cast App ID）
+./gradlew assembleGoogletvDebug -Pphairplay.castAppId=<APP_ID>
+```
 
-4. **Install via ADB**
-   ```bash
-   # Enable ADB on your TV first (see below)
-   adb connect <TV-IP-ADDRESS>
+产物在 `app/build/outputs/apk/<flavor>/debug/`。跑单测与本地门禁：
 
-   # Google TV:
-   adb install app/build/outputs/apk/googletv/debug/app-googletv-debug.apk
-
-   # Fire TV:
-   adb install app/build/outputs/apk/firetv/debug/app-firetv-debug.apk
-   ```
+```bash
+./gradlew :test-runner:test
+./gradlew :app:testFiretvDebugUnitTest :app:assembleFiretvDebug
+```
 
 ---
 
-## Sideloading Guide
+## 怎么用
 
-### Google TV (e.g., Chromecast with Google TV)
+| 场景 | 操作 |
+|------|------|
+| **Mac 镜像** | 菜单栏「控制中心 → 屏幕镜像」，选中电视名字 |
+| **iPhone / iPad** | 控制中心「屏幕镜像」，选中电视名字 |
+| **DLNA 投视频** | 视频 App 里点投屏按钮，选中电视；播放中按 **Back** 暂停回首页，点「继续播放」从原位置接上 |
+| **VLC → Cast** | VLC 里「渲染器 → 扫描」，选中电视，再播放任意本地文件或网络流 |
+| **Windows 镜像** | `Win + K` →「投放」→ 选中电视 |
+| **Android 镜像** | 下拉快捷开关「无线投屏 / 多屏互动」，选中电视 |
 
-1. Go to **Settings → System → About → Android TV OS build** and click it 7 times to enable Developer Options.
-2. Go to **Settings → System → Developer Options** and enable **USB debugging**.
-3. Note your TV's IP address from **Settings → Network & Internet**.
-4. On your Mac/PC, run:
-   ```bash
-   adb connect <TV-IP>
-   adb install app-googletv-debug.apk
-   ```
-5. Launch PhairPlay from your app list.
-
-### Fire TV (Fire TV Stick, Fire TV Cube, etc.)
-
-1. Go to **Settings → My Fire TV → About** and click **Build** 7 times to enable Developer Options.
-2. Go to **Settings → My Fire TV → Developer Options** and enable:
-   - **ADB debugging** → ON
-   - **Apps from Unknown Sources** → ON
-3. Note your Fire TV's IP address from **Settings → My Fire TV → About → Network**.
-4. On your Mac/PC, run:
-   ```bash
-   adb connect <FireTV-IP>
-   adb install app-firetv-debug.apk
-   ```
-5. Launch PhairPlay from **Apps → Your Apps & Games**.
+显示名称在 **设置 → 设备名称** 里改；留空时使用系统设备名。
 
 ---
 
-## How to Use
+## 工作原理
 
-1. Launch PhairPlay on your TV. You will see the Waiting Screen with your TV's name.
-2. On your Mac, click the **AirPlay** icon in the menu bar (or go to **System Preferences → Displays → AirPlay Display**).
-3. Select your TV from the list (it should appear as your TV's name).
-4. Your Mac's screen will appear on the TV instantly.
-5. To stop: click the AirPlay icon on your Mac and select "Turn Off AirPlay Mirroring", or just quit PhairPlay on the TV.
+每种协议都是独立接收链路，由前台服务统一拉起、统一上报状态：
 
-**Casting from a phone or tablet (DLNA):** open the app's cast button and pick your TV. While a video is playing, press **Back** to pause and return to the home screen — the cast stays alive, and the *继续播放* pill (or the DLNA card) brings the picture back from the same position. Press **Back** again from the home screen to end the cast.
+```
+                        ┌───────────────────────────────┐
+   AirPlay  ─────────►  │                               │
+   DLNA     ─────────►  │        PhairPlayService       │──► 首页状态 / 通知
+   Cast V2  ─────────►  │  （生命周期、网络变化、唤醒）  │──► StreamingScreen
+   Miracast ─────────►  │                               │
+                        └───────────────────────────────┘
+```
 
----
+| 端口 | 协议 | 用途 |
+|------|------|------|
+| `7000/tcp` | AirPlay | RTSP 控制 |
+| `6002/udp` | AirPlay | NTP timing / 音频重传 |
+| `1900/udp` | DLNA | SSDP 发现 |
+| `8899/tcp` | DLNA | 设备描述 + SOAP + 媒体 |
+| `5353/udp` | mDNS | `_airplay._tcp`、`_raop._tcp`、`_googlecast._tcp` |
+| `8009/tcp` | Cast V2 | TLS 控制通道 |
+| `7236/tcp` | Miracast | WFD RTSP（Sink 主动拨号到 Source） |
+| `19000/udp` | Miracast | MPEG-TS over RTP |
+| `8099/tcp` | 诊断 | 实时日志（只读） |
 
-## Known Limitations
-
-- **Beta software** — the AirPlay 2 stack is complete but real-device validation with various macOS/iOS senders is ongoing. Please report issues.
-- **Apple Music in-app audio is not decryptable.** macOS protects it with FairPlay on every AirPlay path. Route the Mac's system audio output instead (works fine).
-- **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
-- **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
-- **Google Cast** requires a registered Cast app ID for end-to-end testing; see [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md).
-- **Miracast** — Wi-Fi Direct and RTSP control plane work; MPEG-TS media decode is future work.
-- If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
-- On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
-- **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
-- **Switching away from the app and straight back rebuilds the picture once — by design.** Pausing alone does not hand the single hardware decoder slot back on this box, so leaving PhairPlay while a DLNA cast is playing tears the player down and returning rebuilds it. Playback position is preserved and it settles on its own. A queued teardown is now cancelled when you come straight back, so the rebuilt player is no longer dropped afterwards; a low-probability ordering window for that cancellation remains and is tracked as a known unclosed item.
-- **A stream the source rejects now says so.** Some senders hand over a URL that has already expired or needs authorisation; the source answers with an access error, which is retried quietly, and that used to look like the app ignoring the cast. The first refusal is still retried silently, because a single access error is often transient; a second one is reported on screen and no longer retried. The refusal is remembered per URL, so a channel that gave up never blocks the next channel.
-- **Portrait video is not scaled up.** A vertical stream (a phone-video cast, for example) is letterboxed to its own aspect ratio instead of being fitted to the screen, so it occupies only about a third of a 16:9 TV's width. The picture mode can be changed from the menu, but the app does not pick a portrait-aware mode on its own.
-- **Only the main DLNA sources have been cast-tested on real hardware** — HLS, FLV and MPEG-TS from Chinese phone apps, including Douyin. AirPlay 2 has been validated with macOS and iOS senders but not against every streaming app, and DRM-protected video is out of scope entirely.
-
-For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
+更多设计取舍见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，测试方法见
+[docs/TESTING.md](docs/TESTING.md)。
 
 ---
 
-## Contributing
+## 已知限制
 
-Contributions are welcome! Please read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) before submitting a pull request.
-
-Key points:
-- Follow the coding rules in CONTRIBUTING.md (file size ≤400 lines soft / ≤550 lines hard max, class comments, test coverage)
-- All PRs require passing CI (build + tests + lint)
-- Discuss major changes in a GitHub Issue first
-
-## License
-
-Apache License 2.0 — see [LICENSE](LICENSE) for details.
+- **受 DRM 保护的内容**（Netflix、Disney+、Apple TV+、部分 IPTV）无法投屏，这不是本项目的限制，而
+ 是 DRM 本身的设计。
+- **Cast 的通用性受证书限制**：自签名证书过不了 Google Cast CA 校验，Chrome / YouTube / Google Home
+  不会把它当成接收器；需要这些发送端时请使用 Google TV flavor 的 Cast Connect。
+- **Miracast 依赖 Wi-Fi Direct**：发送端与盒子必须支持 P2P。部分 Windows 网卡驱动会报告
+  「不支持无线显示」，此时 `Win + K` 列表里不会出现设备，需要换一台发送端。
+- **AirPlay 受保护音频**：Apple Music 的应用内音频在所有 AirPlay 路径上都被 FairPlay 保护，
+  可改用系统音频输出；AirPlay 2 的缓冲音频（type 103）已接受但尚未播放。
+- **竖屏视频不会自动放大**：竖屏源按原始比例加黑边显示，可在播放菜单里手动切换画面模式。
+- 路由器开启 **AP 隔离** 或 **组播过滤** 时，mDNS 发现会失效；关闭这两个选项即可。
 
 ---
 
-## Acknowledgments
+## 开发
 
-- [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — Community-maintained AirPlay protocol documentation
-- [UxPlay](https://github.com/FDH2/UxPlay) — Open-source AirPlay mirror server (reference implementation)
-- [RPiPlay](https://github.com/FD-/RPiPlay) — AirPlay mirroring for Raspberry Pi (reference implementation)
+```bash
+./gradlew :app:compileFiretvDebugKotlin      # 快速类型检查
+./gradlew :app:testFiretvDebugUnitTest       # 单元测试
+./gradlew :app:lintFiretvDebug               # lint
+```
+
+代码规范、提交要求见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)；CI 会跑构建、单测和 lint。
+
+目录速览：
+
+```
+app/src/main/kotlin/com/phairplay/
+├── airplay/     AirPlay 2：RTSP、配对、FairPlay、镜像、音频同步
+├── cast/        Cast V2：wire 编解码、设备认证、mDNS、Default Media Receiver
+├── miracast/    WFD：Wi-Fi Direct、RTSP、TS 解复用、硬解渲染
+├── dlna/        DLNA：SSDP、SOAP、AVTransport
+├── service/     PhairPlayService：生命周期与统一状态
+└── ui/          遥控器优先的首页 / 设置 / 播放界面
+```
+
+---
+
+## 许可与致谢
+
+本项目以 **Apache License 2.0** 发布，见 [LICENSE](LICENSE)。
+
+部分协议的接收端参考并移植自以下 MIT 项目，代码中保留了来源注释，
+完整许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
+
+- [weekdayjast/MiracastReceiver](https://github.com/weekdayjast/MiracastReceiver) — Cast V2 接收端与 Miracast WFD Sink 的移植基线
+- [CastHub](https://github.com/CastHub) / [openchromecast](https://github.com/yukarinoki/openchromecast) / [vibecast](https://github.com/emilsvennesson/vibecast) — Cast V2 行为参考
+- [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — AirPlay 协议文档
+- [UxPlay](https://github.com/FDH2/UxPlay) / [RPiPlay](https://github.com/FD-/RPiPlay) — AirPlay 镜像参考实现
+
+感谢所有把协议细节写进文档和开源代码的人。
