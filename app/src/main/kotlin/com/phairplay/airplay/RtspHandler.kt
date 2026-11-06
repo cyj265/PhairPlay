@@ -6,6 +6,7 @@ import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.airplay.handshake.PairingSession
 import com.phairplay.airplay.handshake.PlistCodec
 import com.phairplay.util.Logger
+import com.phairplay.util.MediaUriPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -333,6 +334,14 @@ open class RtspHandler(
         val (url, start) = parsePlayBody(request)
         if (url.isNullOrBlank()) {
             Logger.w("POST /play with no Content-Location")
+            return RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
+        }
+        // The receiver fetches the URL itself, so a hostile peer must not be able to
+        // aim it at loopback, link-local or a non-HTTP scheme. DLNA applies the same
+        // rule in ManualDlnaHttp (see MediaUriPolicy).
+        val refusal = MediaUriPolicy.check(url)
+        if (refusal != null) {
+            Logger.w("POST /play refused: $refusal")
             return RtspResponse(400, "Bad Request", protocol = request.responseProtocol())
         }
         Logger.i("POST /play url=$url start=$start")

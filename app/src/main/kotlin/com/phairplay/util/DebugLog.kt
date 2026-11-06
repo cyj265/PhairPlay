@@ -201,6 +201,67 @@ object DebugLog {
     /** One http(s) URL with a query string, as it appears inside a log line. */
     private val URL_QUERY = Regex("""(https?://[^"'<>\s?]+)\?[^"'<>\s，,、;；)）]*""")
 
+    /** The text that replaces a personal string in a diagnostic payload. */
+    const val PERSONAL_PLACEHOLDER = "<name>"
+
+    /**
+     * A personal string shorter than this is not replaced.
+     *
+     * WHY: a two-letter name like "TV" occurs in ordinary words, and replacing it would
+     * mangle every line. The call sites do not log the name at all; this is the second
+     * line of defence, and it refuses to be a bad one.
+     */
+    private const val MIN_PERSONAL_LENGTH = 4
+
+    /**
+     * Free-text names of the household — the strings that must not leave the box.
+     *
+     * A name cannot be recognised by a pattern, so the app hands the strings it knows
+     * (the advertised device name) to the reduction, which removes them from every
+     * diagnostic payload written to the LAN.
+     */
+    private val personalStrings = CopyOnWriteArrayList<String>()
+
+    /**
+     * Registers a string that must not appear in a diagnostic payload.
+     *
+     * @param value the string to hide. A null, a blank string and a string shorter than
+     *   four characters are ignored.
+     */
+    @JvmStatic
+    fun registerPersonalString(value: String?) {
+        val trimmed = value?.trim().orEmpty()
+        if (trimmed.length < MIN_PERSONAL_LENGTH) return
+        if (personalStrings.any { it.equals(trimmed, ignoreCase = true) }) return
+        personalStrings.add(trimmed)
+    }
+
+    /**
+     * Forgets every registered personal string.
+     *
+     * Not called on a rename on purpose: earlier boots' log lines may still carry the
+     * old name, so both names must keep being masked.
+     */
+    @JvmStatic
+    fun clearPersonalStrings() {
+        personalStrings.clear()
+    }
+
+    /**
+     * The redaction applied to everything that leaves the box on the diagnostics port.
+     *
+     * It combines the URL-query cut with the personal-string mask. The names come last,
+     * because a name may contain an address-shaped word.
+     */
+    @JvmStatic
+    fun redactForExport(text: String): String {
+        var result = redactUrls(text)
+        for (personal in personalStrings) {
+            result = result.replace(personal, PERSONAL_PLACEHOLDER, ignoreCase = true)
+        }
+        return result
+    }
+
     /**
      * Cuts the query string out of every URL in a diagnostic payload.
      *

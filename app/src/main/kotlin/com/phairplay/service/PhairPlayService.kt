@@ -324,6 +324,10 @@ class PhairPlayService : Service() {
             val settings = settingsRepository.settingsFlow.first()
             Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
 
+            // The advertised name is free text and must not leave the box on the
+            // diagnostics port; the log writer masks it where it appears in a line.
+            com.phairplay.util.DebugLog.registerPersonalString(settings.effectiveDisplayName)
+
             // Watch the LAN address first: every receiver captures the IP at start
             // time, so a subnet change must rebuild them on the new address.
             ensureLocalIpWatcher()

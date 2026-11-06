@@ -6,14 +6,22 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Validates the media URI a control point hands to SetAVTransportURI
- * (ported from upstream).
+ * Validates a media URI that a peer hands to the receiver (ported from upstream).
  *
- * <p>WHY: the value is untrusted network input and reaches both the media stack
- * and the log, so it is bounded in length and free of control characters. The
- * scheme list is wide on purpose — a renderer that refuses a URI the sender
- * offers is useless — but the address is checked separately by
- * {@link HostAddressPolicy}, because the box fetches the media itself.
+ * <p>WHY: the receiver fetches the URI itself, so the value is untrusted network
+ * input that reaches both the media stack and the log. It is bounded in length,
+ * free of control characters, restricted to HTTP(S) and its target address is
+ * checked by {@link HostAddressPolicy}.
+ *
+ * <p>WHY THIS CLASS IS THE ONLY PLACE: both protocol stacks let a peer name the
+ * address the receiver then opens — AirPlay through {@code POST /play}, DLNA
+ * through {@code SetAVTransportURI}. Two scheme lists would be two truths, so
+ * both paths call this one rule. The scheme list was narrowed to {@code http}
+ * and {@code https} in the upstream security cycle: {@code file}, {@code smb},
+ * {@code ftp} and {@code rtsp} either read the local file system or reach a
+ * protocol the receiver does not speak. A control point that offers one of them
+ * gets {@code 402 Invalid Args} instead of a playback attempt — the trade-off is
+ * recorded upstream in {@code docs/security/FINDINGS.md}.
  */
 public final class MediaUriPolicy {
 
@@ -21,8 +29,7 @@ public final class MediaUriPolicy {
     public static final int MAX_URI_LENGTH = 4096;
 
     private static final Set<String> ALLOWED_SCHEMES = new HashSet<>(Arrays.asList(
-            "http", "https", "rtsp", "rtmp", "rtmpe", "rtmps", "ftp", "file", "smb",
-            "mms", "mmsh", "mmst", "udp", "pnm"
+            "http", "https"
     ));
 
     private MediaUriPolicy() {
