@@ -2185,6 +2185,15 @@ class MainActivity : AppCompatActivity() {
     private fun togglePlayPause() {
         val p = dlnaPlayerView?.player ?: return
         p.playWhenReady = !p.playWhenReady
+        // The picture stopping is not private to this screen: a phone sender
+        // polls TransportState, so without this the phone keeps showing a pause
+        // button for a cast that is already paused (and the other way round).
+        // Same states the Back-key path publishes.
+        if (p.playWhenReady) {
+            com.phairplay.dlna.transport.ManualDlnaHttp.markPlaying()
+        } else {
+            com.phairplay.dlna.transport.ManualDlnaHttp.markPaused()
+        }
     }
 
     /**
