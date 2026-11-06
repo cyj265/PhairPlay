@@ -26,7 +26,7 @@ The DLNA/UPnP receiver (AVTransport) is also fully implemented — written from 
 
 **Currently verified on hardware:** `v1.0.107-firetv` (2026-10-07) — the IPv4-only resolver, the TV-native playback OSD and the bounded source probe were each validated on a real N1 box against real sources.
 
-Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
+Phone screen mirroring uses the bundled PhairPlay sender app (`:sender`) over a small self-designed TCP protocol — the box's ROM has no usable Wi-Fi Display sink. The Google Cast receiver is still in progress (control plane only).
 
 ## Features
 
@@ -65,7 +65,7 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - Android TV / Fire TV app shell with foreground service and status UI
 - Mirror audio toggle and PIN-auth toggle in Settings
 - Works on Google TV (Android 10+) and Fire TV (Android 7+)
-- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane
+- Phone screen mirroring receiver (`_airmirror._tcp`) with a companion Android sender app
 - Google TV Cast Connect SDK lifecycle (full testing requires Cast app ID)
 - Zero ads, zero analytics, zero internet required
 - Open source — Apache 2.0 license
@@ -76,7 +76,7 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - **Apple Music in-app audio** — protected on every AirPlay path; use system audio output instead
 - **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
 - **Cloud/remote streaming** — local network only
-- **Miracast / Cast media playback** — control plane is ready; media decode integration is in progress
+- **Google Cast playback** — control plane is ready; media decode integration is in progress
 - **DRM-protected streaming** (DRM-protected HLS, e.g. some IPTV/OTT portals) — the source serves an encrypted stream, so no receiver can play it
 
 ---
@@ -209,7 +209,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 - **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
 - **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
 - **Google Cast** requires a registered Cast app ID for end-to-end testing; see [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md).
-- **Miracast** — Wi-Fi Direct and RTSP control plane work; MPEG-TS media decode is future work.
+- **Phone mirroring** — v1 streams video only (the phone keeps playing its own audio) and needs the PhairPlay sender app. Standard Miracast is not supported: this box's ROM advertises WFD source only, with no sink an app can drive.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
 - **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
