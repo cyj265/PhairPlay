@@ -57,6 +57,12 @@ class MirrorReceiver(
 
     @Volatile private var running = false
     @Volatile private var client: Socket? = null
+
+    /**
+     * Set before we close the session socket ourselves, so the read failure
+     * that always follows is not reported as a fault.
+     */
+    @Volatile private var closingIntentionally = false
     private var serverSocket: ServerSocket? = null
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
@@ -103,6 +109,7 @@ class MirrorReceiver(
     fun stop() {
         Logger.i("MirrorReceiver stopping")
         running = false
+        closingIntentionally = true
         closeClient()
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
@@ -119,6 +126,7 @@ class MirrorReceiver(
      */
     fun stopSession() {
         Logger.i("MirrorReceiver: session ended from the UI")
+        closingIntentionally = true
         closeClient()
     }
 
@@ -187,10 +195,11 @@ class MirrorReceiver(
                 continue
             }
             client = socket
+            closingIntentionally = false
             try {
                 handleSession(socket)
             } catch (e: Exception) {
-                Logger.e("Mirror session error", e)
+                if (!closingIntentionally) Logger.e("Mirror session error", e)
             } finally {
                 closeClient()
                 queue.clear()

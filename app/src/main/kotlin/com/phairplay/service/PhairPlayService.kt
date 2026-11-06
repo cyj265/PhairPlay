@@ -588,6 +588,7 @@ class PhairPlayService : Service() {
             surfaceProvider = { videoSurfaceProvider?.invoke() },
             onSenderName = { name -> pendingName = name.ifBlank { "手机投屏" } },
             onStateChanged = { state ->
+                Logger.d("Mirror receiver state -> $state")
                 _mirrorState.value = state
                 when (state) {
                     ProtocolState.CONNECTED -> {
