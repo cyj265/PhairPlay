@@ -31,8 +31,9 @@ class AppSettingsTest {
     @Test
     fun `default settings enable the LAN receivers`() {
         assertTrue(AppSettings.DEFAULT.airPlayEnabled)
-        assertTrue(AppSettings.DEFAULT.mirrorEnabled)
         assertTrue(AppSettings.DEFAULT.dlnaEnabled)
+        // Wi-Fi Display has no usable sink on this hardware, so it stays opt-in.
+        assertFalse(AppSettings.DEFAULT.miracastEnabled)
         // Cast cannot run on Fire TV (no Play Services), so it stays opt-in.
         assertFalse(AppSettings.DEFAULT.castEnabled)
     }
@@ -87,40 +88,32 @@ class AppSettingsTest {
 
     @Test
     fun `anyProtocolEnabled is true when all protocols are enabled`() {
-        val settings = AppSettings(
-            airPlayEnabled = true, mirrorEnabled = true, castEnabled = true, dlnaEnabled = true
-        )
+        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = true, castEnabled = true)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is true when only AirPlay is enabled`() {
-        val settings = AppSettings(
-            airPlayEnabled = true, mirrorEnabled = false, castEnabled = false, dlnaEnabled = false
-        )
+        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = false, castEnabled = false)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
-    fun `anyProtocolEnabled is true when only mirroring is enabled`() {
-        val settings = AppSettings(
-            airPlayEnabled = false, mirrorEnabled = true, castEnabled = false, dlnaEnabled = false
-        )
+    fun `anyProtocolEnabled is true when only Miracast is enabled`() {
+        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = true, castEnabled = false)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is true when only Cast is enabled`() {
-        val settings = AppSettings(
-            airPlayEnabled = false, mirrorEnabled = false, castEnabled = true, dlnaEnabled = false
-        )
+        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, castEnabled = true)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is false when all protocols are disabled`() {
         val settings = AppSettings(
-            airPlayEnabled = false, mirrorEnabled = false, castEnabled = false, dlnaEnabled = false
+            airPlayEnabled = false, miracastEnabled = false, castEnabled = false, dlnaEnabled = false
         )
         assertFalse(settings.anyProtocolEnabled)
     }

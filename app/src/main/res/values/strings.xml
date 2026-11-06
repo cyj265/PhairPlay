@@ -28,7 +28,7 @@
 
     <!-- ── Protocol names ──────────────────────────────────────── -->
     <string name="protocol_airplay">AirPlay</string>
-    <string name="protocol_miracast">Mirroring</string>
+    <string name="protocol_miracast">Miracast</string>
     <string name="protocol_cast">Cast</string>
     <string name="protocol_dlna">DLNA</string>
 
@@ -94,8 +94,8 @@
     <string name="setting_display_name_collision_note">Registered as: %1$s</string>
     <string name="setting_airplay_enabled">AirPlay Receiver</string>
     <string name="setting_airplay_subtitle">Accept connections from macOS</string>
-    <string name="setting_miracast_enabled">Screen Mirroring Receiver</string>
-    <string name="setting_miracast_subtitle">Mirror an Android phone with the PhairPlay Sender app</string>
+    <string name="setting_miracast_enabled">Miracast Receiver</string>
+    <string name="setting_miracast_subtitle">Accept connections from Windows and Android</string>
     <string name="setting_cast_enabled">Google Cast Receiver</string>
     <string name="setting_cast_subtitle">Accept connections from Chrome and Android</string>
     <string name="setting_dlna_enabled">DLNA Receiver</string>

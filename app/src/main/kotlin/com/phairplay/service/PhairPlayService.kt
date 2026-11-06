@@ -27,7 +27,7 @@ import com.phairplay.R
 import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.cast.CastReceiver
 import com.phairplay.dlna.DlnaReceiver
-import com.phairplay.mirror.MirrorReceiver
+import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.util.Logger
@@ -95,8 +95,8 @@ class PhairPlayService : Service() {
     private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
     val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
 
-    private val _mirrorState = MutableStateFlow(ProtocolState.DISABLED)
-    val mirrorState: StateFlow<ProtocolState> = _mirrorState.asStateFlow()
+    private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
+    val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
 
     private val _castState = MutableStateFlow(ProtocolState.DISABLED)
     val castState: StateFlow<ProtocolState> = _castState.asStateFlow()
@@ -168,7 +168,7 @@ class PhairPlayService : Service() {
 
     // Receiver instances — null when not running
     private var airPlayReceiver: AirPlayReceiver? = null
-    private var mirrorReceiver: MirrorReceiver? = null
+    private var miracastReceiver: MiracastReceiver? = null
     private var castReceiver: CastReceiver? = null
     private var dlnaReceiver: DlnaReceiver? = null
 
@@ -322,7 +322,7 @@ class PhairPlayService : Service() {
 
         try {
             val settings = settingsRepository.settingsFlow.first()
-            Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Mirror=${settings.mirrorEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
+            Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}, DLNA=${settings.dlnaEnabled}")
 
             // Watch the LAN address first: every receiver captures the IP at start
             // time, so a subnet change must rebuild them on the new address.
@@ -337,7 +337,7 @@ class PhairPlayService : Service() {
             com.phairplay.util.DiagnosticsServer.start()
 
             if (settings.airPlayEnabled)   startAirPlay(settings)
-            if (settings.mirrorEnabled)    startMirror(settings)
+            if (settings.miracastEnabled)  startMiracast()
             if (settings.castEnabled)      startCast()
             if (settings.dlnaEnabled)      startDlna(settings)
         } catch (e: Exception) {
@@ -567,63 +567,13 @@ class PhairPlayService : Service() {
         Logger.d("AirPlay receiver started (displayName='${settings.effectiveDisplayName}')")
     }
 
-    /**
-     * Creates and starts the [MirrorReceiver] — the phone screen-mirroring path.
-     *
-     * It advertises `_airmirror._tcp` and listens on TCP, so the phone needs the
-     * PhairPlay sender app but no Wi-Fi Direct: the p230 ROM has no usable WFD
-     * sink, and the app this replaces requires its own phone app as well.
-     */
-    private fun startMirror(settings: AppSettings) {
-        // Idempotent like the AirPlay receiver: a duplicate ACTION_START must not
-        // open a second listening socket.
-        if (mirrorReceiver != null) {
-            Logger.i("Mirror receiver already running — skipping duplicate start")
-            return
-        }
-        var pendingName = "手机投屏"
-        mirrorReceiver = MirrorReceiver(
+    private fun startMiracast() {
+        _miracastState.value = ProtocolState.ADVERTISING
+        miracastReceiver = MiracastReceiver(
             context = applicationContext,
-            displayName = settings.effectiveDisplayName,
-            surfaceProvider = { videoSurfaceProvider?.invoke() },
-            onSenderName = { name -> pendingName = name.ifBlank { "手机投屏" } },
-            onStateChanged = { state ->
-                Logger.d("Mirror receiver state -> $state")
-                _mirrorState.value = state
-                when (state) {
-                    ProtocolState.CONNECTED -> {
-                        // Do not steal the notification from a live AirPlay session;
-                        // both can be connected, but only one owns the picture.
-                        if (_activeConnection.value?.protocol != Protocol.AIRPLAY) {
-                            _activeConnection.value =
-                                ActiveConnection(pendingName, Protocol.MIRROR)
-                            updateNotification(isRunning = true, streamingSenderName = pendingName)
-                            bringActivityToForeground("手机镜像")
-                        }
-                    }
-                    ProtocolState.ADVERTISING,
-                    ProtocolState.DISABLED,
-                    ProtocolState.ERROR -> {
-                        if (_activeConnection.value?.protocol == Protocol.MIRROR) {
-                            _activeConnection.value = null
-                            updateNotification(
-                                isRunning = state != ProtocolState.DISABLED &&
-                                    state != ProtocolState.ERROR
-                            )
-                        }
-                    }
-                }
-            }
+            onStateChanged = { state -> _miracastState.value = state }
         ).also { it.start() }
-        Logger.d("Mirror receiver started (displayName='${settings.effectiveDisplayName}')")
-    }
-
-    /**
-     * Ends the current mirroring session from the TV (Back key). The receiver
-     * keeps advertising, so the phone can start a new session without a restart.
-     */
-    fun stopMirrorSession() {
-        mirrorReceiver?.stopSession()
+        Logger.d("Miracast receiver started")
     }
 
     private fun startCast() {
@@ -1422,15 +1372,15 @@ class PhairPlayService : Service() {
         synchronized(receiversLock) { receiversActive = false }
         com.phairplay.util.DiagnosticsServer.stop()
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
-        try { mirrorReceiver?.stop() } catch (e: Exception) { Logger.e("Mirror stop error", e) }
+        try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }
         try { castReceiver?.stop() } catch (e: Exception) { Logger.e("Cast stop error", e) }
         try { dlnaReceiver?.stop() } catch (e: Exception) { Logger.e("DLNA stop error", e) }
         airPlayReceiver = null
-        mirrorReceiver = null
+        miracastReceiver = null
         castReceiver = null
         dlnaReceiver = null
         _airPlayState.value = ProtocolState.DISABLED
-        _mirrorState.value = ProtocolState.DISABLED
+        _miracastState.value = ProtocolState.DISABLED
         _castState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED
         _dlnaError.value = null

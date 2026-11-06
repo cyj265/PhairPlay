@@ -37,12 +37,12 @@ data class AppSettings(
     val airPlayEnabled: Boolean = true,
 
     /**
-     * Whether phone screen mirroring is enabled.
-     * When true: the receiver advertises `_airmirror._tcp` and listens for the
-     * PhairPlay sender app. This is a self-designed protocol, not Miracast:
-     * the box's ROM has no usable Wi-Fi Display sink.
+     * Whether the Miracast (Wi-Fi Display) receiver is enabled.
+     * When false: Wi-Fi P2P service advertisement is stopped.
+     * The p230 ROM has no usable WFD sink, so this stays off by default and
+     * the switch only exposes the (incomplete) control plane.
      */
-    val mirrorEnabled: Boolean = true,
+    val miracastEnabled: Boolean = false,
 
     /**
      * Whether the Google Cast receiver is enabled.
@@ -125,7 +125,7 @@ data class AppSettings(
      * If all are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || mirrorEnabled || castEnabled || dlnaEnabled
+        get() = airPlayEnabled || miracastEnabled || castEnabled || dlnaEnabled
 
     companion object {
         /** The default settings instance used on first launch. */
