@@ -142,7 +142,8 @@ class WfdSessionHandler(
                 (param(msg, "wfdx_video_formats") ?: param(msg, "wfd_video_formats"))?.let { selected ->
                     Logger.i("WFD: source selected video format = $selected")
                     val ceaBit = selected.split(' ').getOrNull(4)?.toLongOrNull(16) ?: 0L
-                    // WFD 1.0 table 5-1: one bit per CEA timing.
+                    // WFD 1.0 table 5-1: one bit per CEA timing, in the same order as
+                    // AOSP's VideoFormats::mResolutionTable.
                     val mode = when (ceaBit) {
                         0x0001L -> "640x480p60"
                         0x0002L -> "720x480p60"
@@ -150,16 +151,17 @@ class WfdSessionHandler(
                         0x0008L -> "720x576p50"
                         0x0010L -> "720x576i50"
                         0x0020L -> "1280x720p30"
-                        0x0040L -> "1280x720p25"
-                        0x0080L -> "1280x720p24"
-                        0x0100L -> "1920x1080p30"
-                        0x0200L -> "1920x1080p25"
-                        0x0400L -> "1920x1080p24"
-                        0x0800L -> "1920x1080i60"
-                        0x1000L -> "1920x1080i50"
-                        0x2000L -> "1280x720p60"
-                        0x4000L -> "1280x720p50"
-                        0x8000L -> "1920x1080p60"
+                        0x0040L -> "1280x720p60"
+                        0x0080L -> "1920x1080p30"
+                        0x0100L -> "1920x1080p60"
+                        0x0200L -> "1920x1080i60"
+                        0x0400L -> "1280x720p25"
+                        0x0800L -> "1280x720p50"
+                        0x1000L -> "1920x1080p25"
+                        0x2000L -> "1920x1080p50"
+                        0x4000L -> "1920x1080i50"
+                        0x8000L -> "1280x720p24"
+                        0x10000L -> "1920x1080p24"
                         else -> "CEA 0x%08X".format(ceaBit)
                     }
                     Logger.i("WFD: negotiated mode = $mode")

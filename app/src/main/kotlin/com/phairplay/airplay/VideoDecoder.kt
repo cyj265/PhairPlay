@@ -33,6 +33,11 @@ class VideoDecoder(private val outputSurface: Surface) {
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
 
+    // MediaCodec is not thread-safe: the stream thread decodes while the session thread
+    // may release on teardown. Releasing from under a decode call throws
+    // IllegalStateException and flags the decoder unhealthy right as the stream ends.
+    private val codecLock = Any()
+
     // Track whether the decoder has been initialized (to prevent double-init)
     @Volatile
     private var isInitialized = false
@@ -148,52 +153,54 @@ class VideoDecoder(private val outputSurface: Surface) {
      * @param presentationTimeUs Presentation timestamp in microseconds (for A/V sync).
      */
     fun decodeNalUnit(nalUnit: ByteArray, presentationTimeUs: Long) {
-        val codec = mediaCodec ?: run {
-            Logger.w("decodeNalUnit() called but decoder not initialized")
-            return
-        }
-
-        try {
-            // Drain finished frames FIRST — renders them and frees the pipeline so an input
-            // buffer becomes available. Dropping NAL units corrupts H.264 (loses reference
-            // frames) and causes a black screen until the next keyframe, so we avoid it.
-            releaseOutputBuffers(codec)
-
-            // Wait for an input buffer. Longer than before: on a modest SoC the decoder can
-            // briefly fall behind, and waiting beats dropping (which corrupts the stream).
-            val inputBufferIndex = codec.dequeueInputBuffer(INPUT_BUFFER_TIMEOUT_US)
-
-            if (inputBufferIndex >= 0) {
-                // We got an input buffer — fill it with the NAL unit bytes
-                val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
-                inputBuffer.clear()
-                inputBuffer.put(nalUnit)
-
-                // Tell MediaCodec: "input buffer [index] is filled with [size] bytes
-                // of data with timestamp [presentationTimeUs] — please decode it"
-                codec.queueInputBuffer(
-                    inputBufferIndex,
-                    0,                 // offset: start from beginning of buffer
-                    nalUnit.size,      // size: how many bytes to decode
-                    presentationTimeUs,
-                    0                  // flags: 0 = normal frame (not end-of-stream)
-                )
-            } else {
-                // No input buffer available — the decoder is catching up.
-                // Drop this NAL unit to avoid building up backlog (prefer low latency).
-                Logger.v("VideoDecoder: no input buffer available, dropping NAL unit")
+        synchronized(codecLock) {
+            val codec = mediaCodec ?: run {
+                Logger.w("decodeNalUnit() called but decoder not initialized")
+                return
             }
 
-            // Release any output buffers that MediaCodec has finished decoding.
-            // render=true means the frame goes to the Surface immediately.
-            releaseOutputBuffers(codec)
+            try {
+                // Drain finished frames FIRST — renders them and frees the pipeline so an input
+                // buffer becomes available. Dropping NAL units corrupts H.264 (loses reference
+                // frames) and causes a black screen until the next keyframe, so we avoid it.
+                releaseOutputBuffers(codec)
 
-        } catch (e: IllegalStateException) {
-            // MediaCodec is now in the error state and cannot recover — flag for recreation.
-            Logger.e("VideoDecoder entered error state — will recreate", e)
-            isHealthy = false
-        } catch (e: Exception) {
-            Logger.e("Error decoding NAL unit", e)
+                // Wait for an input buffer. Longer than before: on a modest SoC the decoder can
+                // briefly fall behind, and waiting beats dropping (which corrupts the stream).
+                val inputBufferIndex = codec.dequeueInputBuffer(INPUT_BUFFER_TIMEOUT_US)
+
+                if (inputBufferIndex >= 0) {
+                    // We got an input buffer — fill it with the NAL unit bytes
+                    val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
+                    inputBuffer.clear()
+                    inputBuffer.put(nalUnit)
+
+                    // Tell MediaCodec: "input buffer [index] is filled with [size] bytes
+                    // of data with timestamp [presentationTimeUs] — please decode it"
+                    codec.queueInputBuffer(
+                        inputBufferIndex,
+                        0,                 // offset: start from beginning of buffer
+                        nalUnit.size,      // size: how many bytes to decode
+                        presentationTimeUs,
+                        0                  // flags: 0 = normal frame (not end-of-stream)
+                    )
+                } else {
+                    // No input buffer available — the decoder is catching up.
+                    // Drop this NAL unit to avoid building up backlog (prefer low latency).
+                    Logger.v("VideoDecoder: no input buffer available, dropping NAL unit")
+                }
+
+                // Release any output buffers that MediaCodec has finished decoding.
+                // render=true means the frame goes to the Surface immediately.
+                releaseOutputBuffers(codec)
+
+            } catch (e: IllegalStateException) {
+                // MediaCodec is now in the error state and cannot recover — flag for recreation.
+                Logger.e("VideoDecoder entered error state — will recreate", e)
+                isHealthy = false
+            } catch (e: Exception) {
+                Logger.e("Error decoding NAL unit", e)
+            }
         }
     }
 
@@ -290,14 +297,16 @@ class VideoDecoder(private val outputSurface: Surface) {
      */
     fun release() {
         Logger.d("Releasing VideoDecoder")
-        try {
-            mediaCodec?.stop()
-            mediaCodec?.release()
-        } catch (e: Exception) {
-            Logger.e("Error releasing MediaCodec (non-fatal)", e)
-        } finally {
-            mediaCodec = null
-            isInitialized = false
+        synchronized(codecLock) {
+            try {
+                mediaCodec?.stop()
+                mediaCodec?.release()
+            } catch (e: Exception) {
+                Logger.e("Error releasing MediaCodec (non-fatal)", e)
+            } finally {
+                mediaCodec = null
+                isInitialized = false
+            }
         }
     }
 

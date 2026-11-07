@@ -44,11 +44,12 @@ class WfdVideoCapabilitiesTest {
     }
 
     @Test
-    fun `standard format advertises 1080p30 and 720p30`() {
+    fun `standard format advertises 1080p30 and 720p30 only`() {
         val line = wfdVideoCapabilityLines(emptySet(), null).single()
-        assertTrue(line.contains("00000120"))
+        assertTrue(line.contains("000000A0"))
         assertFalse(line.contains("00000001"))
         assertFalse(line.contains("000001C0"))
+        assertFalse(line.contains("00008120"))
     }
 
     @Test

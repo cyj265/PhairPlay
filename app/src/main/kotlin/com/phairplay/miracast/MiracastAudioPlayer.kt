@@ -54,17 +54,62 @@ class MiracastAudioPlayer {
     private var firstPcm = true
     private var droppedPes = 0L
 
+    /** PCM frames handed to the current AudioTrack; [AudioTrack.playbackHeadPosition] lags it. */
+    private var framesWritten = 0L
+
+    /** Playback head value that [framesWritten] is measured against (reset on flush). */
+    private var trackHeadBase = 0L
+    private var lastFlushMs = 0L
+    private var lastStatsMs = 0L
+
     companion object {
         /** One AAC frame is 1024 samples (~21ms at 48kHz); Windows packs one or two per PES. */
         private const val QUEUE_CAPACITY = 64
 
-        /** More backlog than this means we're behind; drop down to [QUEUE_KEEP]. */
-        private const val MAX_BACKLOG = 8
-        private const val QUEUE_KEEP = 2
+        /** Undecoded PES held longer than this get dropped (they have not been heard yet). */
+        private const val QUEUE_HIGH_MS = 150L
+
+        /** Trim down towards this, leaving enough cushion that trimming does not oscillate. */
+        private const val QUEUE_TARGET_MS = 100L
+
+        /**
+         * Never discard more than this per trim. Shedding a whole burst in one go is one
+         * big hole in the sound; capping it makes each event a short click instead.
+         */
+        private const val MAX_DROP_PER_EVENT = 3
+
+        /**
+         * Audio already handed to AudioTrack that is still unheard. Dropping queue entries
+         * cannot fix this; the track has to be flushed. 200ms is well above what a healthy
+         * pipe holds, so a value this high means the track really is running behind.
+         */
+        private const val TRACK_LAG_MS = 200L
+
+        /** One flush is an audible gap; do not let it become a stutter loop. */
+        private const val FLUSH_MIN_INTERVAL_MS = 1000L
+
+        private const val SAMPLES_PER_AAC_FRAME = 1024.0
 
         private val SAMPLE_RATES = intArrayOf(
             96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350
         )
+
+        /**
+         * How many queued PES to discard to bring [backlogMs] down to [targetMs].
+         *
+         * @param queued PES currently waiting in the queue (never drop more than that)
+         */
+        internal fun trimCount(
+            backlogMs: Long,
+            targetMs: Long,
+            msPerPes: Double,
+            maxPerEvent: Int,
+            queued: Int
+        ): Int {
+            if (queued <= 0 || msPerPes <= 0.0 || backlogMs <= targetMs) return 0
+            val needed = kotlin.math.ceil((backlogMs - targetMs) / msPerPes).toInt()
+            return needed.coerceIn(1, minOf(maxPerEvent, queued).coerceAtLeast(1))
+        }
     }
 
     /** [TsDemuxer] callback on the demux thread: enqueue only. */
@@ -109,16 +154,30 @@ class MiracastAudioPlayer {
                     null
                 } ?: continue
 
-                if (queue.size > MAX_BACKLOG) {
-                    var dropped = 0
-                    while (queue.size > QUEUE_KEEP) {
-                        queue.poll()
-                        dropped++
+                // Video renders on arrival, so audio still unheard means the sound trails the
+                // picture. Two different lags need two different fixes: undecoded PES are
+                // dropped, while frames already inside AudioTrack can only be discarded by
+                // flushing the track. Trimming the queue for track lag never converges, so
+                // it just chews through the stream — that used to run for minutes on end.
+                val queueMs = (queue.size * msPerPes()).toLong()
+                val pendingMs = pendingMs()
+                if (queueMs > QUEUE_HIGH_MS) {
+                    val dropped = trimCount(
+                        queueMs, QUEUE_TARGET_MS, msPerPes(), MAX_DROP_PER_EVENT, queue.size
+                    )
+                    if (dropped > 0) {
+                        repeat(dropped) { queue.poll() }
+                        droppedPes += dropped
+                        resyncRequested = true
+                        Logger.w(
+                            "Miracast audio: queue ${queueMs}ms, dropped $dropped PES " +
+                                "(total $droppedPes)"
+                        )
                     }
-                    droppedPes += dropped
-                    resyncRequested = true
-                    Logger.w("Miracast audio: behind real time, dropped $dropped PES (total $droppedPes)")
+                } else if (pendingMs > TRACK_LAG_MS) {
+                    flushTrack(pendingMs)
                 }
+                logStats(queueMs, pendingMs)
 
                 try {
                     when (type) {
@@ -274,6 +333,51 @@ class MiracastAudioPlayer {
 
     // ─── AudioTrack ─────────────────────────────────────────────────────────
 
+    /** PCM frames in the track that the speaker has not played yet. */
+    private fun pendingMs(): Long {
+        val track = audioTrack ?: return 0L
+        val head = (track.playbackHeadPosition.toLong() and 0xFFFF_FFFFL) - trackHeadBase
+        val bufferedFrames = (framesWritten - head.coerceAtLeast(0L)).coerceAtLeast(0L)
+        val rate = if (trackSampleRate > 0) trackSampleRate else 48_000
+        return bufferedFrames * 1000 / rate
+    }
+
+    /**
+     * Discard everything already written to the track. [AudioTrack.playbackHeadPosition]
+     * does not reliably reset to zero on this SoC, so re-base the counter at whatever the
+     * head reads after the flush instead of assuming success.
+     */
+    private fun flushTrack(pendingMs: Long) {
+        val track = audioTrack ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastFlushMs < FLUSH_MIN_INTERVAL_MS) return
+        val capacity = track.bufferSizeInFrames
+        runCatching {
+            track.pause()
+            track.flush()
+        }
+        framesWritten = 0
+        trackHeadBase = track.playbackHeadPosition.toLong() and 0xFFFF_FFFFL
+        runCatching { track.play() }
+        lastFlushMs = now
+        Logger.w("Miracast audio: track ${pendingMs}ms behind, flushed (capacity=${capacity}f)")
+    }
+
+    /** Low-rate visibility into where the audio actually is. */
+    private fun logStats(queueMs: Long, pendingMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastStatsMs < 5000) return
+        lastStatsMs = now
+        if (queueMs == 0L && pendingMs == 0L) return
+        val capacity = audioTrack?.bufferSizeInFrames ?: -1
+        Logger.i("Miracast audio: queue=${queueMs}ms pending=${pendingMs}ms buffer=${capacity}f")
+    }
+
+    private fun msPerPes(): Double {
+        val rate = if (trackSampleRate > 0) trackSampleRate else 48_000
+        return SAMPLES_PER_AAC_FRAME * 1000.0 / rate
+    }
+
     private fun ensureTrack(sampleRate: Int, channels: Int) {
         if (audioTrack != null && sampleRate == trackSampleRate && channels == trackChannels) return
         releaseTrack()
@@ -313,8 +417,12 @@ class MiracastAudioPlayer {
         }.also { it.play() }
         trackSampleRate = sampleRate
         trackChannels = channels
-        Logger.i("Miracast audio: AudioTrack ${sampleRate}Hz x$channels, buffer=${minBuf}B " +
-            "(~${minBuf * 1000 / (sampleRate * channels * 2)}ms)")
+        framesWritten = 0
+        trackHeadBase = 0
+        lastFlushMs = 0
+        Logger.i("Miracast audio: AudioTrack ${sampleRate}Hz x$channels, buffer=${minBuf}B/" +
+            "${audioTrack?.bufferSizeInFrames}f " +
+            "(~${minBuf * 1000 / (sampleRate * channels * 2)}ms requested)")
     }
 
     /** Blocking write: AudioTrack's consumption rate paces the playback thread. */
@@ -324,6 +432,7 @@ class MiracastAudioPlayer {
             firstPcm = false
             Logger.i("Miracast audio: first PCM (${length}B) → AudioTrack")
         }
+        if (trackChannels > 0) framesWritten += length / (2 * trackChannels)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             track.write(pcm, 0, length, AudioTrack.WRITE_BLOCKING)
         } else {

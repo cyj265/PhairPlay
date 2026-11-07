@@ -40,8 +40,15 @@ internal fun wfdAvcLevel(width: Int, height: Int, fps: Int): Pair<Int, Int>? {
 private const val MAX_LONG_EDGE = 1920
 private const val MAX_SHORT_EDGE = 1080
 
-/** CEA bits for 720p30 (0x20) and 1080p30 (0x100); sources pick the largest. */
-private const val CEA_MASK = "00000120"
+/**
+ * CEA bits for 720p30 (0x20) and 1080p30 (0x80); sources pick the largest.
+ *
+ * Bit 8 (1080p60) is deliberately not advertised: the box decodes it fine from phones,
+ * but a Windows source at 60 fps starves the decoder's input queue (dropped NAL units
+ * smear text until the next IDR) and halves the bits spent per frame on a low-bitrate
+ * desktop.
+ */
+private const val CEA_MASK = "000000A0"
 
 internal fun chooseWfdCustomVideoMode(
     width: Int,
