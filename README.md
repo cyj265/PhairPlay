@@ -1,9 +1,10 @@
 # PhairPlay
 
-**把电视盒子变成一块「谁都能投」的屏幕。**
+**把任何一台 Android 电视变成一块「谁都能投」的屏幕。**
 
-开源、无广告、不联网的 Android TV / Fire TV 投屏接收端，一个 App 同时接下
-AirPlay、DLNA、Google Cast 和 Miracast。
+开源、无广告、不联网的电视投屏接收端，适用于 **Android TV / Google TV / Fire TV
+以及各类 Android 电视盒子、投影仪**。一个 App 同时接下 AirPlay、DLNA、Google Cast
+和 Miracast。
 
 <p align="left">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue">
@@ -30,7 +31,7 @@ AirPlay、DLNA、Google Cast 和 Miracast。
 | **AirPlay 2** | macOS 12+、iOS / iPadOS 16+ | ✅ 可用 | 镜像 + 音频 + 照片 + 视频 URL，HomeKit 配对、FairPlay 解密、AAC-ELD/ALAC、NTP 音画同步、DACP 反向遥控 |
 | **DLNA / UPnP** | Android 手机上的 B 站、腾讯视频、抖音等 | ✅ 可用 | 自写 SSDP + SOAP，HLS / FLV / MPEG-TS，HEVC 硬解；按 Back 暂停回首页，投屏会话不中断 |
 | **Google Cast V2** | VLC 等走 LAN Cast V2 的发送端 | ✅ 可用 | TLS `8009` + mDNS `_googlecast._tcp`，内置 Default Media Receiver (`CC1AD845`)，ExoPlayer 直接播放 |
-| **Miracast (WFD)** | Windows「连接」、Android「无线投屏」 | ✅ 可用 | Wi-Fi Direct 组网、WFD RTSP 握手、MPEG-TS / H.264 / AAC 硬解渲染；Windows 已复验 1080p30，5 GHz 组信道下 5 分钟零丢包 |
+| **Miracast (WFD)** | Windows「连接」、Android「无线投屏」 | ✅ 可用 | Wi-Fi Direct 组网、WFD RTSP 握手、MPEG-TS / H.264 / AAC 硬解渲染；Android 手机镜像 30fps 稳定，Windows 桌面源在高码率动态场景下仍有卡顿（定位中） |
 
 > **Cast 的真实边界**：本项目使用自签名证书，Chrome 投屏菜单、YouTube、Google Home
 > 会校验 Google Cast CA，因此不会接受本接收端；能连上的是只要求 Cast V2 over TLS 的
@@ -58,16 +59,25 @@ AirPlay、DLNA、Google Cast 和 Miracast。
 
 ### 直接下载 Release
 
-到 [Releases](https://github.com/cyj265/PhairPlay/releases) 下载对应 APK：
+到 [Releases](https://github.com/cyj265/PhairPlay/releases) 下载对应 APK。两个包功能相同，
+区别只在 **Cast 的实现方式** 和最低系统版本：
 
-| APK | 设备 |
-|-----|------|
-| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV / Android TV（Android 10+），启用官方 Cast Connect |
-| `PhairPlay-vX.Y.Z-firetv.apk` | Fire TV、Amlogic / N1 等盒子（Android 7.1+） |
+| APK | 适用设备 | Cast 能力 |
+|-----|----------|-----------|
+| `PhairPlay-vX.Y.Z-androidtv.apk` | **通用电视版**：Fire TV、Android TV 7.1+、Amlogic / 晶晨等 Android 盒子、投影仪 | 自签名 Cast V2（VLC 等局域网发送端） |
+| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV / Android TV 10+ | 官方 Cast Connect（需 Google Play 服务与 Cast App ID） |
+
+> Gradle 里通用电视版的 flavor 名仍是 `firetv`（历史命名，minSdk 25），**它不是
+> Fire TV 专属**——只要系统是 Android 7.1 及以上、带 Leanback 启动器，普通 Android TV
+> 和第三方盒子都装这个包。
+
+**32 位 / 64 位**：上面两个 APK 都是 universal 包，内置 `armeabi-v7a`（32 位 ARM）、
+`arm64-v8a`（64 位 ARM）以及 `x86` / `x86_64`，所以只支持 32 位的老板子和 64 位新设备都
+装同一个包；系统会按设备 ABI 自动取对应的 `.so`。
 
 ```bash
 adb connect <盒子IP>
-adb install -r PhairPlay-vX.Y.Z-firetv.apk
+adb install -r PhairPlay-vX.Y.Z-androidtv.apk
 ```
 
 电视端开启 ADB 的方法见 [docs/guides/INSTALLATION.md](docs/guides/INSTALLATION.md)。
