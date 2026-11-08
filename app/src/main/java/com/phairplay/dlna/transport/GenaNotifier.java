@@ -6,6 +6,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.util.Locale;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -427,6 +428,6 @@ public final class GenaNotifier {
         long h = seconds / 3600;
         long m = (seconds % 3600) / 60;
         long sec = seconds % 60;
-        return String.format("%02d:%02d:%02d", h, m, sec);
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", h, m, sec);
     }
 }

@@ -60,6 +60,12 @@ class VinylDiscView(context: Context, attrs: AttributeSet? = null) : View(contex
     private var art: Bitmap? = null
     private var artShader: BitmapShader? = null
 
+    // Reused by every frame of the spin animation: allocating shaders and a
+    // Matrix inside onDraw would churn the heap for 24 s at a time.
+    private val artMatrix = Matrix()
+    private var discGradient: RadialGradient? = null
+    private var sheenGradient: LinearGradient? = null
+
     private var angle = 0f
 
     /**
@@ -121,6 +127,31 @@ class VinylDiscView(context: Context, attrs: AttributeSet? = null) : View(contex
         if (visibility == VISIBLE && isAttachedToWindow) spin.resume() else spin.pause()
     }
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val cx = w / 2f
+        val cy = h / 2f
+        val r = minOf(w, h) / 2f - dp(2f)
+        if (r <= 0f) {
+            discGradient = null
+            sheenGradient = null
+            return
+        }
+        discGradient = RadialGradient(
+            cx, cy, r,
+            intArrayOf(0xFF232323.toInt(), 0xFF141414.toInt(), 0xFF070707.toInt()),
+            floatArrayOf(0f, 0.7f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        // Static sheen on the upper-left, outside the rotating layer.
+        sheenGradient = LinearGradient(
+            cx - r, cy - r, cx + r * 0.1f, cy + r * 0.1f,
+            intArrayOf(0x1FFFFFFF, 0x00FFFFFF, 0x00FFFFFF),
+            floatArrayOf(0f, 0.55f, 1f),
+            Shader.TileMode.CLAMP
+        )
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val cx = width / 2f
@@ -139,12 +170,7 @@ class VinylDiscView(context: Context, attrs: AttributeSet? = null) : View(contex
 
         val artR = r * 0.62f
 
-        discPaint.shader = RadialGradient(
-            cx, cy, r,
-            intArrayOf(0xFF232323.toInt(), 0xFF141414.toInt(), 0xFF070707.toInt()),
-            floatArrayOf(0f, 0.7f, 1f),
-            Shader.TileMode.CLAMP
-        )
+        discPaint.shader = discGradient
         canvas.drawCircle(cx, cy, r, discPaint)
         discPaint.shader = null
 
@@ -161,7 +187,7 @@ class VinylDiscView(context: Context, attrs: AttributeSet? = null) : View(contex
 
         val a = artShader
         if (a != null) {
-            val m = Matrix()
+            val m = artMatrix
             val bw = art!!.width.toFloat()
             val bh = art!!.height.toFloat()
             val scale = (artR * 2f) / minOf(bw, bh)
@@ -196,13 +222,7 @@ class VinylDiscView(context: Context, attrs: AttributeSet? = null) : View(contex
         rimPaint.color = 0x40FFFFFF
 
         // Static sheen on the upper-left, outside the rotating layer.
-        val sheen = LinearGradient(
-            cx - r, cy - r, cx + r * 0.1f, cy + r * 0.1f,
-            intArrayOf(0x1FFFFFFF, 0x00FFFFFF, 0x00FFFFFF),
-            floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        discPaint.shader = sheen
+        discPaint.shader = sheenGradient
         canvas.drawCircle(cx, cy, r, discPaint)
         discPaint.shader = null
 

@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -21,6 +22,9 @@ import kotlin.math.max
  * a per-frame RenderEffect (which is API 31+ anyway). A first attempt simply
  * upscaled a 40 px thumbnail and it read as coloured blocks.
  */
+// The gradients follow the view size and are rebuilt in draw, but this view is
+// only invalidated when a cover or card state changes — never on a timer.
+@SuppressLint("DrawAllocation")
 class BlurBackdropView(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)

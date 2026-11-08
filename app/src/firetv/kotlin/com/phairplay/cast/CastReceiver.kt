@@ -17,8 +17,9 @@ import com.phairplay.util.NetworkUtils
  * Home) verify the receiver against Google's Cast CA and will not accept the
  * self-signed certificate, so the device may not even appear there.
  *
- * The Google TV flavor overrides this class with the official Cast Connect
- * implementation (src/googletv/kotlin/.../CastReceiver.kt).
+ * The Google TV flavor swaps this V2 receiver for the official Cast Connect
+ * implementation (src/googletv/kotlin/.../CastReceiver.kt), so this file lives in
+ * the firetv source set and is only compiled for Fire TV / generic Android TV.
  */
 class CastReceiver(
     context: Context,

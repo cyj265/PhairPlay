@@ -1,5 +1,6 @@
 package com.phairplay
 
+import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -658,6 +659,7 @@ class MainActivity : AppCompatActivity() {
      * reported: a black screen with sound. The card is purely decorative — it
      * never takes focus, so the D-pad keeps driving the (bound) player.
      */
+    @SuppressLint("SetTextI18n") // Chinese UI copy authored inline, no locale variants
     private fun setupDlnaMusicCard() {
         val d = resources.displayMetrics.density
         val card = android.widget.FrameLayout(this).apply {
@@ -795,6 +797,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Shows/updates the music card for the current audio-only item. */
+    @SuppressLint("SetTextI18n") // Chinese UI copy authored inline, no locale variants
     private fun updateDlnaMusicCard() {
         val card = dlnaMusicView ?: return
         // Belt and braces: the receiver retracts [DlnaMediaMeta.audioOnly] once a
@@ -846,7 +849,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun fmtTime(ms: Long): String {
         val total = ms / 1000L
-        return String.format("%02d:%02d", total / 60, total % 60)
+        return String.format(java.util.Locale.ROOT, "%02d:%02d", total / 60, total % 60)
     }
 
     private var lastTagTitle: CharSequence? = null
@@ -1937,6 +1940,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Refreshes the DLNA debug HUD with live playback info from ExoPlayer. */
+    @SuppressLint("SetTextI18n") // Debug HUD: developer-facing, not localised
     private fun updateDlnaDebugText() {
         val pv = dlnaPlayerView ?: return
         val debug = dlnaDebugView ?: return

@@ -3,6 +3,7 @@ package com.phairplay.dlna.transport;
 import com.phairplay.dlna.renderer.DlnaPlayerBridge;
 import com.phairplay.util.DebugLog;
 
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1558,6 +1559,6 @@ public final class ManualDlnaHttp {
         long h = seconds / 3600;
         long m = (seconds % 3600) / 60;
         long s = seconds % 60;
-        return String.format("%02d:%02d:%02d", h, m, s);
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", h, m, s);
     }
 }

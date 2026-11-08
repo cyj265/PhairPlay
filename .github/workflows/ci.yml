@@ -8,7 +8,7 @@ on:
 
 jobs:
   jvm-tests:
-    name: JVM protocol tests
+    name: JVM unit tests
     runs-on: ubuntu-latest
 
     steps:
@@ -25,15 +25,25 @@ jobs:
       - name: Grant Gradle wrapper execute permission
         run: chmod +x gradlew
 
-      - name: Run JVM protocol test suite
-        run: ./gradlew :test-runner:test --stacktrace
+      # The unit tests run through the Android Gradle plugin now, so the SDK has
+      # to be present even though nothing is installed on a device.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Run JVM unit test suite
+        run: ./gradlew :app:testFiretvDebugUnitTest --stacktrace
 
       - name: Upload JVM test report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: jvm-test-report
-          path: test-runner/build/reports/tests/test/
+          path: app/build/reports/tests/testFiretvDebugUnitTest/
           retention-days: 30
           if-no-files-found: ignore
 
@@ -70,7 +80,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;28.2.13676358 cmake;3.22.1'
 
       - name: Write local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties

@@ -152,6 +152,7 @@ class CastPlayer(
     override fun onPlaybackStateChanged(playbackState: Int) {
         val exo = player ?: return
         when (playbackState) {
+            Player.STATE_IDLE -> Unit // idle is reported by the stop/release paths
             Player.STATE_BUFFERING -> report("BUFFERING", exo.currentPosition, exo.duration)
             Player.STATE_READY -> report(if (exo.isPlaying) "PLAYING" else "PAUSED", exo.currentPosition, exo.duration)
             Player.STATE_ENDED -> if (!ended) {

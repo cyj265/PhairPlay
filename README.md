@@ -104,7 +104,6 @@ cd PhairPlay
 产物在 `app/build/outputs/apk/<flavor>/debug/`。跑单测与本地门禁：
 
 ```bash
-./gradlew :test-runner:test
 ./gradlew :app:testFiretvDebugUnitTest :app:assembleFiretvDebug
 ```
 

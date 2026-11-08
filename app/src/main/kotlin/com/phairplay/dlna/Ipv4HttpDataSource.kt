@@ -1,7 +1,6 @@
 package com.phairplay.dlna
 
 import android.net.Uri
-import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
@@ -138,7 +137,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             return bytesRemaining
         } catch (e: IOException) {
             throw HttpDataSourceException.createForIOException(
-                e, dataSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+                e, dataSpec, HttpDataSourceException.TYPE_OPEN
             )
         }
     }
@@ -239,7 +238,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             stream.read(buffer, offset, want)
         } catch (e: IOException) {
             throw HttpDataSourceException.createForIOException(
-                e, currentSpec, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+                e, currentSpec, HttpDataSourceException.TYPE_READ
             )
         }
         if (bytes == -1) {

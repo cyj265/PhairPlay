@@ -1,5 +1,6 @@
 package com.phairplay.dlna
 
+import android.annotation.SuppressLint
 import android.util.Log
 import java.net.Inet4Address
 import java.net.InetAddress
@@ -38,6 +39,9 @@ import java.net.UnknownHostException
  * the router, the fallback below makes this class unnecessary: filtering to IPv4
  * can be turned off with [ALLOW_IPV6].
  */
+// Release builds plant no Timber tree, and these lines are the only record of
+// why a host was dropped — android.util.Log is the back end that still exists.
+@SuppressLint("LogNotTimber")
 internal object Ipv4OnlyDns {
 
     /** Flip to true once the router actually forwards IPv6; then this file is a no-op. */

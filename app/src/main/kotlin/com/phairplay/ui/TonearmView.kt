@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.LinearGradient
@@ -20,6 +21,9 @@ import kotlin.math.min
  * with a spinning tonearm would look broken. Geometry is expressed as fractions
  * of the disc radius, so it keeps its proportions at any card size.
  */
+// The gradients depend on the arm geometry, which only changes with the view
+// size; the record spins underneath a tonearm that is never invalidated.
+@SuppressLint("DrawAllocation")
 class TonearmView(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
 
     private val density = resources.displayMetrics.density

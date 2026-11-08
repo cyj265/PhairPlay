@@ -46,6 +46,9 @@
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
     <!-- Start on boot -->

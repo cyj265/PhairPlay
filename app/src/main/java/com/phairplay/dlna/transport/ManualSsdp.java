@@ -1,5 +1,6 @@
 package com.phairplay.dlna.transport;
 
+import android.os.Build;
 import android.system.Os;
 import android.system.OsConstants;
 import android.system.StructTimeval;
@@ -638,14 +639,22 @@ public final class ManualSsdp {
         FileDescriptor fd = null;
         try {
             fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, OsConstants.IPPROTO_UDP);
-            Os.setsockoptInt(fd, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1);
-            // Bounded receive so stop() does not need to interrupt a blocked
-            // syscall on an fd that close() alone may not wake.
-            Os.setsockoptTimeval(fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
-                    StructTimeval.fromMillis(1000));
+            // Both sockopt wrappers are newer than this flavor's minSdk 25:
+            // setsockoptInt landed in 26, setsockoptTimeval / fromMillis in 29.
+            // The socket is still usable without them (no address reuse, and
+            // recv is unbounded), which is why this path is best-effort.
+            if (Build.VERSION.SDK_INT >= 26) {
+                Os.setsockoptInt(fd, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1);
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                // Bounded receive so stop() does not need to interrupt a blocked
+                // syscall on an fd that close() alone may not wake.
+                Os.setsockoptTimeval(fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
+                        StructTimeval.fromMillis(1000));
+            }
             Os.bind(fd, addr, PORT);
             return fd;
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             if (fd != null) {
                 try {
                     Os.close(fd);

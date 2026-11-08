@@ -12,6 +12,7 @@
 -->
 <ScrollView
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/background_dark"
@@ -148,6 +149,8 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
+        <!-- The extra wrapper is what carries the row's focus ring, background and
+             72dp hit area; the text column cannot do that on its own. -->
         <LinearLayout
             android:id="@+id/row_debug_info"
             android:layout_width="match_parent"
@@ -155,8 +158,10 @@
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:paddingHorizontal="16dp"
+            android:baselineAligned="false"
             android:background="@drawable/focus_ring_selector"
-            android:focusable="true">
+            android:focusable="true"
+            tools:ignore="UselessParent">
 
             <LinearLayout
                 android:layout_width="0dp"

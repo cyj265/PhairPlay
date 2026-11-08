@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.ClipDrawable
@@ -17,6 +18,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.media3.common.Player
 import com.phairplay.R
+import java.util.Locale
 
 /**
  * DlnaOsdView — the on-screen playback bar for the full-screen DLNA player.
@@ -39,6 +41,9 @@ import com.phairplay.R
  * [AUTO_HIDE_MS] of no interaction. [hide] must also be called when the
  * player layer goes away, otherwise a stale bar outlives the picture.
  */
+// All OSD copy is Chinese and built from literals next to the widgets it labels;
+// this view has no per-locale variants.
+@SuppressLint("SetTextI18n")
 class DlnaOsdView(context: Context) : FrameLayout(context) {
 
     private val handler = Handler(Looper.getMainLooper())
@@ -210,7 +215,7 @@ class DlnaOsdView(context: Context) : FrameLayout(context) {
             cornerRadius = r
         }
         return LayerDrawable(
-            arrayOf(track, ClipDrawable(fill, Gravity.LEFT, ClipDrawable.HORIZONTAL))
+            arrayOf(track, ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL))
         ).apply {
             setId(0, android.R.id.background)
             setId(1, android.R.id.progress)
@@ -219,7 +224,7 @@ class DlnaOsdView(context: Context) : FrameLayout(context) {
 
     private fun fmtTime(ms: Long): String {
         val total = ms / 1000L
-        return String.format("%02d:%02d", total / 60, total % 60)
+        return String.format(Locale.ROOT, "%02d:%02d", total / 60, total % 60)
     }
 
     private fun colorRes(res: Int): Int =
