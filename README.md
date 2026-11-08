@@ -13,6 +13,10 @@
   <img alt="release" src="https://img.shields.io/github/v/release/cyj265/PhairPlay?display_name=tag">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="PhairPlay 首页：AirPlay / DLNA / Miracast / Cast 四协议实时状态" width="720">
+</p>
+
 ```
  macOS / iPhone          Windows / Android            电视盒子
  ┌────────────┐          ┌────────────┐          ┌──────────────────┐
@@ -31,7 +35,7 @@
 | **AirPlay 2** | macOS 12+、iOS / iPadOS 16+ | ✅ 可用 | 镜像 + 音频 + 照片 + 视频 URL，HomeKit 配对、FairPlay 解密、AAC-ELD/ALAC、NTP 音画同步、DACP 反向遥控 |
 | **DLNA / UPnP** | Android 手机上的 B 站、腾讯视频、抖音等 | ✅ 可用 | 自写 SSDP + SOAP，HLS / FLV / MPEG-TS，HEVC 硬解；按 Back 暂停回首页，投屏会话不中断 |
 | **Google Cast V2** | VLC 等走 LAN Cast V2 的发送端 | ✅ 可用 | TLS `8009` + mDNS `_googlecast._tcp`，内置 Default Media Receiver (`CC1AD845`)，ExoPlayer 直接播放 |
-| **Miracast (WFD)** | Windows「连接」、Android「无线投屏」 | ✅ 可用 | Wi-Fi Direct 组网、WFD RTSP 握手、MPEG-TS / H.264 / AAC 硬解渲染；Android 手机镜像 30fps 稳定，Windows 桌面源在高码率动态场景下仍有卡顿（定位中） |
+| **Miracast (WFD)** | Windows「连接」、Android「无线投屏」 | ✅ 可用 | Wi-Fi Direct 组网、WFD RTSP 握手、MPEG-TS / H.264 / AAC 硬解渲染；Android 手机镜像 30fps 稳定，Windows 全屏运动画面已回归验证（渲染 27–51fps，未复现卡顿） |
 
 > **Cast 的真实边界**：本项目使用自签名证书，Chrome 投屏菜单、YouTube、Google Home
 > 会校验 Google Cast CA，因此不会接受本接收端；能连上的是只要求 Cast V2 over TLS 的
@@ -52,6 +56,21 @@
 - **本地直连** —— 没有账号、没有云中转、没有统计 SDK；断网也能投。
 - **诚实的失败提示** —— 源站拒绝、证书不匹配、编码不支持都会在屏幕上说清楚，而不是留一块黑屏。
 - **现场可诊断** —— `8099` 端口实时暴露运行日志，盒子出问题时不用插 USB。
+
+---
+
+## 界面预览
+
+设置页可以分别开关四个接收器，并调整设备名称、镜像分辨率与镜像音频：
+
+<img src="docs/screenshots/settings.png" alt="设置页：四个协议开关与显示选项" width="720">
+
+音频投屏会展示封面、唱片、播放进度与遥控器操作提示；发送端提供的标题、艺术家和封面
+优先于文件名：
+
+<img src="docs/screenshots/now-playing.png" alt="播放界面：音频卡片与黑胶唱片" width="720">
+
+[观看 14 秒遥控导航演示：首页 → 设置 → 返回首页（MP4，约 0.22 MB）](docs/screenshots/demo.mp4)
 
 ---
 
