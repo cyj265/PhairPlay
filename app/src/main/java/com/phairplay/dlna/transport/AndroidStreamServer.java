@@ -36,6 +36,7 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
     private ServerSocket serverSocket;
     private Router router;
     private ExecutorService executor;
+    /** Set once at init; [run] must never set it again (see the stop/run race below). */
     private volatile boolean running;
     private int localPort = -1;
 
@@ -95,6 +96,7 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
                     new LinkedBlockingQueue<Runnable>(64),
                     new ThreadPoolExecutor.CallerRunsPolicy());
             logger.debug("AndroidStreamServer bound on {}:{}", bindAddress, localPort);
+            running = true;
         } catch (IOException e) {
             throw new InitializationException("Could not initialize AndroidStreamServer: " + e, e);
         }
@@ -154,16 +156,35 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
 
     @Override
     public void run() {
-        running = true;
+        // Do NOT set running = true here. stop() flips it to false and closes the socket;
+        // a run() thread that starts (or resumes) after stop() would otherwise resurrect the
+        // flag, and accept() on the closed socket fails instantly forever. That was a busy
+        // loop logging thousands of warnings per second, starving the decoder in the same
+        // process during Miracast playback.
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
                 executor.execute(new AndroidUpnpStream(router.getProtocolFactory(), socket));
             } catch (IOException e) {
-                if (!running) {
+                // A closed socket is terminal regardless of the flag — it covers both a
+                // normal stop() and the stale-run() race above.
+                if (!running || serverSocket == null || serverSocket.isClosed()) {
                     break;
                 }
                 logger.warn("AndroidStreamServer accept failed: {}", e.getMessage());
+                // Back off: a transient failure must never turn into a busy loop either.
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            } catch (RuntimeException e) {
+                // stop() shuts the executor down; a rejected task is just shutdown noise.
+                if (!running || executor.isShutdown()) {
+                    break;
+                }
+                logger.warn("AndroidStreamServer rejected a connection: {}", e.getMessage());
             }
         }
     }

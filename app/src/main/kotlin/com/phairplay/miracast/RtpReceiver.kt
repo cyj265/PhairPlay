@@ -2,12 +2,14 @@
 package com.phairplay.miracast
 
 import android.os.Process
+import android.os.SystemClock
 import android.view.Surface
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.DatagramPacket
@@ -68,6 +70,51 @@ class RtpReceiver(
 
     var onError: ((String) -> Unit)? = null
 
+    /**
+     * Recovery hook: asks the Source for an IDR. Returns false when the RTSP session is not
+     * in a state to send one. Invoked from the freeze watchdog, never per lost packet.
+     */
+    var onIdrRequest: (() -> Boolean)? = null
+
+    private companion object FreezeWatch {
+        /**
+         * Measurement window. Two seconds is long enough that a couple of frames of jitter do
+         * not look like a stall, and short enough that the recovery still feels immediate.
+         */
+        const val FREEZE_POLL_MS = 2_000L
+
+        /** Below this many access units in a window the stream itself is quiet, not the sink. */
+        const val MIN_SAMPLE_UNITS = 20
+
+        /** Consecutive starved windows before an IDR is requested (≈ 4 s of low frame rate). */
+        const val STARVED_SAMPLES = 2
+
+        /** First interval before the next request; doubles up to [MAX_REQUEST_INTERVAL_MS]. */
+        const val MIN_FREEZE_MS = 3_000L
+
+        /**
+         * The stream itself went quiet — no access unit fed for this long. An IDR request
+         * cannot help when nothing is arriving, and the request would only be repeated.
+         */
+        const val STREAM_IDLE_MS = 2_000L
+
+        /** Cap for the back-off between repeated IDR requests while the stall persists. */
+        const val MAX_REQUEST_INTERVAL_MS = 30_000L
+
+        /**
+         * How long the picture may stay starved before the decoder is rebuilt.
+         *
+         * Measured: once this decoder enters the "accepts input, returns nothing" state, an IDR
+         * does not revive it (8 requests, all 200 OK, extra keyframes arrived within ~100 ms,
+         * frame rate stayed at 1-4 fps). A fresh MediaCodec instance is the only remaining
+         * recovery. Six seconds avoids rebuilding on a brief jitter spike.
+         */
+        const val RECOVER_AFTER_MS = 6_000L
+
+        /** Minimum gap between two rebuilds, so a genuinely unrecoverable stream is not thrashed. */
+        const val RECOVERY_COOLDOWN_MS = 30_000L
+    }
+
     fun start() {
         if (isRunning) {
             Logger.w("RTP Receiver already running")
@@ -75,6 +122,7 @@ class RtpReceiver(
         }
 
         scope.launch { runDecoder() }
+        scope.launch { watchFreeze() }
 
         scope.launch {
             try {
@@ -174,6 +222,120 @@ class RtpReceiver(
      */
     private fun signalDiscontinuity() {
         audioPlayer.onDiscontinuity()
+    }
+
+    /**
+     * Watches the shown/fed frame ratio and recovers a decoder that stopped returning frames.
+     *
+     * WHY: the failure is not a dead stream — 30 access units/s keep arriving, the demuxer keeps
+     * emitting them and the codec keeps *accepting* them — but only 1-4 frames/s come back out.
+     * Every other counter looks healthy (`dropInput=0`, `inWait≈0.1 ms`, `renderBlock≈0.2 ms`),
+     * so the shown/fed ratio is the only reliable signal.
+     *
+     * Recovery is two-stage:
+     *  1. [STARVED_SAMPLES] consecutive starved windows → ask the Source for an IDR, rate-limited
+     *     with exponential backoff. Correct for a reference chain broken by packet loss, but
+     *     **measured ineffective** for the wedged-decoder state: 8/8 requests returned 200 OK,
+     *     extra IDRs arrived within ~100 ms, and the frame rate stayed at 1-4 fps.
+     *  2. A stall lasting [RECOVER_AFTER_MS] → rebuild MediaCodec via
+     *     [MiracastVideoRenderer.requestDecoderReset], cooled down by [RECOVERY_COOLDOWN_MS].
+     */
+    private suspend fun watchFreeze() {
+        var intervalMs = MIN_FREEZE_MS
+        var lastRequestAt = 0L
+        var lastRecoveryAt = 0L
+        var starvedMs = 0L
+        var prevFed = 0L
+        var prevShown = 0L
+        var starvedSamples = 0
+
+        while (scope.isActive) {
+            delay(FREEZE_POLL_MS)
+            val now = SystemClock.elapsedRealtime()
+
+            // No picture yet (very start of a session): nothing to rescue.
+            if (renderer.lastFrameRenderedAt == 0L) {
+                prevFed = renderer.fedFrames
+                prevShown = renderer.shownFrames
+                continue
+            }
+
+            val fed = renderer.fedFrames
+            val shown = renderer.shownFrames
+            val fedDelta = fed - prevFed
+            val shownDelta = shown - prevShown
+            prevFed = fed
+            prevShown = shown
+
+            // Negative deltas mean a new session replaced the counters; re-baseline.
+            if (fedDelta < 0 || shownDelta < 0) {
+                starvedSamples = 0
+                starvedMs = 0
+                continue
+            }
+
+            // Nothing is arriving: the failure is upstream, neither an IDR nor a rebuild helps.
+            val fedAt = renderer.lastAccessUnitAt
+            if (fedDelta < MIN_SAMPLE_UNITS || fedAt == 0L || now - fedAt > STREAM_IDLE_MS) {
+                starvedSamples = 0
+                // A rebuild that never produced its first picture would otherwise disable the
+                // watchdog forever (fedFrames stops growing while awaitingKeyframe is true).
+                if (renderer.lastFrameRenderedAt != 0L &&
+                    now - renderer.lastFrameRenderedAt > RECOVERY_COOLDOWN_MS &&
+                    now - lastRecoveryAt >= RECOVERY_COOLDOWN_MS
+                ) {
+                    lastRecoveryAt = now
+                    renderer.requestDecoderReset()
+                    onIdrRequest?.invoke()
+                    Logger.w("Miracast: no frame for >${RECOVERY_COOLDOWN_MS}ms — rebuilding MediaCodec")
+                } else {
+                    starvedMs = 0
+                }
+                continue
+            }
+
+            if (shownDelta * 2 < fedDelta) {
+                starvedSamples++
+                starvedMs += FREEZE_POLL_MS
+            } else {
+                starvedSamples = 0                      // the picture is keeping up again
+                starvedMs = 0
+                intervalMs = MIN_FREEZE_MS
+            }
+
+            if (starvedSamples < STARVED_SAMPLES) continue
+
+            // Stage 2: the decoder itself is wedged. Rebuild it on the decode thread and ask
+            // for an IDR so the fresh codec starts on a keyframe (the source also sends ~1/s).
+            if (starvedMs >= RECOVER_AFTER_MS &&
+                now - lastRecoveryAt >= RECOVERY_COOLDOWN_MS
+            ) {
+                val stalledFor = starvedMs
+                lastRecoveryAt = now
+                starvedMs = 0
+                starvedSamples = 0
+                intervalMs = MIN_FREEZE_MS
+                renderer.requestDecoderReset()
+                onIdrRequest?.invoke()
+                Logger.w(
+                    "Miracast: decoder starved for ${stalledFor}ms — rebuilding MediaCodec " +
+                        "and requesting an IDR"
+                )
+                continue
+            }
+
+            // Stage 1: lightweight first response, rate-limited with exponential backoff.
+            if (lastRequestAt != 0L && now - lastRequestAt < intervalMs) continue
+            if (onIdrRequest?.invoke() != true) continue   // session not ready, retry next tick
+
+            lastRequestAt = now
+            intervalMs = minOf(intervalMs * 2, MAX_REQUEST_INTERVAL_MS)
+            Logger.w(
+                "Miracast: picture stalled — ${shownDelta}/${fedDelta} frames shown in the " +
+                    "last ${FREEZE_POLL_MS / 1000}s, asked the source for an IDR " +
+                    "(next request allowed in ${intervalMs}ms)"
+            )
+        }
     }
 
     /** Decode thread: take TS payloads from the queue and demux them. */

@@ -159,6 +159,10 @@ class WfdServer(
         }
         sessionHandler = handler
 
+        // Recovery path for a picture frozen by packet loss: the receiver detects the freeze
+        // and asks the Source for a fresh IDR over this same RTSP session.
+        receiver.onIdrRequest = { handler.requestIdr() }
+
         try {
             handler.handleSession()          // blocks until the session ends
         } finally {

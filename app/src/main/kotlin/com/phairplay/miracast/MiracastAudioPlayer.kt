@@ -10,6 +10,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import com.phairplay.util.Logger
+import com.phairplay.util.MirrorProbe
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
@@ -61,6 +62,7 @@ class MiracastAudioPlayer {
     private var trackHeadBase = 0L
     private var lastFlushMs = 0L
     private var lastStatsMs = 0L
+    private var lastProbeMs = 0L
 
     companion object {
         /** One AAC frame is 1024 samples (~21ms at 48kHz); Windows packs one or two per PES. */
@@ -115,6 +117,7 @@ class MiracastAudioPlayer {
     /** [TsDemuxer] callback on the demux thread: enqueue only. */
     fun onAudioPes(codecType: TsDemuxer.AudioCodec, data: ByteArray) {
         if (released) return
+        MirrorProbe.onAudioPes()
         if (!running) start()
         val item = codecType to data
         if (!queue.offer(item)) {
@@ -148,11 +151,17 @@ class MiracastAudioPlayer {
         Logger.i("Miracast audio: playback thread started")
         try {
             while (running) {
-                val (type, data) = try {
+                val item = try {
                     queue.poll(200, TimeUnit.MILLISECONDS)
                 } catch (e: InterruptedException) {
                     null
-                } ?: continue
+                }
+                if (item == null) {
+                    // Queue drained: still report track lag so a starved pipe is visible.
+                    probeAudioState(0L, pendingMs())
+                    continue
+                }
+                val (type, data) = item
 
                 // Video renders on arrival, so audio still unheard means the sound trails the
                 // picture. Two different lags need two different fixes: undecoded PES are
@@ -178,6 +187,7 @@ class MiracastAudioPlayer {
                     flushTrack(pendingMs)
                 }
                 logStats(queueMs, pendingMs)
+                probeAudioState(queueMs, pendingMs)
 
                 try {
                     when (type) {
@@ -351,6 +361,7 @@ class MiracastAudioPlayer {
         val track = audioTrack ?: return
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastFlushMs < FLUSH_MIN_INTERVAL_MS) return
+        MirrorProbe.onAudioFlush()
         val capacity = track.bufferSizeInFrames
         runCatching {
             track.pause()
@@ -433,12 +444,26 @@ class MiracastAudioPlayer {
             Logger.i("Miracast audio: first PCM (${length}B) → AudioTrack")
         }
         if (trackChannels > 0) framesWritten += length / (2 * trackChannels)
+        // Debug probe: WRITE_BLOCKING stalls when the track is full — a stall here is sound
+        // that has nowhere to go, and it is measured in the same 1 Hz report as the video.
+        val writeStartNanos = System.nanoTime()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             track.write(pcm, 0, length, AudioTrack.WRITE_BLOCKING)
         } else {
             @Suppress("DEPRECATION")
             track.write(pcm, 0, length)
         }
+        MirrorProbe.onAudioWrite(System.nanoTime() - writeStartNanos)
+        MirrorProbe.onAudioFrames(trackSampleRate, trackChannels)
+    }
+
+    /** Feeds the 1 Hz mirror probe, at most once per second. */
+    private fun probeAudioState(queueMs: Long, pendingMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastProbeMs < 1000) return
+        lastProbeMs = now
+        val underruns = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+        MirrorProbe.onAudioState(queueMs, pendingMs, underruns)
     }
 
     private fun releaseCodec() {

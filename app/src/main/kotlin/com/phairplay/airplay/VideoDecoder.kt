@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.view.Surface
 import com.phairplay.util.Logger
+import com.phairplay.util.MirrorProbe
 
 /**
  * VideoDecoder — Hardware H.264 video decoder using Android's MediaCodec API.
@@ -55,6 +56,17 @@ class VideoDecoder(private val outputSurface: Surface) {
     @Volatile
     var isHealthy = true
         private set
+
+    /**
+     * Optional hook fired once per frame handed to the Surface.
+     *
+     * Miracast uses it to detect a frozen picture (`now - lastRender`): after a lost GOP the
+     * stream keeps delivering units and the codec keeps accepting them, so nothing else in
+     * the pipeline can tell "decoding fine" from "nobody is looking at a moving picture".
+     * AirPlay leaves it null and is unaffected.
+     */
+    @Volatile
+    var onFrameRendered: (() -> Unit)? = null
 
     /**
      * Initializes the MediaCodec decoder with the video stream parameters from the SDP.
@@ -153,6 +165,9 @@ class VideoDecoder(private val outputSurface: Surface) {
      * @param presentationTimeUs Presentation timestamp in microseconds (for A/V sync).
      */
     fun decodeNalUnit(nalUnit: ByteArray, presentationTimeUs: Long) {
+        // Debug-only timing: how long the codec lock is held for one access unit tells us
+        // whether the pipeline is back-pressured (see MirrorProbe for the full rationale).
+        val probeStartNanos = System.nanoTime()
         synchronized(codecLock) {
             val codec = mediaCodec ?: run {
                 Logger.w("decodeNalUnit() called but decoder not initialized")
@@ -167,7 +182,13 @@ class VideoDecoder(private val outputSurface: Surface) {
 
                 // Wait for an input buffer. Longer than before: on a modest SoC the decoder can
                 // briefly fall behind, and waiting beats dropping (which corrupts the stream).
+                //
+                // Probe note: the wait itself is a back-pressure signal. `dropInput=0` only says
+                // we never hit the 100ms ceiling; a steady 20-80ms wait means the codec is
+                // throttling us because its output stage is stuck, which is invisible otherwise.
+                val inputWaitStart = System.nanoTime()
                 val inputBufferIndex = codec.dequeueInputBuffer(INPUT_BUFFER_TIMEOUT_US)
+                MirrorProbe.onInputWait(System.nanoTime() - inputWaitStart, inputBufferIndex >= 0)
 
                 if (inputBufferIndex >= 0) {
                     // We got an input buffer — fill it with the NAL unit bytes
@@ -184,9 +205,13 @@ class VideoDecoder(private val outputSurface: Surface) {
                         presentationTimeUs,
                         0                  // flags: 0 = normal frame (not end-of-stream)
                     )
+                    // Start the residence clock for this frame; it stops when the frame comes
+                    // back out of the codec and is handed to the Surface.
+                    MirrorProbe.onFrameQueued(presentationTimeUs)
                 } else {
                     // No input buffer available — the decoder is catching up.
                     // Drop this NAL unit to avoid building up backlog (prefer low latency).
+                    // MirrorProbe.onInputWait already counted the timeout.
                     Logger.v("VideoDecoder: no input buffer available, dropping NAL unit")
                 }
 
@@ -198,9 +223,11 @@ class VideoDecoder(private val outputSurface: Surface) {
                 // MediaCodec is now in the error state and cannot recover — flag for recreation.
                 Logger.e("VideoDecoder entered error state — will recreate", e)
                 isHealthy = false
+                MirrorProbe.onDecoderError()
             } catch (e: Exception) {
                 Logger.e("Error decoding NAL unit", e)
             }
+            MirrorProbe.onDecodeCall(System.nanoTime() - probeStartNanos)
         }
     }
 
@@ -229,7 +256,14 @@ class VideoDecoder(private val outputSurface: Surface) {
                 // this Surface's BufferQueue holds only ~3 frames, so any hold quickly back-pressures the
                 // decoder → the upstream frame queue saturates → big latency + dropped (corrupt) frames.
                 // A/V alignment is handled by keeping the AUDIO path low-latency instead (AudioStreamServer).
+                //
+                // Debug probe: this call blocks while the BufferQueue is full, so its duration is the
+                // direct measure of "the picture stopped accepting frames" (a visual stutter).
+                val renderStartNanos = System.nanoTime()
                 codec.releaseOutputBuffer(outputBufferIndex, true)
+                MirrorProbe.onRenderBlock(System.nanoTime() - renderStartNanos)
+                MirrorProbe.onFrameRendered(bufferInfo.presentationTimeUs)
+                onFrameRendered?.invoke()
             }
             outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
         }

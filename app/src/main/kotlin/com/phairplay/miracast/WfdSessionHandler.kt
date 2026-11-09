@@ -113,6 +113,55 @@ class WfdSessionHandler(
         output.flush()
     }
 
+    /**
+     * Next outbound CSeq.
+     *
+     * WFD replies are matched to requests by CSeq, so two threads sending at once must never
+     * reuse a number. The read loop and [requestIdr] are separate threads; `++outCseq` inline
+     * in a string template would be outside [send]'s monitor and could hand out a duplicate.
+     */
+    @Synchronized
+    private fun nextCseq(): Int = ++outCseq
+
+    /**
+     * Asks the Source for a fresh IDR without tearing the session down (WFD 1.0 IDR request).
+     *
+     * WHY this exists: a burst of packet loss breaks the H.264 reference chain, and a fresh
+     * keyframe is the cheapest way to re-anchor it. The caller fires it after a sustained
+     * frame-rate collapse and rate-limits repeats; it is deliberately *not* sent per lost
+     * packet (that made the encoder spend its bit budget on keyframes and blurred the desktop).
+     *
+     * Verified against Windows 10/11 Miracast: the request is answered `200 OK` and an extra
+     * IDR arrives within ~100 ms. Note that an IDR does **not** revive a decoder that has
+     * entered the "accepts input, returns nothing" state — that needs a MediaCodec rebuild.
+     *
+     * @return false when the session is not ready (no session id yet, socket closed)
+     */
+    @Synchronized
+    fun requestIdr(): Boolean {
+        if (sessionId.isEmpty() || socket.isClosed) return false
+        val body = "wfd_idr_request\r\n"
+        val bytes = body.toByteArray(StandardCharsets.UTF_8)
+        val url = presentationUrl.ifEmpty {
+            "rtsp://${socket.inetAddress.hostAddress}/wfd1.0"
+        }
+        return try {
+            send(
+                "SET_PARAMETER $url RTSP/1.0\r\n" +
+                    "CSeq: ${nextCseq()}\r\n" +
+                    "Session: $sessionId\r\n" +
+                    "Content-Type: text/parameters\r\n" +
+                    "Content-Length: ${bytes.size}\r\n\r\n" +
+                    body
+            )
+            Logger.i("WFD: IDR requested (stall recovery)")
+            true
+        } catch (e: Exception) {
+            Logger.e("WFD: failed to send IDR request", e)
+            false
+        }
+    }
+
     private fun handleRequest(msg: String) {
         val method = msg.substringBefore(' ')
         val cseq = header(msg, "CSeq") ?: "0"
@@ -207,7 +256,7 @@ class WfdSessionHandler(
 
     private fun sendOptions() = send(
         "OPTIONS * RTSP/1.0\r\n" +
-            "CSeq: ${++outCseq}\r\n" +
+            "CSeq: ${nextCseq()}\r\n" +
             "Require: org.wfa.wfd1.0\r\n\r\n"
     )
 
@@ -217,7 +266,7 @@ class WfdSessionHandler(
         }
         send(
             "SETUP $presentationUrl RTSP/1.0\r\n" +
-                "CSeq: ${++outCseq}\r\n" +
+                "CSeq: ${nextCseq()}\r\n" +
                 "Transport: RTP/AVP/UDP;unicast;client_port=$rtpPort\r\n\r\n"
         )
     }
@@ -226,7 +275,7 @@ class WfdSessionHandler(
         playRequested = true
         send(
             "PLAY $presentationUrl RTSP/1.0\r\n" +
-                "CSeq: ${++outCseq}\r\n" +
+                "CSeq: ${nextCseq()}\r\n" +
                 "Session: $sessionId\r\n\r\n"
         )
     }
@@ -287,7 +336,7 @@ class WfdSessionHandler(
     fun disconnectSender() {
         try {
             if (sessionId.isNotEmpty()) send(
-                "TEARDOWN $presentationUrl RTSP/1.0\r\nCSeq: ${++outCseq}\r\nSession: $sessionId\r\n\r\n"
+                "TEARDOWN $presentationUrl RTSP/1.0\r\nCSeq: ${nextCseq()}\r\nSession: $sessionId\r\n\r\n"
             )
         } finally {
             close()
