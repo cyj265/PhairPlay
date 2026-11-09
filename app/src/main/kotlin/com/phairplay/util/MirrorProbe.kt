@@ -1,5 +1,6 @@
 package com.phairplay.util
 
+import android.annotation.SuppressLint
 import android.os.SystemClock
 import android.util.Log
 import com.phairplay.BuildConfig
@@ -36,6 +37,10 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * A one-second reporter thread prints the deltas. Every hook is a no-op unless [enabled].
  */
+// The shell-side captures grep for the fixed TAG "MirrorProbe"; Timber's auto-tag
+// would fold every line into the shared "Logger" tag. This reporter is DEBUG-only
+// and release builds plant no Timber tree anyway (same reasoning as Ipv4OnlyDns).
+@SuppressLint("LogNotTimber")
 object MirrorProbe {
 
     private const val TAG = "MirrorProbe"
