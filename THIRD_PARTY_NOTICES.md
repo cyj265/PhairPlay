@@ -56,8 +56,8 @@ SOFTWARE.
 The following projects were read to understand protocol behavior. No source
 code was copied from them.
 
-- [CastHub](https://github.com/CastHub) — MIT
-- [yukarinoki/openchromecast](https://github.com/yukarinoki/openchromecast) — MIT
+- CastHub / yukarinoki/openchromecast — MIT (early behavior references; the
+  original repositories are no longer reachable)
 - [emilsvennesson/vibecast](https://github.com/emilsvennesson/vibecast) — MIT
 - [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — protocol documentation
 - [UxPlay](https://github.com/FDH2/UxPlay) — GPL-3.0; behavior reference only

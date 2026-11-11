@@ -220,7 +220,7 @@ app/src/main/kotlin/com/phairplay/
 完整许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
 
 - [weekdayjast/MiracastReceiver](https://github.com/weekdayjast/MiracastReceiver) — Cast V2 接收端与 Miracast WFD Sink 的移植基线
-- [CastHub](https://github.com/CastHub) / [openchromecast](https://github.com/yukarinoki/openchromecast) / [vibecast](https://github.com/emilsvennesson/vibecast) — Cast V2 行为参考
+- [vibecast](https://github.com/emilsvennesson/vibecast) — Cast V2 行为参考（早期另参考过 CastHub、openchromecast，两者原仓库现已不可访问）
 - [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — AirPlay 协议文档
 - [UxPlay](https://github.com/FDH2/UxPlay) / [RPiPlay](https://github.com/FD-/RPiPlay) — AirPlay 镜像参考实现
 
