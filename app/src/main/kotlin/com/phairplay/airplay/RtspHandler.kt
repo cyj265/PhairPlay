@@ -81,7 +81,10 @@ open class RtspHandler(
      * Wired by AirPlayReceiver to the running AudioStreamServer's last-packet timestamp. Default
      * false keeps the old behaviour for callers/tests that don't provide a media pipeline.
      */
-    private val isAudioOnlyFlowing: () -> Boolean = { false }
+    private val isAudioOnlyFlowing: () -> Boolean = { false },
+    /** Grace-guard cadence and silence window. Defaults are the shipped values; tests shrink them. */
+    private val audioOnlyGraceTickMs: Long = AUDIO_ONLY_GRACE_TICK_MS,
+    private val audioOnlyGraceSilenceMs: Long = AUDIO_ONLY_GRACE_SILENCE_MS
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -99,8 +102,9 @@ open class RtspHandler(
     @Volatile
     private var activeClient: Socket? = null
 
+    /** True while the RTSP server is accepting. `internal` so unit tests can stand it up without a socket. */
     @Volatile
-    private var running = false
+    internal var running = false
 
     private var currentCSeq: Int = 0
 
@@ -283,33 +287,45 @@ open class RtspHandler(
         } finally {
             Logger.i("Client disconnected")
             socket.close()
-            // Decide BEFORE clearing the per-connection state. AirPlay 2 "audio only" (iPhone
-            // control centre → pick speaker, without screen mirroring) negotiates just one
-            // type-96 ALAC stream and has no screen flag. Its control socket is closed by the
-            // sender while RTP keeps flowing; keep the media pipeline alive in that case.
-            val audioOnlyKeepAlive = audioEnabled && running &&
-                !isScreenMirroringSession &&
-                activeStreamTypes.isNotEmpty() && activeStreamTypes.all { it == 96 }
             activeClient = null
-            currentSession = null
-            pairingSession = null
-            fairPlay = null
-            isMirrorSession = false
-            activeStreamTypes.clear()
-            setupCount = 0
-            when {
-                audioOnlyGraceActive -> {
-                    // A later /info probe connection also closed; the guard already owns teardown.
-                    Logger.d("Audio-only: grace guard already active (side connection closed)")
-                }
-                audioOnlyKeepAlive -> {
-                    Logger.i("Audio-only: sender declared audio-only (audioEnabled=$audioEnabled) — arming grace guard")
-                    startAudioOnlyGrace()
-                }
-                else -> onStreamingStopped()
-            }
-            isScreenMirroringSession = false
+            handleControlConnectionClosed()
         }
+    }
+
+    /**
+     * Bookkeeping for a closed control connection: reset the per-connection state and decide
+     * whether the media pipeline survives the EOF.
+     *
+     * WHY THIS IS ITS OWN METHOD: the decision (and the audio-only grace guard it can arm) is the
+     * whole point of the fix for AirPlay 2 audio-only sessions, and it has to be unit-testable
+     * without a real socket. `internal` so the test source set can drive it.
+     */
+    internal fun handleControlConnectionClosed() {
+        // Decide BEFORE clearing the per-connection state. AirPlay 2 "audio only" (iPhone control
+        // centre → pick speaker, without screen mirroring) negotiates just one type-96 ALAC stream
+        // and has no screen flag. Its control socket is closed by the sender while RTP keeps
+        // flowing; keep the media pipeline alive in that case.
+        val audioOnlyKeepAlive = audioEnabled && running &&
+            !isScreenMirroringSession &&
+            activeStreamTypes.isNotEmpty() && activeStreamTypes.all { it == 96 }
+        currentSession = null
+        pairingSession = null
+        fairPlay = null
+        isMirrorSession = false
+        activeStreamTypes.clear()
+        setupCount = 0
+        when {
+            audioOnlyGraceActive -> {
+                // A later /info probe connection also closed; the guard already owns teardown.
+                Logger.d("Audio-only: grace guard already active (side connection closed)")
+            }
+            audioOnlyKeepAlive -> {
+                Logger.i("Audio-only: sender declared audio-only (audioEnabled=$audioEnabled) — arming grace guard")
+                startAudioOnlyGrace()
+            }
+            else -> onStreamingStopped()
+        }
+        isScreenMirroringSession = false
     }
 
     /** Normalises the boolean representations dd-plist / XML plist can produce. */
@@ -340,9 +356,9 @@ open class RtspHandler(
                     var ticks = 0
                     var lastFlowing: Boolean? = null
                     while (running && audioOnlyGraceActive) {
-                        Thread.sleep(AUDIO_ONLY_GRACE_TICK_MS)
+                        Thread.sleep(audioOnlyGraceTickMs)
                         val flowing = isAudioOnlyFlowing()
-                        silentMs = if (flowing) 0L else silentMs + AUDIO_ONLY_GRACE_TICK_MS
+                        silentMs = if (flowing) 0L else silentMs + audioOnlyGraceTickMs
                         ticks++
                         // Log state changes plus a sparse heartbeat (every 10th tick) so a support
                         // log shows whether the sender kept sending RTP, without spam.
@@ -350,7 +366,7 @@ open class RtspHandler(
                             Logger.d("Audio-only: grace tick flowing=$flowing silentMs=$silentMs ticks=$ticks")
                         }
                         lastFlowing = flowing
-                        if (silentMs >= AUDIO_ONLY_GRACE_SILENCE_MS) {
+                        if (silentMs >= audioOnlyGraceSilenceMs) {
                             Logger.i("Audio-only: no RTP for ${silentMs}ms — ending session")
                             stopAudioOnlyGrace(release = true)
                         }
@@ -358,7 +374,7 @@ open class RtspHandler(
                 } catch (_: InterruptedException) { /* normal shutdown */ }
             }, "airplay-audio-only-grace").apply { isDaemon = true; start() }
         }
-        Logger.i("Audio-only: control connection closed — keeping UDP audio alive (grace ${AUDIO_ONLY_GRACE_SILENCE_MS}ms)")
+        Logger.i("Audio-only: control connection closed — keeping UDP audio alive (grace ${audioOnlyGraceSilenceMs}ms)")
     }
 
     /** Cancels the grace guard; [release] = true performs the deferred full teardown. */
@@ -733,7 +749,7 @@ open class RtspHandler(
      *    (with the pairing secret) to the receiver, reply with event/timing ports.
      *  - msg 2 carries `streams`[type 110] → start the mirror data server, reply with its port.
      */
-    private fun handleMirrorSetup(request: RtspRequest): RtspResponse = try {
+    internal fun handleMirrorSetup(request: RtspRequest): RtspResponse = try {
         val req = PlistCodec.decode(request.bodyBytes)
         Logger.i("mirror SETUP plist: " + req.entries.joinToString { (k, v) ->
             "$k=" + when (v) {
