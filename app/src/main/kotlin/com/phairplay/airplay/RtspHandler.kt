@@ -75,7 +75,13 @@ open class RtspHandler(
     /** Persistent store of paired controllers' Ed25519 keys (for pair-verify). */
     private val pairingStore: com.phairplay.airplay.handshake.PairingStore? = null,
     /** Shows ([pin]) or hides (null) the on-screen pairing PIN during SRP pair-setup. */
-    private val onShowPin: (pin: String?) -> Unit = {}
+    private val onShowPin: (pin: String?) -> Unit = {},
+    /**
+     * Audio-only grace guard: returns true while RTP audio is still arriving on the UDP data port.
+     * Wired by AirPlayReceiver to the running AudioStreamServer's last-packet timestamp. Default
+     * false keeps the old behaviour for callers/tests that don't provide a media pipeline.
+     */
+    private val isAudioOnlyFlowing: () -> Boolean = { false }
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -117,6 +123,22 @@ open class RtspHandler(
     @Volatile
     private var isMirrorSession = false
 
+    /**
+     * True when the sender declared a screen-mirroring session (`isScreenMirroringSession` in the
+     * first SETUP, or `usingScreen` in a type-96 stream). AirPlay 2 audio-only output omits both.
+     * Sticky within a connection: the second SETUP (msg 2 / streams) does not repeat the flag.
+     */
+    @Volatile private var isScreenMirroringSession = false
+
+    // ─── AirPlay 2 audio-only control-connection grace ────────────────────────
+    // iOS closes the RTSP control socket ~2 s after an audio-only SETUP while it keeps sending RTP
+    // to the UDP data port. The `finally` below used to treat that EOF as session end and stopped
+    // the audio server, so playback died after a short burst. The guard keeps the pipeline alive
+    // until the RTP stream really goes quiet (or a TEARDOWN / new mirror session takes over).
+    @Volatile private var audioOnlyGraceActive = false
+    private val audioOnlyGraceLock = Any()
+    private var audioOnlyGraceThread: Thread? = null
+
     /** Mirror stream types currently active (96 = audio, 110 = video). Drives TEARDOWN routing.
      *  `protected` so tests can seed it without driving the full FairPlay SETUP handshake. */
     protected val activeStreamTypes = mutableSetOf<Int>()
@@ -147,6 +169,7 @@ open class RtspHandler(
     /** Stops the RTSP server. */
     fun stop() {
         running = false
+        stopAudioOnlyGrace(release = false)
         try {
             activeClient?.close()
             serverSocket?.close()
@@ -260,6 +283,13 @@ open class RtspHandler(
         } finally {
             Logger.i("Client disconnected")
             socket.close()
+            // Decide BEFORE clearing the per-connection state. AirPlay 2 "audio only" (iPhone
+            // control centre → pick speaker, without screen mirroring) negotiates just one
+            // type-96 ALAC stream and has no screen flag. Its control socket is closed by the
+            // sender while RTP keeps flowing; keep the media pipeline alive in that case.
+            val audioOnlyKeepAlive = audioEnabled && running &&
+                !isScreenMirroringSession &&
+                activeStreamTypes.isNotEmpty() && activeStreamTypes.all { it == 96 }
             activeClient = null
             currentSession = null
             pairingSession = null
@@ -267,7 +297,82 @@ open class RtspHandler(
             isMirrorSession = false
             activeStreamTypes.clear()
             setupCount = 0
-            onStreamingStopped()
+            when {
+                audioOnlyGraceActive -> {
+                    // A later /info probe connection also closed; the guard already owns teardown.
+                    Logger.d("Audio-only: grace guard already active (side connection closed)")
+                }
+                audioOnlyKeepAlive -> {
+                    Logger.i("Audio-only: sender declared audio-only (audioEnabled=$audioEnabled) — arming grace guard")
+                    startAudioOnlyGrace()
+                }
+                else -> onStreamingStopped()
+            }
+            isScreenMirroringSession = false
+        }
+    }
+
+    /** Normalises the boolean representations dd-plist / XML plist can produce. */
+    private fun plistBool(value: Any?): Boolean = when (value) {
+        is Boolean -> value
+        is Number -> value.toInt() != 0
+        is String -> value.equals("true", ignoreCase = true) || value == "1"
+        else -> false
+    }
+
+    /**
+     * AirPlay 2 audio-only: the sender closes the RTSP control connection shortly after SETUP but
+     * keeps playing, with RTP still arriving on the UDP data port. Tearing the session down at that
+     * EOF stops the audio server mid-song (and clears the stream keys) — the "sound for a second,
+     * then silence while the phone still shows playing" symptom. Hand ownership to a grace guard:
+     * it ends the session only once the RTP stream has actually gone quiet.
+     *
+     * Screen mirroring is untouched: it declares `isScreenMirroringSession` / `usingScreen`, so it
+     * never reaches this path. A session TEARDOWN, a new mirror session, or stop() cancels the guard.
+     */
+    private fun startAudioOnlyGrace() {
+        synchronized(audioOnlyGraceLock) {
+            if (audioOnlyGraceActive) return
+            audioOnlyGraceActive = true
+            audioOnlyGraceThread = Thread({
+                try {
+                    var silentMs = 0L
+                    var ticks = 0
+                    var lastFlowing: Boolean? = null
+                    while (running && audioOnlyGraceActive) {
+                        Thread.sleep(AUDIO_ONLY_GRACE_TICK_MS)
+                        val flowing = isAudioOnlyFlowing()
+                        silentMs = if (flowing) 0L else silentMs + AUDIO_ONLY_GRACE_TICK_MS
+                        ticks++
+                        // Log state changes plus a sparse heartbeat (every 10th tick) so a support
+                        // log shows whether the sender kept sending RTP, without spam.
+                        if (flowing != lastFlowing || ticks % 10 == 0) {
+                            Logger.d("Audio-only: grace tick flowing=$flowing silentMs=$silentMs ticks=$ticks")
+                        }
+                        lastFlowing = flowing
+                        if (silentMs >= AUDIO_ONLY_GRACE_SILENCE_MS) {
+                            Logger.i("Audio-only: no RTP for ${silentMs}ms — ending session")
+                            stopAudioOnlyGrace(release = true)
+                        }
+                    }
+                } catch (_: InterruptedException) { /* normal shutdown */ }
+            }, "airplay-audio-only-grace").apply { isDaemon = true; start() }
+        }
+        Logger.i("Audio-only: control connection closed — keeping UDP audio alive (grace ${AUDIO_ONLY_GRACE_SILENCE_MS}ms)")
+    }
+
+    /** Cancels the grace guard; [release] = true performs the deferred full teardown. */
+    private fun stopAudioOnlyGrace(release: Boolean) {
+        val wasActive = synchronized(audioOnlyGraceLock) {
+            val was = audioOnlyGraceActive
+            audioOnlyGraceActive = false
+            audioOnlyGraceThread?.interrupt()
+            audioOnlyGraceThread = null
+            was
+        }
+        if (wasActive) {
+            Logger.d("Audio-only: grace guard cleared release=$release")
+            if (release) onStreamingStopped()
         }
     }
 
@@ -464,7 +569,13 @@ open class RtspHandler(
                 })
             }.onFailure { Logger.d("/feedback body ($n B, non-plist)") }
         }
-        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+        // Explicit zero length: an empty 200 without Content-Length makes some iOS builds wait on
+        // the reply and then drop the control connection. Keep the body empty (no plist payload).
+        return RtspResponse(
+            200, "OK",
+            headers = mapOf("Content-Length" to "0"),
+            protocol = request.responseProtocol()
+        )
     }
 
     /**
@@ -634,6 +745,17 @@ open class RtspHandler(
         val response = mutableMapOf<String, Any?>()
 
         isMirrorSession = true
+        // AirPlay 2 audio-only (control-centre audio output) omits BOTH the session-level
+        // isScreenMirroringSession flag and the stream-level usingScreen flag. Keep the flag sticky:
+        // the second SETUP (msg 2, streams only) does not repeat isScreenMirroringSession.
+        val setupStreams = req["streams"] as? List<*>
+        val usingScreen = setupStreams.orEmpty().any { s ->
+            (s as? Map<*, *>)?.let { plistBool(it["usingScreen"]) } == true
+        }
+        val declaredScreen = plistBool(req["isScreenMirroringSession"]) || usingScreen
+        if (declaredScreen) stopAudioOnlyGrace(release = false)
+        isScreenMirroringSession = isScreenMirroringSession || declaredScreen
+        Logger.d("AirPlay SETUP: declaredScreen=$declaredScreen sticky=$isScreenMirroringSession streams=${setupStreams?.size ?: 0}")
         val ekey = req["ekey"] as? ByteArray
         if (ekey != null) {
             val aesKey = fairPlay!!.decrypt(ekey)
@@ -838,6 +960,8 @@ open class RtspHandler(
             Logger.i("TEARDOWN (session, body=${request.bodyBytes.size}B) — streaming stopping")
         }
         activeStreamTypes.clear()
+        // A genuine sender-initiated TEARDOWN ends the audio-only grace without a second teardown.
+        stopAudioOnlyGrace(release = false)
         onStreamingStopped()
         return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
     }
@@ -997,6 +1121,12 @@ open class RtspHandler(
 
     companion object {
         private const val RTSP_PORT = 7000
+
+        /** Audio-only grace guard: check RTP activity every second. */
+        private const val AUDIO_ONLY_GRACE_TICK_MS = 1_000L
+
+        /** End an audio-only session only after this long with no RTP packets at all. */
+        private const val AUDIO_ONLY_GRACE_SILENCE_MS = 20_000L
 
         // SRP PIN access control. macOS's AirPlay code-entry field is exactly 4 digits, so the PIN
         // must be 4 digits to be enterable. A 4-digit space is low-entropy, so the load-bearing

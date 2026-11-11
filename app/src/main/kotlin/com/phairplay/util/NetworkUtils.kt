@@ -165,7 +165,11 @@ object NetworkUtils {
                 val name = ni.name.lowercase()
                 // Skip hotspot, cellular, tunnel and other non-LAN interfaces
                 // by NAME only (not by isVirtual()/isPointToPoint()).
-                if (name.contains("softap") || name.startsWith("ap")
+                // p2p* is Wi-Fi Direct: during a Miracast session it carries the receiver's own
+                // 192.168.49.x (or similar) address, which a LAN sender can never reach — it must
+                // not be announced over SSDP/mDNS.
+                if (name.startsWith("p2p")
+                    || name.contains("softap") || name.startsWith("ap")
                     || name.contains("rmnet") || name.contains("ccmni")
                     || name.contains("wwan") || name.contains("tun")
                     || name.contains("ppp") || name.contains("bluetooth")
