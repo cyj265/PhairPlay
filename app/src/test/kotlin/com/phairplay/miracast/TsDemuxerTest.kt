@@ -84,6 +84,38 @@ class TsDemuxerTest {
     }
 
     @Test
+    fun `duplicate TS packet is skipped without reporting loss`() {
+        val d = demuxer()
+        d.feed(pat(), 0, pat().size)
+        d.feed(pmt(0x1B), 0, pmt(0x1B).size)
+
+        val first = videoPes(cc = 0, pts90k = 0, payload = byteArrayOf(0, 0, 0, 1, 0x65))
+        d.feed(first, 0, first.size)
+        d.feed(first, 0, first.size)   // same CC 0: a retransmitted TS packet, not a gap
+        assertEquals("duplicate must not be mistaken for a loss", 0, videoLosses)
+
+        val next = videoPes(cc = 1, pts90k = 90_000, payload = byteArrayOf(0, 0, 0, 1, 0x41))
+        d.feed(next, 0, next.size)
+        assertEquals("the real unit must survive the duplicate", 1, videoUnits.size)
+        assertEquals(0, videoLosses)
+    }
+
+    @Test
+    fun `duplicate audio TS packet does not resync or emit twice`() {
+        val d = demuxer()
+        d.feed(pat(), 0, pat().size)
+        d.feed(pmt(0x0F), 0, pmt(0x0F).size)
+
+        val adts = byteArrayOf(0xFF.toByte(), 0xF1.toByte(), 0x50, 0x80.toByte(), 0x01, 0x7F, 0xFC.toByte(), 0x01)
+        val audio = audioPes(cc = 0, pts90k = 0, payload = adts)
+        d.feed(audio, 0, audio.size)
+        d.feed(audio, 0, audio.size)
+
+        assertEquals(1, audioUnits.size)
+        assertEquals(0, audioLosses)
+    }
+
+    @Test
     fun `garbage between packets is skipped by resync`() {
         val d = demuxer()
         val patBytes = pat()

@@ -87,16 +87,26 @@ class TsDemuxer(
             0 -> parsePat(data, payloadStart, payloadEnd, payloadUnitStart)
             pmtPid -> parsePmt(data, payloadStart, payloadEnd, payloadUnitStart)
             videoPid -> {
+                when (videoPes.checkContinuity(continuity)) {
+                    Continuity.DUPLICATE -> return
+                    Continuity.GAP -> onDiscontinuity()
+                    Continuity.OK -> Unit
+                }
                 // A frame that lost packets is corrupt and would smear across the GOP.
-                if (videoPes.checkContinuity(continuity)) onDiscontinuity()
                 videoPes.onPacket(data, payloadStart, payloadEnd, payloadUnitStart)
             }
             audioPid -> {
-                if (audioPes.checkContinuity(continuity)) onAudioDiscontinuity()
+                when (audioPes.checkContinuity(continuity)) {
+                    Continuity.DUPLICATE -> return
+                    Continuity.GAP -> onAudioDiscontinuity()
+                    Continuity.OK -> Unit
+                }
                 audioPes.onPacket(data, payloadStart, payloadEnd, payloadUnitStart)
             }
         }
     }
+
+    private enum class Continuity { OK, DUPLICATE, GAP }
 
     /** PAT: take the PMT PID of the first valid program. */
     private fun parsePat(data: ByteArray, start: Int, end: Int, payloadUnitStart: Boolean) {
@@ -186,16 +196,19 @@ class TsDemuxer(
 
         /**
          * Continuity counter increments per packet (mod 16); a jump means TS-level loss.
-         * @return true when loss was detected and the partial unit was discarded
+         * A repeated counter is a duplicate payload, not a gap: re-assembling it twice corrupts
+         * the PES, but reporting a discontinuity makes the sink wait for a keyframe and resync
+         * audio for no reason. Callers skip duplicate packets entirely.
          */
-        fun checkContinuity(continuity: Int): Boolean {
+        fun checkContinuity(continuity: Int): Continuity {
+            if (continuity == lastContinuity) return Continuity.DUPLICATE
             val gap = lastContinuity >= 0 && continuity != (lastContinuity + 1) % 16
             lastContinuity = continuity
-            if (!gap) return false
+            if (!gap) return Continuity.OK
             lossCount++
             Logger.w("TS: $name continuity gap, total $lossCount")
             discardPending()
-            return true
+            return Continuity.GAP
         }
 
         fun onPacket(data: ByteArray, start: Int, end: Int, payloadUnitStart: Boolean) {

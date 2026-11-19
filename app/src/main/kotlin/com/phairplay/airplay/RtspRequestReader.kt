@@ -73,14 +73,19 @@ internal class RtspRequestReader(
         headers: Map<String, String>
     ): ByteArray? {
         val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
-        val bodyLimit = if (method == "PUT" && uri.substringBefore("?") == PhotoHandler.PHOTO_PATH) {
-            maxPhotoBytes
-        } else {
-            maxMessageBytes
+        val path = uri.substringBefore('?')
+        // Some senders upload artwork with SET_PARAMETER + an image/* Content-Type instead of
+        // PUT /photo. Both carry the same JPEG/PNG payload, so both need the photo-sized budget;
+        // the generic 1 MB RTSP message cap would reject a legitimate image mid-stream.
+        val bodyLimit = when {
+            method == "PUT" && path == PhotoHandler.PHOTO_PATH -> maxPhotoBytes
+            method == "SET_PARAMETER" &&
+                headers["Content-Type"]?.startsWith("image/", ignoreCase = true) == true -> maxPhotoBytes
+            else -> maxMessageBytes
         }
 
         if (contentLength > bodyLimit) {
-            Logger.w("Request body too large ($contentLength bytes) — rejecting")
+            Logger.w("Request body too large for $method $path ($contentLength bytes, limit=$bodyLimit) — rejecting")
             return null
         }
         if (contentLength <= 0) return ByteArray(0)
