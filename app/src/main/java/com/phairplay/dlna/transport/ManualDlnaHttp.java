@@ -930,8 +930,13 @@ public final class ManualDlnaHttp {
                     // the echo below different from what was sent.
                     String m = meta;
                     metaXml = m;
-                    title = tag(m, "title");
-                    artist = tag(m, "artist");
+                    // NetEase Cloud Music writes Chinese metadata as numeric XML
+                    // character references (&#33853; ...) rather than UTF-8. The
+                    // SOAP unescape in tag() leaves those digits as text, so the
+                    // now-playing card showed them verbatim. Decode only the
+                    // display fields — never the URI or the echoed DIDL document.
+                    title = com.phairplay.dlna.DidlText.decodeCharRefs(tag(m, "title"));
+                    artist = com.phairplay.dlna.DidlText.decodeCharRefs(tag(m, "artist"));
                     artUri = tag(m, "albumArtURI");
                 }
                 // Kept verbatim for GetMediaInfo / GetPositionInfo: several
