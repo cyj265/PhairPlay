@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import androidx.core.content.ContextCompat
 import android.content.Context
 import android.graphics.Color
 import android.util.AttributeSet
@@ -59,6 +60,6 @@ class PinScreen @JvmOverloads constructor(
 
     fun setPin(pin: String) { pinView.text = pin }
 
-    private fun color(res: Int): Int = try { context.getColor(res) } catch (_: Exception) { Color.WHITE }
+    private fun color(res: Int): Int = try { ContextCompat.getColor(context, res) } catch (_: Exception) { Color.WHITE }
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }

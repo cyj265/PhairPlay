@@ -739,7 +739,7 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             max = 1000
             progressTintList = android.content.res.ColorStateList.valueOf(
-                getColor(com.phairplay.R.color.protocol_dlna)
+                ContextCompat.getColor(this@MainActivity, com.phairplay.R.color.protocol_dlna)
             )
             layoutParams = android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1370,7 +1370,7 @@ class MainActivity : AppCompatActivity() {
     private fun setNavSelected(item: TextView, selected: Boolean) {
         item.isSelected = selected
         item.setTextColor(
-            getColor(if (selected) R.color.text_primary else R.color.nav_item_normal)
+            ContextCompat.getColor(this, if (selected) R.color.text_primary else R.color.nav_item_normal)
         )
     }
 

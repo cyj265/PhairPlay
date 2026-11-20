@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import androidx.core.content.ContextCompat
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -128,7 +129,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
     }
 
-    private fun color(res: Int): Int = try { context.getColor(res) } catch (_: Exception) { Color.WHITE }
+    private fun color(res: Int): Int = try { ContextCompat.getColor(context, res) } catch (_: Exception) { Color.WHITE }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()

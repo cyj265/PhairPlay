@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import androidx.core.content.ContextCompat
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -230,7 +231,7 @@ class HomeFragment : Fragment() {
             is ServiceState.Error      -> Pair(R.string.service_state_error,      R.color.status_stopped)
         }
         textServiceState.setText(textRes)
-        dotServiceState.background.setTint(requireContext().getColor(colorRes))
+        dotServiceState.background.setTint(ContextCompat.getColor(requireContext(), colorRes))
     }
 
     /**
@@ -253,7 +254,7 @@ class HomeFragment : Fragment() {
 
         stateText.setText(stateRes)
         detail.setText(detailRes)
-        dot.background.setTint(requireContext().getColor(colorRes))
+        dot.background.setTint(ContextCompat.getColor(requireContext(), colorRes))
 
         // A DLNA startup failure carries a concrete message; keep showing it
         // instead of the generic error hint (the dlnaState emission may arrive

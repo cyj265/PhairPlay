@@ -1,5 +1,6 @@
 package com.phairplay.ui
 
+import androidx.core.content.ContextCompat
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
@@ -229,7 +230,7 @@ class DlnaOsdView(context: Context) : FrameLayout(context) {
 
     private fun colorRes(res: Int): Int =
         try {
-            context.getColor(res)
+            ContextCompat.getColor(context, res)
         } catch (_: Exception) {
             0xFFFF9500.toInt()
         }
