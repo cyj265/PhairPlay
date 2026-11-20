@@ -3585,6 +3585,20 @@ class DlnaReceiver(
      * the same URL: their ffmpeg default UA is exactly `Lavf/…`.
      */
     private fun applyRelayHeaders(uri: String) {
+        // A sender-local HLS proxy may point its segments at 127.0.0.1:PORT —
+        // loopback on the phone, but the box's own localhost here. Hand the
+        // DataSource the playlist's origin host so it can substitute it for
+        // loopback segment/key URLs on this item. Never do this when the item
+        // itself is loopback: there would be no reachable origin to use.
+        val originHost = try {
+            android.net.Uri.parse(uri).host
+        } catch (_: Exception) {
+            null
+        }
+        httpFactory.setLoopbackHost(
+            originHost?.takeUnless { isLoopbackHttpHost(it) }
+        )
+
         var ua: String? = null
         val map = LinkedHashMap<String, String>()
         try {

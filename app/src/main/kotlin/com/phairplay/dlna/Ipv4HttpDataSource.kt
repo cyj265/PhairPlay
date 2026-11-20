@@ -29,6 +29,56 @@ private const val LENGTH_UNKNOWN = -1L
 private const val SHORT_READ_LOG_WINDOW_MS = 5_000L
 
 /**
+ * True for a host that means "me" on the sender's device. Some DLNA apps serve
+ * an HLS playlist from their own LAN address but write `http://127.0.0.1:PORT`
+ * into the segment URLs. That is loopback on the sender, but on the receiver it
+ * points at the box itself, where nothing is listening.
+ */
+internal fun isLoopbackHttpHost(host: String?): Boolean {
+    if (host.isNullOrBlank()) return false
+    val h = host.lowercase()
+    return h == "localhost" || h == "ip6-localhost" || h == "::1" || h.startsWith("127.")
+}
+
+/**
+ * Replaces only the host of a loopback URL, keeping scheme, userinfo, port,
+ * path and — critically for HLS relay URLs — the raw query unchanged.
+ * Re-encoding the query through [URI] would turn `%2F` into `%252F`.
+ */
+internal fun redirectLoopbackUrl(url: String, originHost: String?): String {
+    if (originHost.isNullOrBlank()) return url
+    val parsed = try {
+        java.net.URI(url)
+    } catch (_: java.net.URISyntaxException) {
+        return url
+    }
+    val host = parsed.host ?: return url
+    if (!isLoopbackHttpHost(host)) return url
+
+    val schemeEnd = url.indexOf("://")
+    if (schemeEnd < 0) return url
+    val authorityStart = schemeEnd + 3
+    val authorityEnd = (authorityStart until url.length).firstOrNull {
+        url[it] == '/' || url[it] == '?' || url[it] == '#'
+    } ?: url.length
+    val authority = url.substring(authorityStart, authorityEnd)
+    // Both indices are RELATIVE to the authority: using 0 for "no userinfo"
+    // against the whole URL would swallow "http://" in the replacement.
+    val at = authority.lastIndexOf('@')
+    val hostStartInAuthority = if (at >= 0) at + 1 else 0
+    val colon = authority.lastIndexOf(':')
+    val hostEndInAuthority = if (colon > hostStartInAuthority) colon else authority.length
+    if (hostStartInAuthority >= hostEndInAuthority ||
+        authority.substring(hostStartInAuthority, hostEndInAuthority) != host
+    ) {
+        return url
+    }
+    val hostStart = authorityStart + hostStartInAuthority
+    val hostEnd = authorityStart + hostEndInAuthority
+    return url.substring(0, hostStart) + originHost + url.substring(hostEnd)
+}
+
+/**
  * v107–v110 — an HTTP data source that does not pay the IPv6 wait, and that
  * sends the correct `Host` header.
  *
@@ -67,6 +117,8 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     private var responseCodeInternal = 0
     private var responseHeadersInternal: Map<String, List<String>> = emptyMap()
     private var userAgent: String? = null
+    /** Non-loopback host of the current item, substituted for loopback segment URLs. */
+    @Volatile var loopbackHost: String? = null
     private var allowCrossProtocolRedirects = true
     private var connectTimeout = 10_000
     private var readTimeout = 20_000
@@ -89,16 +141,21 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
     override fun getUri(): Uri? = currentUri
 
     override fun open(dataSpec: DataSpec): Long {
-        transferInitializing(dataSpec)
-        currentUri = dataSpec.uri
-        currentSpec = dataSpec
+        // HLS segments are fetched by URL from the playlist, not relative to
+        // the item. If the sender wrote 127.0.0.1 into the playlist, redirect
+        // that host to where the playlist itself came from (the sender's LAN
+        // address). Scheme, port, path and query stay untouched.
+        val effective = redirectLoopback(dataSpec)
+        transferInitializing(effective)
+        currentUri = effective.uri
+        currentSpec = effective
         try {
-            val resp = openOverIpv4(dataSpec)
-            transferStarted(dataSpec)
+            val resp = openOverIpv4(effective)
+            transferStarted(effective)
             response = resp
             responseCodeInternal = resp.code
             responseHeadersInternal = resp.headers.toMultimap()
-            logResponseHeaders(resp, dataSpec.uri.toString())
+            logResponseHeaders(resp, effective.uri.toString())
             val body: ResponseBody =
                 resp.body ?: throw IOException("HTTP ${resp.code} with no body")
             bodyStream = body.byteStream()
@@ -137,9 +194,18 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
             return bytesRemaining
         } catch (e: IOException) {
             throw HttpDataSourceException.createForIOException(
-                e, dataSpec, HttpDataSourceException.TYPE_OPEN
+                e, effective, HttpDataSourceException.TYPE_OPEN
             )
         }
+    }
+
+    /** Rewrites a loopback host to the current item's origin host, if one was supplied. */
+    private fun redirectLoopback(spec: DataSpec): DataSpec {
+        val original = spec.uri.toString()
+        val rewritten = redirectLoopbackUrl(original, loopbackHost)
+        if (rewritten == original) return spec
+        DebugLog.log("DECODER", "loopback 分片改写: $original → $rewritten")
+        return spec.withUri(android.net.Uri.parse(rewritten))
     }
 
     /**
@@ -340,6 +406,10 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         private var connectTimeoutMs = 10_000
         private var readTimeoutMs = 20_000
         private var defaultRequestProperties: Map<String, String> = emptyMap()
+        private var loopbackHost: String? = null
+
+        /** Origin host of the current item; see [Ipv4HttpDataSource.loopbackHost]. */
+        fun setLoopbackHost(value: String?): Factory = apply { loopbackHost = value }
 
         fun setUserAgent(value: String?): Factory = apply { userAgent = value }
 
@@ -358,6 +428,7 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
 
         override fun createDataSource(): HttpDataSource = Ipv4HttpDataSource().apply {
             userAgent = this@Factory.userAgent
+            loopbackHost = this@Factory.loopbackHost
             allowCrossProtocolRedirects = this@Factory.allowCrossProtocolRedirects
             connectTimeout = this@Factory.connectTimeoutMs
             readTimeout = this@Factory.readTimeoutMs
