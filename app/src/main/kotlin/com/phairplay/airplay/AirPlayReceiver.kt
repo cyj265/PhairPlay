@@ -295,21 +295,43 @@ class AirPlayReceiver(
     /**
      * Called when streaming ends (TEARDOWN received or socket closed).
      *
-     * Releases media components and re-advertises so the device reappears
-     * in sender pickers immediately.
+     * Releases media components and returns to the advertising state.
+     *
+     * WHY NO mDNS RESTART HERE: the services stay registered for the whole receiver lifetime, so
+     * a "restart" is an unregister+register pair that races the just-finished registration and
+     * leaves duplicate entries behind (3 short /info probes produced 6 registrations and 0
+     * unregistrations on the p230). Re-advertising is only needed when advertising actually
+     * stopped, which [MdnsService.isAdvertising] answers.
      */
     private fun onStreamingStopped() {
         Logger.i("Streaming stopped — releasing media components")
         releaseMediaComponents()
         emitState(ProtocolState.ADVERTISING)
 
-        scope.launch {
-            try {
-                mdnsService?.restart(displayName.ifBlank { null })
-            } catch (e: Exception) {
-                Logger.e("Failed to restart mDNS after streaming", e)
+        val mdns = mdnsService
+        if (mdns != null && !mdns.isAdvertising) {
+            scope.launch {
+                try {
+                    mdns.start(displayName.ifBlank { null })
+                } catch (e: Exception) {
+                    Logger.e("Failed to re-start mDNS after streaming", e)
+                }
             }
         }
+    }
+
+    /**
+     * The Activity's render Surface just appeared. Hand it to the URL-video player, which may be
+     * holding a `/play` request until a picture target exists.
+     */
+    fun onVideoSurfaceAvailable(surface: Surface) {
+        com.phairplay.util.DebugLog.log("AIRPLAY", "接收层收到渲染面（player=${urlVideoPlayer != null}）")
+        urlVideoPlayer?.attachSurface(surface)
+    }
+
+    /** The Activity's render Surface is going away; make sure nothing keeps writing into it. */
+    fun onVideoSurfaceLost() {
+        urlVideoPlayer?.detachSurface()
     }
 
     // ─── Private: media pipeline ──────────────────────────────────────────────

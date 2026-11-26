@@ -70,6 +70,15 @@ class MdnsService(
     @Volatile
     private var isStarted = false
 
+    /**
+     * True while the two services are registered.
+     *
+     * Callers that used to call [restart] after every session (the unregister/register pair raced
+     * the previous registration and leaked duplicate NSD entries) can use this to re-advertise
+     * only when advertising actually stopped.
+     */
+    val isAdvertising: Boolean get() = isStarted
+
     // The name we requested to register — compared against the actual registered name
     // in onServiceRegistered to detect mDNS collision auto-renaming.
     @Volatile

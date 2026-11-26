@@ -28,6 +28,7 @@ import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.cast.CastReceiver
 import com.phairplay.dlna.DlnaReceiver
 import com.phairplay.miracast.MiracastReceiver
+import com.phairplay.miracast.WifiDirectManager
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.util.Logger
@@ -283,6 +284,23 @@ class PhairPlayService : Service() {
     }
 
     /**
+     * The Activity's render Surface just became valid.
+     *
+     * Pushed from [MainActivity]'s StreamingScreen callback. Receivers that already started
+     * their media pipeline against a null Surface (AirPlay URL video is the one that cannot
+     * recover on its own) re-attach here, so the picture appears instead of staying black.
+     */
+    fun onVideoSurfaceAvailable(surface: Surface) {
+        com.phairplay.util.DebugLog.log("SVC", "收到渲染面 → 转发给接收层")
+        airPlayReceiver?.onVideoSurfaceAvailable(surface)
+    }
+
+    /** The Activity's render Surface is going away — detach it before the window tears it down. */
+    fun onVideoSurfaceLost() {
+        airPlayReceiver?.onVideoSurfaceLost()
+    }
+
+    /**
      * Sends a DACP transport command (TV remote → AirPlay sender), e.g. play/pause or skip what the
      * Mac/iPhone is streaming. Bound Activities call this from media-key events. No-op if no AirPlay
      * sender has advertised a DACP identity.
@@ -342,6 +360,10 @@ class PhairPlayService : Service() {
 
             if (settings.airPlayEnabled)   startAirPlay(settings)
             if (settings.miracastEnabled)  startMiracast(settings)
+            else {
+                com.phairplay.util.DebugLog.log("SVC", "Miracast 已关闭 → 启动时清理残留 P2P 组")
+                WifiDirectManager.clearStaleGroup(this)
+            }
             if (settings.castEnabled)      startCast(settings)
             if (settings.dlnaEnabled)      startDlna(settings)
         } catch (e: Exception) {

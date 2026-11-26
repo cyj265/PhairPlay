@@ -230,6 +230,19 @@ public final class GenaNotifier {
     }
 
     /**
+     * The TIMEOUT that will actually be applied for a requested value.
+     *
+     * Callers must echo this in the SUBSCRIBE response. Answering a hardcoded
+     * "Second-1800" while the internal timer used the requested 30 s made a
+     * control point renew every 30 min against a subscription that died after
+     * 30 s — its event stream went silent mid-playback (measured: NOTIFYs
+     * stopped at 30.2 s while the header promised 1800 s).
+     */
+    public static int effectiveTimeoutSeconds(int requested) {
+        return clampTimeout(requested);
+    }
+
+    /**
      * Ported from upstream: removes subscriptions whose TIMEOUT has passed.
      * Runs on its own daemon task so a control point that vanishes without
      * UNSUBSCRIBE does not stay on the push list forever.

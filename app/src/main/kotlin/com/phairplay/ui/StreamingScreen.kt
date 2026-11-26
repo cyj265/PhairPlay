@@ -50,6 +50,19 @@ class StreamingScreen @JvmOverloads constructor(
     // The Surface is created asynchronously by SurfaceView — stored here when ready
     private var surface: Surface? = null
 
+    /**
+     * Notified on the main thread when the render Surface becomes valid.
+     *
+     * WHY A CALLBACK: consumers that hand this Surface to a media pipeline (AirPlay URL video via
+     * [android.media.MediaPlayer], Miracast, the AirPlay decoder) are started from the service
+     * thread before the SurfaceView has laid out. Polling [getSurface] once at start-up is a race
+     * they lose on a cold start — the picture never appears while the clock keeps running.
+     */
+    var onSurfaceAvailable: ((Surface) -> Unit)? = null
+
+    /** Notified on the main thread right before the render Surface is destroyed. */
+    var onSurfaceLost: (() -> Unit)? = null
+
     // Optional debug HUD (Settings → "Debug overlay"), drawn on top of the video.
     private val debugView = TextView(context).apply {
         setTextColor(Color.parseColor("#FF00FF66"))
@@ -101,6 +114,8 @@ class StreamingScreen @JvmOverloads constructor(
                 // Surface is now ready — store reference for VideoDecoder
                 surface = holder.surface
                 Logger.d("StreamingScreen: Surface created")
+                com.phairplay.util.DebugLog.log("UI", "渲染面已创建 → 通知接收层可挂载")
+                onSurfaceAvailable?.invoke(holder.surface)
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -111,6 +126,7 @@ class StreamingScreen @JvmOverloads constructor(
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 // Surface is gone (e.g., screen turned off) — VideoDecoder must stop
+                onSurfaceLost?.invoke()
                 surface = null
                 Logger.d("StreamingScreen: Surface destroyed")
             }

@@ -567,6 +567,11 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupOverlayScreens() {
         streamingScreen = StreamingScreen(this)
+        // The Surface only exists after the SurfaceView lays out, which is *after* a sender has
+        // already been told CONNECTED and the media pipeline has started. Push the moment it
+        // appears to the service instead of letting each pipeline poll a null provider.
+        streamingScreen.onSurfaceAvailable = { surface -> service?.onVideoSurfaceAvailable(surface) }
+        streamingScreen.onSurfaceLost = { service?.onVideoSurfaceLost() }
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this)
         pinScreen = PinScreen(this)

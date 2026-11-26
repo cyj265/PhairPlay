@@ -181,16 +181,19 @@ class SettingsFragment : Fragment() {
      * Sets up click and toggle listeners for all settings rows.
      * Each listener immediately persists the change via [SettingsRepository.update].
      *
-     * No "Save" button is needed — settings are saved on every interaction.
-     * A restart prompt is shown after protocol-affecting changes.
+     * No "Save" button is needed — settings are saved on every interaction. Rows whose value is
+     * only read when a receiver starts go through [saveAndRestart]; the four protocol rows must do
+     * the same, otherwise flipping "Miracast" writes a preference that nothing applies until the
+     * user happens to restart the app (measured on the p230: 8 s after switching Miracast on there
+     * was still no p2p interface and no RTSP listener, while the switch showed ON).
      */
     private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
-        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
-        setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
-        setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
-        setToggleListener(rowDlna)         { enabled -> save { it.copy(dlnaEnabled = enabled) } }
+        setToggleListener(rowAirPlay)      { enabled -> saveAndRestart { it.copy(airPlayEnabled = enabled) } }
+        setToggleListener(rowMiracast)     { enabled -> saveAndRestart { it.copy(miracastEnabled = enabled) } }
+        setToggleListener(rowCast)         { enabled -> saveAndRestart { it.copy(castEnabled = enabled) } }
+        setToggleListener(rowDlna)         { enabled -> saveAndRestart { it.copy(dlnaEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }

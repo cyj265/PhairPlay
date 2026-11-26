@@ -102,6 +102,10 @@ open class RtspHandler(
     @Volatile
     private var activeClient: Socket? = null
 
+    /** Thread serving [activeClient] (null between sessions). */
+    @Volatile
+    private var clientWorker: Thread? = null
+
     /** True while the RTSP server is accepting. `internal` so unit tests can stand it up without a socket. */
     @Volatile
     internal var running = false
@@ -182,6 +186,7 @@ open class RtspHandler(
         }
         activeClient = null
         serverSocket = null
+        clientWorker = null
         Logger.i("RTSP handler stopped")
     }
 
@@ -219,6 +224,9 @@ open class RtspHandler(
                 val clientSocket = serverSocket!!.accept()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
 
+                // Only one connection is ever *handled*: the session state (pairing, FairPlay,
+                // SDP, stream types) is per-connection and single-session by design. A second
+                // connection therefore gets an immediate 503 instead of waiting in the backlog.
                 if (activeClient != null && !activeClient!!.isClosed) {
                     Logger.w("Rejecting second client — already streaming")
                     sendServiceUnavailable(clientSocket)
@@ -227,7 +235,11 @@ open class RtspHandler(
                 }
 
                 activeClient = clientSocket
-                handleClient(clientSocket)
+                // WHY A WORKER THREAD: handleClient() blocks on read() for the whole life of the
+                // session. Running it inline stopped this loop from calling accept(), so a sender's
+                // side-channel /info probe sat unanswered until its 8 s timeout (measured on the
+                // p230), which senders read as a dead receiver. Accept must stay responsive.
+                startClientWorker(clientSocket)
             }
         } catch (e: Exception) {
             if (running) {
@@ -236,6 +248,14 @@ open class RtspHandler(
                 Logger.d("RTSP server socket closed (expected during shutdown)")
             }
         }
+    }
+
+    /** Serves one control connection on its own thread so the accept loop keeps rejecting probes fast. */
+    private fun startClientWorker(socket: Socket) {
+        val worker = Thread({ handleClient(socket) }, "AirPlay-RTSP-client")
+        worker.isDaemon = true
+        clientWorker = worker
+        worker.start()
     }
 
     private fun handleClient(socket: Socket) {
@@ -288,6 +308,8 @@ open class RtspHandler(
             Logger.i("Client disconnected")
             socket.close()
             activeClient = null
+            // Only clear the slot if it is still ours: a new connection may already have taken it.
+            if (clientWorker === Thread.currentThread()) clientWorker = null
             handleControlConnectionClosed()
         }
     }

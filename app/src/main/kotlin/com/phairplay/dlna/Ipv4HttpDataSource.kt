@@ -150,7 +150,19 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
         currentUri = effective.uri
         currentSpec = effective
         try {
-            val resp = openOverIpv4(effective)
+            var resp = openOverIpv4(effective)
+            // Strict Range-only servers answer 416 to a plain GET: media3's header rule (send Range
+            // only when position != 0 or the length is known) leaves the very first request for a
+            // whole file header-less, and such a server then refuses the cast ("6 requests, all
+            // without Range, position stuck at 0"). Retry the same request with `bytes=0-`.
+            if (resp.code == 416 && effective.position == 0L) {
+                resp.close()
+                DebugLog.log(
+                    "DECODER",
+                    "源要求 Range（无 Range 返 416）→ 以 bytes=0- 重试: ${effective.uri}"
+                )
+                resp = openOverIpv4(effective, forceRange = true)
+            }
             transferStarted(effective)
             response = resp
             responseCodeInternal = resp.code
@@ -217,11 +229,12 @@ internal class Ipv4HttpDataSource : BaseDataSource(false), HttpDataSource {
      * client — each hop is re-resolved through the same IPv4-only DNS, so no AAAA
      * address is ever dialled.
      */
-    private fun openOverIpv4(dataSpec: DataSpec): Response {
+    private fun openOverIpv4(dataSpec: DataSpec, forceRange: Boolean = false): Response {
         val client = newIpv4OkHttpClient(connectTimeout, readTimeout)
         val builder = Request.Builder().url(dataSpec.uri.toString())
-        // Range header, exactly as media3's DefaultHttpDataSource does it.
-        if (dataSpec.position != 0L || dataSpec.length != LENGTH_UNKNOWN) {
+        // Range header, exactly as media3's DefaultHttpDataSource does it — plus [forceRange] for
+        // the 416 retry path, where the server refuses to serve anything without one.
+        if (forceRange || dataSpec.position != 0L || dataSpec.length != LENGTH_UNKNOWN) {
             val range = if (dataSpec.length != LENGTH_UNKNOWN) {
                 "bytes=${dataSpec.position}-${dataSpec.position + dataSpec.length - 1}"
             } else {

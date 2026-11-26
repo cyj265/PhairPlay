@@ -318,11 +318,17 @@ class WifiDirectManager(
         }
 
         try {
-            // Flags overload is API 26; use ContextCompat so minSdk 25 doesn't crash.
+            // WHY EXPORTED: these are broadcasts sent by the system (wifi service / wpa_supplicant),
+            // not by another app. Registering them NOT_EXPORTED asks the framework to drop
+            // everything that is not this app — which is exactly what happened on the p230 ROM:
+            // STATE_CHANGED / CONNECTION_STATE_CHANGE / THIS_DEVICE_CHANGED were all refused with
+            // "requires com.phairplay.firetv.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION", so the
+            // receiver never learned that a group had formed. Android's own guidance for system
+            // broadcasts is RECEIVER_EXPORTED; the actions handled below only read state and log.
             ContextCompat.registerReceiver(
-                context, receiver, intentFilter, ContextCompat.RECEIVER_NOT_EXPORTED
+                context, receiver, intentFilter, ContextCompat.RECEIVER_EXPORTED
             )
-            Logger.i("Wi-Fi P2P broadcast receiver registered")
+            Logger.i("Wi-Fi P2P broadcast receiver registered (exported, system broadcasts)")
         } catch (e: Exception) {
             Logger.e("Failed to register Wi-Fi P2P receiver", e)
         }
@@ -388,5 +394,40 @@ class WifiDirectManager(
         WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
         WifiP2pManager.BUSY -> "BUSY"
         else -> "UNKNOWN($reason)"
+    }
+
+    companion object {
+        /**
+         * Tears down a P2P group left behind by a previous process.
+         *
+         * WHY: the group is held by wpa_supplicant, not by this app, so force-stopping the app (or
+         * a crash) leaves `p2p-wlan0-0` up with 192.168.49.1/24 for the rest of the boot — the
+         * p230 kept that interface, and PhairPlay kept advertising on it, after Miracast had been
+         * switched off and the app restarted. Removing it at start-up costs one binder call and
+         * makes "Miracast off" actually mean off.
+         */
+        fun clearStaleGroup(context: Context) {
+            val p2p = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager ?: return
+            runCatching {
+                val ch = p2p.initialize(context, Looper.getMainLooper(), null) ?: return
+                p2p.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Logger.i("启动清理：残留 P2P 组已移除")
+                    }
+
+                    override fun onFailure(reason: Int) {
+                        // No group / busy is the normal case; nothing to clean.
+                        Logger.d("启动清理：无需清理 P2P 组（${reasonLabel(reason)}）")
+                    }
+                })
+            }.onFailure { Logger.w("启动清理 P2P 组失败: ${it.message}") }
+        }
+
+        private fun reasonLabel(reason: Int): String = when (reason) {
+            WifiP2pManager.ERROR -> "ERROR"
+            WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
+            WifiP2pManager.BUSY -> "BUSY"
+            else -> "UNKNOWN($reason)"
+        }
     }
 }

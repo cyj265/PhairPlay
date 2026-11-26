@@ -179,6 +179,7 @@ public class AndroidUpnpStream implements Runnable {
                 // subscription and abort long casts).
                 String existingSid = headerValue(request, "SID");
                 int timeoutSeconds = parseTimeoutSeconds(headerValue(request, "TIMEOUT"));
+                int effectiveTimeout = GenaNotifier.effectiveTimeoutSeconds(timeoutSeconds);
                 if (existingSid != null && !existingSid.isEmpty()
                         && existingSid.equals(GenaNotifier.currentSid(service))) {
                     // Ported from upstream: renewal pushes the expiry out; a
@@ -186,7 +187,7 @@ public class AndroidUpnpStream implements Runnable {
                     GenaNotifier.renew(service, timeoutSeconds);
                     String resp = "HTTP/1.1 200 OK\r\n"
                             + "SID: " + existingSid + "\r\n"
-                            + "TIMEOUT: Second-1800\r\n"
+                            + "TIMEOUT: Second-" + effectiveTimeout + "\r\n"
                             + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                             + "CONTENT-LENGTH: 0\r\n\r\n";
                     DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 续订 sid=" + existingSid);
@@ -218,10 +219,11 @@ public class AndroidUpnpStream implements Runnable {
                 }
                 String resp = "HTTP/1.1 200 OK\r\n"
                         + "SID: " + sid + "\r\n"
-                        + "TIMEOUT: Second-1800\r\n"
+                        + "TIMEOUT: Second-" + effectiveTimeout + "\r\n"
                         + "SERVER: PhairPlay/1.0 UPnP/1.0\r\n"
                         + "CONTENT-LENGTH: 0\r\n\r\n";
-                DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 事件订阅(手动) sid=" + sid);
+                DebugLog.INSTANCE.log("HTTP", "SUBSCRIBE " + service + " -> 200 事件订阅(手动) sid=" + sid
+                        + " timeout=" + effectiveTimeout + "s");
                 socket.getOutputStream().write(resp.getBytes("UTF-8"));
                 socket.getOutputStream().flush();
                 // The initial LastChange event runs on GenaNotifier's own
