@@ -30,6 +30,13 @@ import java.util.regex.Pattern;
 public final class ManualDlnaHttp {
 
     /**
+     * Preferred TCP port for the DLNA control/descriptor server. Kept here (not
+     * in the removed jUPnP configuration class) so SSDP and the HTTP server
+     * share one source of truth.
+     */
+    public static final int CONTROL_PORT = 8899;
+
+    /**
      * This device's UPnP identity: its UDN and the URL prefix built from it.
      *
      * v122 — two changes here.

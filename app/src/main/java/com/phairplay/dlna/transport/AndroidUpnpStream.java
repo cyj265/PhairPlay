@@ -15,35 +15,23 @@ import java.util.Locale;
 import java.util.Map;
 
 import com.phairplay.util.DebugLog;
-import org.jupnp.model.message.Connection;
-import org.jupnp.model.message.StreamRequestMessage;
-import org.jupnp.model.message.StreamResponseMessage;
-import org.jupnp.model.message.UpnpHeaders;
-import org.jupnp.model.message.UpnpMessage;
-import org.jupnp.model.message.UpnpRequest;
-import org.jupnp.protocol.ProtocolFactory;
-import org.jupnp.transport.spi.UpnpStream;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.phairplay.util.Logger;
 
 /**
- * A minimal, socket-based {@link UpnpStream} implementation used by
- * {@link AndroidStreamServer}. It parses a single HTTP request from the
- * socket, hands it to the jUPnP protocol stack, and writes the response back.
+ * A minimal, socket-based HTTP request handler used by {@link AndroidStreamServer}.
+ * It parses one request, answers descriptor / SCPD / SOAP / GENA / DIAL from
+ * the project's own DLNA layer, and returns 404 for everything else.
  *
- * <p>This replaces the Jetty/servlet based transport that jUPnP ships by
- * default, so the app does not need the Jetty libraries (which would otherwise
- * surface as NoClassDefFoundError on Android and are too new to dex for the
- * minSdk 25 Fire TV flavor).</p>
+ * <p>The HTTP parser is deliberately local ([HttpRequest]): jUPnP used to own
+ * the fallback protocol dispatch, but its registry lookup returned null for
+ * the registered descriptor path, so every control request ended in 404
+ * anyway. Removing that stack removed no working behaviour.</p>
  */
-public class AndroidUpnpStream extends UpnpStream {
-
-    private static final Logger logger = LoggerFactory.getLogger(AndroidUpnpStream.class.getName());
+public class AndroidUpnpStream implements Runnable {
 
     private final Socket socket;
 
-    public AndroidUpnpStream(ProtocolFactory protocolFactory, Socket socket) {
-        super(protocolFactory);
+    public AndroidUpnpStream(Socket socket) {
         this.socket = socket;
     }
 
@@ -60,7 +48,7 @@ public class AndroidUpnpStream extends UpnpStream {
                 return;
             }
 
-            logger.trace("Processing HTTP request: {} {}", request.method, request.uri);
+            Logger.INSTANCE.d("HTTP " + request.method + " " + request.uri);
 
             // Manual DLNA layer: answer descriptor / SCPD / SOAP requests
             // directly, bypassing jUPnP's registry resource matching which
@@ -240,107 +228,36 @@ public class AndroidUpnpStream extends UpnpStream {
                 // delayed task (Windows stalls the cast without it).
                 return;
             }
-            DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 走 jUPnP");
-
-            StreamRequestMessage requestMessage = new StreamRequestMessage(
-                    UpnpRequest.Method.getByHttpName(request.method),
-                    request.uri);
-
-            if (requestMessage.getOperation().getMethod().equals(UpnpRequest.Method.UNKNOWN)) {
-                logger.trace("Method not supported by UPnP stack: {}", request.method);
-                throw new RuntimeException("Method not supported: " + request.method);
-            }
-
-            requestMessage.getOperation().setHttpMinorVersion(request.http11 ? 1 : 0);
-
-            requestMessage.setConnection(createConnection());
-
-            UpnpHeaders headers = new UpnpHeaders(request.headers);
-            requestMessage.setHeaders(headers);
-
-            if (request.body.length > 0 && requestMessage.isContentTypeMissingOrText()) {
-                requestMessage.setBodyCharacters(request.body);
-            } else if (request.body.length > 0) {
-                requestMessage.setBody(UpnpMessage.BodyType.BYTES, request.body);
-            }
-
-            StreamResponseMessage responseMessage = process(requestMessage);
-
-            if (responseMessage != null) {
-                logger.trace("Preparing HTTP response message: {}", responseMessage);
-                writeResponse(socket.getOutputStream(), responseMessage);
-            } else {
-                logger.trace("Sending HTTP response status: 404");
-                writeStatus(socket.getOutputStream(), 404, "Not Found");
-            }
-
-            responseSent(responseMessage);
+            // No jUPnP fallback: the old process() path always returned null
+            // for this registry, so a plain 404 is behaviourally identical.
+            DebugLog.INSTANCE.log("HTTP", request.method + " " + reqPath + " -> 404");
+            writeStatus(socket.getOutputStream(), 404, "Not Found");
 
         } catch (HttpRequest.RequestTooLarge tooLarge) {
             // Answered as a status instead of being logged away: the socket is
             // closed in the finally block either way, but a control point that
             // sees a clean 4xx re-issues a normal request rather than retrying
             // whatever it was dribbling.
-            logger.warn("Rejecting oversized request from {}: {}",
-                    socket.getInetAddress(), tooLarge.getMessage());
+            Logger.INSTANCE.w("Rejecting oversized request from " + socket.getInetAddress()
+                    + ": " + tooLarge.getMessage());
             try {
                 writeStatus(socket.getOutputStream(), 413, "Request Entity Too Large");
             } catch (IOException ioe) {
-                logger.trace("Couldn't send 413: {}", ioe.getMessage());
+                Logger.INSTANCE.d("Couldn't send 413: " + ioe.getMessage());
             }
         } catch (Exception e) {
-            logger.trace("Exception occurred during UPnP stream processing", e);
+            Logger.INSTANCE.e("HTTP request handling failed", e);
             try {
                 writeStatus(socket.getOutputStream(), 500, "Internal Server Error");
             } catch (IOException ioe) {
-                logger.warn("Couldn't send error response: {}", ioe.getMessage());
+                Logger.INSTANCE.w("Couldn't send error response: " + ioe.getMessage());
             }
-            responseException(e);
         } finally {
             try {
                 socket.close();
             } catch (IOException ignored) {
             }
         }
-    }
-
-    private void writeResponse(OutputStream os, StreamResponseMessage response) throws IOException {
-        int status = response.getOperation().getStatusCode();
-        String reason = response.getOperation().getStatusMessage();
-        if (reason == null || reason.isEmpty()) {
-            reason = "OK";
-        }
-
-        StringBuilder head = new StringBuilder();
-        head.append("HTTP/1.1 ").append(status).append(' ').append(reason).append("\r\n");
-
-        byte[] body = response.hasBody() ? response.getBodyBytes() : null;
-        head.append("Content-Length: ").append(body != null ? body.length : 0).append("\r\n");
-
-        Map<String, List<String>> responseHeaders = new HashMap<>();
-        if (response.getHeaders() != null) {
-            responseHeaders.putAll(response.getHeaders());
-        }
-        responseHeaders.put("Connection", java.util.Collections.singletonList("close"));
-        for (Map.Entry<String, List<String>> entry : responseHeaders.entrySet()) {
-            String name = entry.getKey();
-            if (name.equalsIgnoreCase("Content-Length") || name.equalsIgnoreCase("Connection")) {
-                continue;
-            }
-            List<String> values = entry.getValue();
-            if (values != null) {
-                for (String value : values) {
-                    head.append(name).append(": ").append(value).append("\r\n");
-                }
-            }
-        }
-        head.append("\r\n");
-
-        os.write(head.toString().getBytes("UTF-8"));
-        if (body != null && body.length > 0) {
-            os.write(body);
-        }
-        os.flush();
     }
 
     private void writeStatus(OutputStream os, int status, String reason) throws IOException {
@@ -434,25 +351,6 @@ public class AndroidUpnpStream extends UpnpStream {
         os.write(head.toString().getBytes("UTF-8"));
         os.write(body);
         os.flush();
-    }
-
-    protected Connection createConnection() {
-        return new Connection() {
-            @Override
-            public boolean isOpen() {
-                return socket.isConnected() && !socket.isClosed();
-            }
-
-            @Override
-            public InetAddress getRemoteAddress() {
-                return socket.getInetAddress();
-            }
-
-            @Override
-            public InetAddress getLocalAddress() {
-                return socket.getLocalAddress();
-            }
-        };
     }
 
     /** A minimal parsed HTTP request. */

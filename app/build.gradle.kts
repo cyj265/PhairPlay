@@ -274,16 +274,8 @@ dependencies {
     // JSON — Cast V2 control messages (Default Media Receiver protocol)
     implementation(libs.gson)
 
-    // DLNA/UPnP — jUPnP renderer stack (SSDP discovery + AVTransport control)
-    // Exclude slf4j 2.x: its ServiceLoader-based provider discovery is
-    // unreliable on Android and can surface as NoClassDefFoundError at runtime.
-    // slf4j 1.7.x + slf4j-android statically binds logging to Logcat — the
-    // configuration jUPnP's own Android demo ships with.
-    implementation(libs.jupnp) { exclude(group = "org.slf4j") }
-    implementation(libs.jupnp.support) { exclude(group = "org.slf4j") }
-    implementation(libs.jupnp.android) { exclude(group = "org.slf4j") }
-    implementation(libs.slf4j.api)
-    implementation(libs.slf4j.android)
+    // DLNA/UPnP — in-project renderer stack only (SSDP, descriptor, SCPD,
+    // SOAP, GENA, DIAL). No CDDL-licensed dependency.
 
     // Java 8 API backport for minSdk 25 (see compileOptions above)
     coreLibraryDesugaring(libs.desugar.jdk.libs)

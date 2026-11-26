@@ -27,40 +27,18 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.phairplay.dlna.renderer.DlnaAudioRenderingControl
-import com.phairplay.dlna.renderer.DlnaNoMediaPresent
 import com.phairplay.dlna.renderer.DlnaPlayerBridge
 import com.phairplay.dlna.renderer.DlnaPlayerControl
-import com.phairplay.dlna.renderer.DlnaRendererStateMachine
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.DebugLog
 import com.phairplay.util.Logger
-import org.jupnp.UpnpService
-import org.jupnp.UpnpServiceConfiguration
-import org.jupnp.UpnpServiceImpl
-import com.phairplay.dlna.transport.DlnaUpnpServiceConfiguration
+import com.phairplay.dlna.transport.AndroidStreamServer
 import com.phairplay.dlna.transport.ManualDlnaHttp
 import com.phairplay.dlna.transport.ManualSsdp
 import com.phairplay.util.NetworkUtils
 import okhttp3.Request
 import okhttp3.Response
-import org.jupnp.binding.annotations.AnnotationLocalServiceBinder
-import org.jupnp.model.meta.DeviceDetails
-import org.jupnp.model.meta.DeviceIdentity
-import org.jupnp.model.meta.LocalDevice
-import org.jupnp.model.meta.LocalService
-import org.jupnp.model.types.UDADeviceType
-import org.jupnp.model.types.UDN
-import org.jupnp.protocol.ProtocolFactory
-import org.jupnp.registry.Registry
-import org.jupnp.support.avtransport.impl.AVTransportService
-import org.jupnp.support.avtransport.lastchange.AVTransportLastChangeParser
-import org.jupnp.support.connectionmanager.ConnectionManagerService
-import org.jupnp.support.lastchange.LastChangeAwareServiceManager
-import org.jupnp.support.model.AVTransport
-import org.jupnp.support.renderingcontrol.lastchange.RenderingControlLastChangeParser
-import org.jupnp.transport.Router
-import org.jupnp.transport.RouterImpl
 import okio.Buffer
 import java.util.UUID
 
@@ -251,15 +229,6 @@ class DlnaReceiver(
         this.photoSink = photoSink
         this.onVideoStartCb = onVideoStart
         this.onPhotoStartCb = onPhotoStart
-        installCrashGuard { throwable ->
-            val where = throwable.stackTrace.firstOrNull()
-                ?.let { "${it.className}.${it.methodName}" }
-            onError(
-                "${throwable.javaClass.simpleName}: ${throwable.message}" +
-                    (where?.let { " @ $it" } ?: "")
-            )
-            mainHandler.post { report(ProtocolState.ERROR) }
-        }
     }
 
     /**
@@ -1035,17 +1004,17 @@ class DlnaReceiver(
 
     private var sourceSlowRetries = 0
 
-    private var upnpService: UpnpService? = null
+    private var httpServer: AndroidStreamServer? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var manualSsdp: ManualSsdp? = null
     /**
      * Port the DLNA control server is actually on: the preferred
-     * [DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT] unless something else
+     * [ManualDlnaHttp.CONTROL_PORT] unless something else
      * already held it, in which case the stream server took an ephemeral one and
      * the SSDP LOCATION has to say so.
      */
     @Volatile
-    private var dlnaHttpPort: Int = DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT
+    private var dlnaHttpPort: Int = ManualDlnaHttp.CONTROL_PORT
     /** Set while waiting for the box to be handed a LAN IPv4 (see [waitForIpAndStartSsdp]). */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -1613,50 +1582,24 @@ class DlnaReceiver(
                 }
             player = exoPlayer
 
-            // Build the UPnP stack in-process instead of binding the stock
-            // AndroidUpnpServiceImpl: the stock AndroidRouter registers a
-            // ConnectivityBroadcastReceiver without the RECEIVER_EXPORTED/
-            // RECEIVER_NOT_EXPORTED flag that Android 13+ requires, which makes
-            // the bound service crash on modern phones (whole-process crash).
-            // Our router keeps the same stack but skips that receiver; failures
-            // are caught below instead of killing the app.
-            val config = DlnaUpnpServiceConfiguration()
-            val service = object : UpnpServiceImpl(config) {
-                override fun createRouter(
-                    protocolFactory: ProtocolFactory,
-                    registry: Registry
-                ): Router {
-                    return SimpleAndroidRouter(configuration, protocolFactory)
-                }
-            }
-            // UpnpServiceImpl's constructor only stores the configuration — the
-            // registry/router are created by startup(). Without it, registry is
-            // null and addDevice() below would NPE.
-            service.startup()
-            upnpService = service
-            // Discovery started above, on purpose: it must not depend on jUPnP
-            // coming up. So if the control server had to give up its preferred
-            // port, tell the already-running SSDP and let it re-announce.
-            val actualPort = config.actualStreamPort
+            // Standalone HTTP server: descriptor / SCPD / SOAP / GENA / DIAL are
+            // all answered by ManualDlnaHttp + AndroidUpnpStream. The former
+            // jUPnP registry/router layer only produced 404s and carried a CDDL
+            // dependency, so it is gone. Port fallback and SSDP re-announcement
+            // are preserved exactly as before.
+            val server = AndroidStreamServer(ManualDlnaHttp.CONTROL_PORT)
+            server.start(java.net.InetAddress.getByName("0.0.0.0"))
+            httpServer = server
+            val actualPort = server.getPort()
             if (actualPort != dlnaHttpPort) {
                 dlnaHttpPort = actualPort
                 manualSsdp?.setHttpPort(actualPort)
-                DebugLog.log("DLNA", "${DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT} 已被占用 → 控制服务改用 $actualPort，SSDP 已重新宣告")
+                DebugLog.log("DLNA", "${ManualDlnaHttp.CONTROL_PORT} 已被占用 → 控制服务改用 $actualPort，SSDP 已重新宣告")
             }
-            service.registry.addDevice(createRendererDevice())
-            // Diagnostics: how many devices/resources actually landed in the
-            // registry, and the first resource path. Helps debug 404 on desc.
-            try {
-                val devCount = service.registry.localDevices.size
-                val resCount = service.registry.resources.size
-                val sample = service.registry.resources.firstOrNull()?.pathQuery
-                val diag = "dev=$devCount res=$resCount $sample"
-                lastDiagnostic = diag
-                DebugLog.registryDiag = diag
-                Logger.i("DLNA registry diag: $diag")
-            } catch (t: Throwable) {
-                Logger.w("DLNA diag failed: ${t.message}")
-            }
+            val diag = "http=$actualPort manual=descriptor,scpd,soap,gena,dial"
+            lastDiagnostic = diag
+            DebugLog.registryDiag = diag
+            Logger.i("DLNA registry diag: $diag")
             Logger.i("DLNA renderer advertising as: $displayName")
             report(ProtocolState.ADVERTISING)
         } catch (t: Throwable) {
@@ -2398,11 +2341,11 @@ class DlnaReceiver(
         manualSsdp = null
 
         try {
-            upnpService?.shutdown()
+            httpServer?.stop()
         } catch (t: Throwable) {
-            Logger.w("DLNA shutdown warning: ${t.message}")
+            Logger.w("DLNA HTTP server stop warning: ${t.message}")
         }
-        upnpService = null
+        httpServer = null
 
         try {
             multicastLock?.release()
@@ -3692,52 +3635,6 @@ class DlnaReceiver(
         mainHandler.post { onStateChanged(state) }
     }
 
-    private fun createRendererDevice(): LocalDevice {
-        // AVTransport with the DLNA state machine (NoMediaPresent → Stopped → Playing).
-        val avService: LocalService<AVTransportService<AVTransport>> =
-            AnnotationLocalServiceBinder().read(AVTransportService::class.java)
-                as LocalService<AVTransportService<AVTransport>>
-        val lastChangeParser = AVTransportLastChangeParser()
-        avService.setManager(
-            object : LastChangeAwareServiceManager<AVTransportService<AVTransport>>(avService, lastChangeParser) {
-                @Throws(Exception::class)
-                override fun createServiceInstance(): AVTransportService<AVTransport> {
-                    return AVTransportService<AVTransport>(
-                        DlnaRendererStateMachine::class.java,
-                        DlnaNoMediaPresent::class.java
-                    )
-                }
-            }
-        )
-
-        // RenderingControl (volume).
-        val renderService: LocalService<DlnaAudioRenderingControl> =
-            AnnotationLocalServiceBinder().read(DlnaAudioRenderingControl::class.java)
-                as LocalService<DlnaAudioRenderingControl>
-        renderService.setManager(
-            LastChangeAwareServiceManager<DlnaAudioRenderingControl>(
-                renderService,
-                DlnaAudioRenderingControl::class.java,
-                RenderingControlLastChangeParser()
-            )
-        )
-
-        // ConnectionManager (protocol info handshake).
-        val connService: LocalService<ConnectionManagerService> =
-            AnnotationLocalServiceBinder().read(ConnectionManagerService::class.java)
-                as LocalService<ConnectionManagerService>
-
-        return LocalDevice(
-            // Same UDN the manual SSDP/descriptor layer advertises (see
-            // ManualDlnaHttp#setIdentity) — a UUID format, since Windows/VLC
-            // reject non-UUID UDNs.
-            DeviceIdentity(UDN("uuid:" + ManualDlnaHttp.getUdn())),
-            UDADeviceType("MediaRenderer"),
-            DeviceDetails(displayName.ifBlank { "PhairPlay" }),
-            arrayOf<LocalService<*>>(avService, renderService, connService)
-        )
-    }
-
     companion object {
         /** Hard limit for a photo payload (20 MB), ported from upstream. */
         private const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -3938,58 +3835,9 @@ class DlnaReceiver(
             else -> "UNKNOWN"
         }
 
-        @Volatile
-        private var crashGuardInstalled = false
-
         /** Last registry diagnostics, shown on the DLNA card for debugging. */
         @Volatile
         var lastDiagnostic: String? = null
 
-        /**
-         * Installs a default uncaught-exception handler that intercepts crashes
-         * originating from the (old) jUPnP stack — its background threads can
-         * throw on modern Android and would otherwise take down the process.
-         * Crashes from any other code keep the platform default behaviour.
-         */
-        private fun installCrashGuard(instanceHandler: (Throwable) -> Unit) {
-            if (crashGuardInstalled) return
-            synchronized(this) {
-                if (crashGuardInstalled) return
-                val default = Thread.getDefaultUncaughtExceptionHandler()
-                Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-                    val fromJupnp = throwable.stackTrace.any {
-                        it.className.startsWith("org.jupnp")
-                    }
-                    if (fromJupnp) {
-                        Logger.e("jUPnP thread crashed (${thread.name})", throwable)
-                        Handler(Looper.getMainLooper()).post {
-                            instanceHandler(throwable)
-                        }
-                    } else {
-                        default?.uncaughtException(thread, throwable)
-                    }
-                }
-                crashGuardInstalled = true
-            }
-        }
     }
 }
-
-/**
- * Router for the DLNA renderer's UPnP stack.
- *
- * Deliberately does NOT register a ConnectivityBroadcastReceiver: the stock
- * jUPnP [org.jupnp.android.AndroidRouter] does so without the
- * RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED flag that Android 13+ (API 33+)
- * requires on dynamically registered receivers — that crashes the process on
- * modern devices. It also skips NetworkUtils.getConnectedNetworkInfo(), a
- * deprecated API that can return null on recent Android versions.
- *
- * The [DlnaReceiver] owns its own MulticastLock, so the router does not need
- * the Wi-Fi lock management either; it still handles all SSDP/UDP socket
- * binding and protocol dispatch via [RouterImpl].
- */
-private class SimpleAndroidRouter(
-    configuration: UpnpServiceConfiguration,
-    protocolFactory: ProtocolFactory
-) : RouterImpl(configuration, protocolFactory)

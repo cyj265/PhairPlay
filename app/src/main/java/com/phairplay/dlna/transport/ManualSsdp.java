@@ -31,7 +31,7 @@ import com.phairplay.util.DebugLog;
  * Hand-rolled SSDP layer for the DLNA renderer: broadcasts NOTIFY ssdp:alive
  * announcements and answers M-SEARCH discovery requests, completely bypassing
  * jUPnP's multicast/datagram stack (which is disabled in
- * {@link DlnaUpnpServiceConfiguration}).
+ * {@link ManualDlnaHttp#CONTROL_PORT}).
  *
  * <p>WHY: VLC / Windows Play-To / phone cast apps discover renderers via SSDP
  * multicast. The jUPnP registry lookup that broke for HTTP (404 on desc) could
@@ -148,8 +148,8 @@ public final class ManualSsdp {
     /** Port the DLNA HTTP control server listens on — what it really bound,
      *  passed in by {@link #start(String, int)} and corrected by
      *  {@link #setHttpPort(int)}; the constant in
-     *  {@link DlnaUpnpServiceConfiguration} is only what it asked for. */
-    private volatile int httpPort = DlnaUpnpServiceConfiguration.STREAM_LISTEN_PORT;
+     *  {@link ManualDlnaHttp#CONTROL_PORT} is only what it asked for. */
+    private volatile int httpPort = ManualDlnaHttp.CONTROL_PORT;
 
     /**
      * The LOCATION announced for one face: that face's address plus this

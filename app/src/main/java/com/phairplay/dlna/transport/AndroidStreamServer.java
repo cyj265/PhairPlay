@@ -10,40 +10,30 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import org.jupnp.transport.Router;
-import org.jupnp.transport.spi.InitializationException;
-import org.jupnp.transport.spi.StreamServer;
-import org.jupnp.transport.spi.StreamServerConfiguration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.phairplay.util.Logger;
 
 /**
- * A plain-java {@link StreamServer} backed by a {@link ServerSocket},
- * replacing the Jetty/servlet transport used by jUPnP's default configuration.
+ * A plain-java HTTP server backed by {@link ServerSocket}. It serves the DLNA
+ * descriptor / SCPD / SOAP / GENA / DIAL endpoints through
+ * {@link AndroidUpnpStream} and keeps the historical port fallback: 8899, then
+ * a few neighbours, then an ephemeral port reported through {@link #getPort()}.
  *
- * <p>Jetty 9.4 cannot be dexed for minSdk 25 (Fire TV / N1) and its
- * android compatibility surface is uncertain on modern phones; this
- * implementation only relies on {@code java.net}, which works on every
- * Android version from 7.1 (API 25) up.</p>
+ * <p>Only {@code java.net} is used so it works on every supported Android
+ * version and carries no CDDL-licensed dependency.</p>
  */
-public class AndroidStreamServer implements StreamServer<StreamServerConfiguration> {
-
-    private static final Logger logger = LoggerFactory.getLogger(AndroidStreamServer.class.getName());
-
-    private final StreamServerConfiguration configuration = new AndroidStreamServerConfiguration();
+public class AndroidStreamServer implements Runnable {
 
     private final int listenPort;
     private ServerSocket serverSocket;
-    private Router router;
     private ExecutorService executor;
     /** Set once at init; [run] must never set it again (see the stop/run race below). */
     private volatile boolean running;
     private int localPort = -1;
 
     /**
-     * @param listenPort the preferred TCP port; pass the value from
-     *                   {@link DlnaUpnpServiceConfiguration#STREAM_LISTEN_PORT}
-     *                   so the renderer keeps the address people already know.
+     * @param listenPort the preferred TCP port; pass
+     *                   {@link ManualDlnaHttp#CONTROL_PORT} so the renderer
+     *                   keeps the address people already know.
      *                   Taken? Scan a few neighbours, then bind ephemerally and
      *                   report the result through {@link #getPort()}.
      */
@@ -64,10 +54,8 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
      */
     private static final int PORT_SCAN_SPAN = 8;
 
-    @Override
-    public void init(InetAddress bindAddress, Router router) throws InitializationException {
+    public void start(InetAddress bindAddress) throws IOException {
         try {
-            this.router = router;
             serverSocket = new ServerSocket();
             serverSocket.setReuseAddress(true);
             try {
@@ -81,8 +69,8 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
                 // getPort().
                 closeQuietly(serverSocket);
                 serverSocket = bindFirstFree(bindAddress);
-                logger.warn("Port {} is busy, DLNA control server listening on {} instead",
-                        listenPort, serverSocket.getLocalPort());
+                Logger.INSTANCE.w("Port " + listenPort + " is busy, DLNA control server listening on "
+                        + serverSocket.getLocalPort() + " instead");
             }
             localPort = serverSocket.getLocalPort();
             // Bounded on purpose. A worker lives as long as the client takes to
@@ -95,14 +83,16 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
             executor = new ThreadPoolExecutor(2, 16, 30L, TimeUnit.SECONDS,
                     new LinkedBlockingQueue<Runnable>(64),
                     new ThreadPoolExecutor.CallerRunsPolicy());
-            logger.debug("AndroidStreamServer bound on {}:{}", bindAddress, localPort);
+            Logger.INSTANCE.i("AndroidStreamServer bound on " + bindAddress + ":" + localPort);
             running = true;
         } catch (IOException e) {
-            throw new InitializationException("Could not initialize AndroidStreamServer: " + e, e);
+            throw e;
         }
+        Thread acceptThread = new Thread(this, "DLNA-HTTP");
+        acceptThread.setDaemon(true);
+        acceptThread.start();
     }
 
-    @Override
     public int getPort() {
         return localPort;
     }
@@ -135,7 +125,6 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
         }
     }
 
-    @Override
     public void stop() {
         running = false;
         try {
@@ -150,11 +139,6 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
     }
 
     @Override
-    public StreamServerConfiguration getConfiguration() {
-        return configuration;
-    }
-
-    @Override
     public void run() {
         // Do NOT set running = true here. stop() flips it to false and closes the socket;
         // a run() thread that starts (or resumes) after stop() would otherwise resurrect the
@@ -164,14 +148,14 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
-                executor.execute(new AndroidUpnpStream(router.getProtocolFactory(), socket));
+                executor.execute(new AndroidUpnpStream(socket));
             } catch (IOException e) {
                 // A closed socket is terminal regardless of the flag — it covers both a
                 // normal stop() and the stale-run() race above.
                 if (!running || serverSocket == null || serverSocket.isClosed()) {
                     break;
                 }
-                logger.warn("AndroidStreamServer accept failed: {}", e.getMessage());
+                Logger.INSTANCE.w("AndroidStreamServer accept failed: " + e.getMessage());
                 // Back off: a transient failure must never turn into a busy loop either.
                 try {
                     Thread.sleep(50L);
@@ -184,7 +168,7 @@ public class AndroidStreamServer implements StreamServer<StreamServerConfigurati
                 if (!running || executor.isShutdown()) {
                     break;
                 }
-                logger.warn("AndroidStreamServer rejected a connection: {}", e.getMessage());
+                Logger.INSTANCE.w("AndroidStreamServer rejected a connection: " + e.getMessage());
             }
         }
     }

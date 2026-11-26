@@ -67,6 +67,10 @@ code was copied from them.
 
 ## Runtime dependencies
 
+The DLNA control plane (SSDP, device descriptor, SCPD, SOAP, GENA and DIAL) is
+implemented in this project under `app/src/main/java/com/phairplay/dlna/` and
+has no CDDL-licensed dependency.
+
 | Component | License |
 |-----------|---------|
 | Kotlin standard library, kotlinx.coroutines | Apache License 2.0 |
@@ -75,8 +79,6 @@ code was copied from them.
 | Bouncy Castle (`bcprov-jdk18on`) | MIT-style Bouncy Castle License |
 | Gson | Apache License 2.0 |
 | Timber | Apache License 2.0 |
-| jUPnP (Cling fork) | CDDL-1.0 |
-| SLF4J 1.7 + slf4j-android | MIT |
 | `dev.dd.plist` (dd-plist) | MIT |
 | Google Play services Cast TV (Google TV flavor only) | Android Software Development Kit License |
 
