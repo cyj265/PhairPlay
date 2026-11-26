@@ -7,7 +7,7 @@
 和 Miracast。
 
 <p align="left">
-  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="platform" src="https://img.shields.io/badge/platform-Android%207.1%2B-3ddc84">
   <img alt="kotlin" src="https://img.shields.io/badge/Kotlin-1.9-7f52ff">
   <img alt="release" src="https://img.shields.io/github/v/release/cyj265/PhairPlay?display_name=tag">
@@ -214,14 +214,20 @@ app/src/main/kotlin/com/phairplay/
 
 ## 许可与致谢
 
-本项目以 **Apache License 2.0** 发布，见 [LICENSE](LICENSE)。
+本项目以 **GNU General Public License v3.0** 发布，见 [LICENSE](LICENSE)。
+AirPlay 2 镜像的 FairPlay 解密实现来自 GPL-3.0 的 RPiPlay，回复表来自
+LGPLv2.1+ 的 shairplay，因此整个作品按 GPL-3.0 授权。
 
-部分协议的接收端参考并移植自以下 MIT 项目，代码中保留了来源注释，
-完整许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
+接收端代码移植自以下项目，代码中保留了来源注释，完整许可与署名见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
 
-- [weekdayjast/MiracastReceiver](https://github.com/weekdayjast/MiracastReceiver) — Cast V2 接收端与 Miracast WFD Sink 的移植基线
-- [vibecast](https://github.com/emilsvennesson/vibecast) — Cast V2 行为参考（早期另参考过 CastHub、openchromecast，两者原仓库现已不可访问）
-- [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — AirPlay 协议文档
-- [UxPlay](https://github.com/FDH2/UxPlay) / [RPiPlay](https://github.com/FD-/RPiPlay) — AirPlay 镜像参考实现
+- [weekdayjast/MiracastReceiver](https://github.com/weekdayjast/MiracastReceiver) — MIT，Cast V2 接收端与 Miracast WFD Sink 的移植基线
+- [RPiPlay](https://github.com/FD-/RPiPlay) — GPL-3.0，FairPlay playfair 解密实现与回复表
+- [joerg-krause/shairplay](https://github.com/joerg-krause/shairplay) — LGPLv2.1+，FairPlay v2 回复表
+
+协议行为参考（未复制代码）：[vibecast](https://github.com/emilsvennesson/vibecast)、
+[openairplay/airplay-spec](https://github.com/openairplay/airplay-spec)、
+[UxPlay](https://github.com/FDH2/UxPlay)；早期还参考过 CastHub、openchromecast，
+两者原仓库现已不可访问。
 
 感谢所有把协议细节写进文档和开源代码的人。
