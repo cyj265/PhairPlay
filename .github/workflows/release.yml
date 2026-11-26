@@ -82,9 +82,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          APK="PhairPlay-v${TAG#v}-androidtv.apk"
           PRERELEASE=""
           case "$TAG" in *-*) PRERELEASE="--prerelease" ;; esac
-          gh release create "$TAG" "PhairPlay-v${TAG#v}-androidtv.apk" \
-            --title "PhairPlay ${TAG}" \
-            --generate-notes \
-            $PRERELEASE
+          # 幂等：Release 可能已经手工创建（或上一次运行已建好），此时只覆盖资产，
+          # 不让 `gh release create` 撞名失败把整条流水线打成红的。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 覆盖上传 $APK"
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "PhairPlay ${TAG}" \
+              --generate-notes \
+              $PRERELEASE
+          fi
