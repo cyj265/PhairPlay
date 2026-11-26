@@ -36,7 +36,9 @@ local.properties
 !local.defaults.properties
 
 # Generated files
-app/src/main/assets/
+app/src/main/assets/*
+!app/src/main/assets/LICENSE.txt
+!app/src/main/assets/THIRD_PARTY_NOTICES.md
 
 # macOS
 .DS_Store
